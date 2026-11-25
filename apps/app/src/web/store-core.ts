@@ -3,13 +3,17 @@ import type {
   AgentHostId,
   AssetTradeEntry,
   ChatMessageItem,
+  JoinEmailStep,
   JoinPhoneStep,
   JoinTab,
+  LeaderboardAudienceFilter,
   LeaderboardMetric,
   LeaderboardScope,
+  LeaderboardTimeframe,
   LightweightChartPoint,
   MarketTimeRange,
   ToastTone,
+  TrendingItem,
   UiMode,
   WalletClosedPosition,
 } from "@repo/ui";
@@ -28,7 +32,10 @@ import {
 } from "./machines.vibe";
 import { type SettingsTabId, parseLocation, routeToPath, toPublicTarget } from "./routes.ts";
 import {
+  type AdminReportRow,
   type AdminStatusData,
+  type AdminUserRow,
+  type AdminWorldFactRow,
   type AppAccountEconomy,
   type AppAlphaInvite,
   type AppArticle,
@@ -47,6 +54,7 @@ import {
   type AppProfileBundle,
   type AppSkillsPayload,
   type AppWorldStatus,
+  type DeviceLookupInfo,
   type ExploreData,
   type OAuthConsentInfo,
   type PendingAction,
@@ -55,6 +63,7 @@ import {
   type ToastItem,
   type ViewerSession,
   decodeSkillHosts,
+  isRecord,
 } from "./types.ts";
 
 export const appRuntime = ManagedRuntime.make(appLayer);
@@ -76,6 +85,8 @@ export interface GlobalAccountActionTarget {
   readonly currentlyActive: boolean;
 }
 
+export type EmailVerifyStatus = "idle" | "verifying" | "needs_onboarding" | "signed_in" | "linked" | "error";
+
 export interface StoreState {
   readonly authLoaded: boolean;
   readonly viewer: ViewerSession | null;
@@ -83,6 +94,8 @@ export interface StoreState {
   readonly publicAppUrl: string;
   readonly turnstileSiteKey: string | null;
   readonly devSmsCodeEnabled: boolean;
+  readonly emailAuthEnabled: boolean;
+  readonly devEmailLinkEnabled: boolean;
   readonly route: AppRoute;
   readonly profileHandle: string | null;
   readonly activePostId: string | null;
@@ -106,9 +119,16 @@ export interface StoreState {
   readonly errorMessage: string | null;
   readonly joinSheetOpen: boolean;
   readonly joinTab: JoinTab;
+  readonly joinEmailStep: JoinEmailStep;
   readonly joinPhoneStep: JoinPhoneStep;
   readonly joinLoading: boolean;
   readonly joinError: string | null;
+  readonly pendingEmail: string;
+  readonly pendingEmailMasked: string;
+  readonly devEmailMagicLinkUrl: string | null;
+  readonly emailVerifyStatus: EmailVerifyStatus;
+  readonly emailVerifyError: string | null;
+  readonly emailVerifyRedirectTo: string | null;
   readonly pendingPhoneE164: string;
   readonly pendingOnboardingToken: string;
   readonly pendingAction: PendingAction | null;
@@ -130,6 +150,8 @@ export interface StoreState {
   readonly exploreLoading: boolean;
   readonly trendingLoading: boolean;
   readonly explore: ExploreData;
+  readonly rightRailTrending: ReadonlyArray<TrendingItem>;
+  readonly rightRailArticles: ReadonlyArray<AppArticle>;
   readonly marketsLoading: boolean;
   readonly marketsViewMode: "dashboard" | "terminal";
   readonly predictions: ReadonlyArray<AppPredictionMarket>;
@@ -149,6 +171,8 @@ export interface StoreState {
   readonly worldStatus: AppWorldStatus | null;
   readonly perpPreview: AppPerpPreview | null;
   readonly leaderboard: ReadonlyArray<AppLeaderboardEntry>;
+  readonly leaderboardAudience: LeaderboardAudienceFilter;
+  readonly leaderboardTimeframe: LeaderboardTimeframe;
   readonly leaderboardScope: LeaderboardScope;
   readonly leaderboardMetric: LeaderboardMetric;
   readonly leaderboardPage: number;
@@ -178,6 +202,10 @@ export interface StoreState {
   readonly profileBundle: AppProfileBundle | null;
   readonly profileReplies: ReadonlyArray<AppPost>;
   readonly profileRepliesLoading: boolean;
+  readonly profileLikes: ReadonlyArray<AppPost>;
+  readonly profileLikesLoading: boolean;
+  readonly profileTrades: ReadonlyArray<AssetTradeEntry>;
+  readonly profileTradesLoading: boolean;
   readonly followListKind: "followers" | "following" | null;
   readonly followListHandle: string | null;
   readonly followListItems: ReadonlyArray<AppFollowListEntry>;
@@ -190,10 +218,16 @@ export interface StoreState {
   readonly oauthConsent: OAuthConsentInfo | null;
   readonly oauthLoading: boolean;
   readonly oauthError: string | null;
+  readonly deviceLookup: DeviceLookupInfo | null;
+  readonly deviceLookupLoading: boolean;
   readonly linkStatus: string | null;
   readonly linkError: string | null;
   readonly linkLoading: boolean;
   readonly adminStatus: AdminStatusData | null;
+  readonly adminReports: ReadonlyArray<AdminReportRow>;
+  readonly adminUsers: ReadonlyArray<AdminUserRow>;
+  readonly adminFacts: ReadonlyArray<AdminWorldFactRow>;
+  readonly adminTabLoading: boolean;
   readonly adminLoading: boolean;
   readonly adminMessage: string | null;
 }
@@ -202,6 +236,53 @@ const EXPLAINER_STORAGE_KEY = "feed:explainer-dismissed";
 const THEME_STORAGE_KEY = "feed-theme";
 const WATCHLIST_STORAGE_KEY = "feed-watchlist";
 const LEGACY_FAVORITES_STORAGE_KEY = "feed:market-favorites";
+const PENDING_ACTION_STORAGE_KEY = "feed:pending-action";
+const PENDING_ACTION_TTL_MS = 20 * 60 * 1000;
+
+export function persistPendingAction(action: PendingAction | null): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (!action) {
+      localStorage.removeItem(PENDING_ACTION_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(
+      PENDING_ACTION_STORAGE_KEY,
+      JSON.stringify({ savedAt: Date.now(), action }),
+    );
+  } catch {
+    return;
+  }
+}
+
+export function readPersistedPendingAction(): PendingAction | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(PENDING_ACTION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const savedAt = typeof parsed.savedAt === "number" ? parsed.savedAt : 0;
+    if (Date.now() - savedAt > PENDING_ACTION_TTL_MS) {
+      localStorage.removeItem(PENDING_ACTION_STORAGE_KEY);
+      return null;
+    }
+    if (!isRecord(parsed.action) || typeof parsed.action.kind !== "string") return null;
+    return parsed.action as PendingAction;
+  } catch {
+    return null;
+  }
+}
+
+export function clearPersistedPendingAction(): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(PENDING_ACTION_STORAGE_KEY);
+    }
+  } catch {
+    return;
+  }
+}
 
 function readWatchlist(): ReadonlyArray<string> {
   try {
@@ -277,6 +358,8 @@ export function setThemePreference(next: ThemePreference): void {
       localStorage.setItem(THEME_STORAGE_KEY, next);
     }
   } catch {
+    applyDocumentTheme(next);
+    setStoreState({ theme: next });
     return;
   }
   applyDocumentTheme(next);
@@ -296,6 +379,34 @@ const initialLocation = typeof window !== "undefined"
   ? parseLocation(window.location.pathname, window.location.search)
   : parseLocation("/", "");
 
+let pendingInitialEmailMagicToken: string | null = initialLocation.emailMagicToken;
+let pendingInitialChatId: string | null = initialLocation.chatId;
+let spaNavDepth = 0;
+
+export function consumeInitialEmailMagicToken(): string | null {
+  const token = pendingInitialEmailMagicToken;
+  pendingInitialEmailMagicToken = null;
+  return token;
+}
+
+export function consumeInitialChatId(): string | null {
+  const id = pendingInitialChatId;
+  pendingInitialChatId = null;
+  return id;
+}
+
+export function incrementSpaNavDepth(): void {
+  spaNavDepth += 1;
+}
+
+export function decrementSpaNavDepth(): void {
+  spaNavDepth = Math.max(0, spaNavDepth - 1);
+}
+
+export function hasInternalBackHistory(): boolean {
+  return spaNavDepth > 0;
+}
+
 if (typeof window !== "undefined" && initialLocation.replaceCanonical) {
   window.history.replaceState(null, "", initialLocation.canonicalPath);
 }
@@ -307,6 +418,8 @@ let currentState: StoreState = {
   publicAppUrl: typeof window !== "undefined" ? window.location.origin : "https://feed.fun",
   turnstileSiteKey: null,
   devSmsCodeEnabled: false,
+  emailAuthEnabled: true,
+  devEmailLinkEnabled: false,
   route: initialLocation.route,
   profileHandle: initialLocation.profileHandle,
   activePostId: initialLocation.postId,
@@ -329,10 +442,17 @@ let currentState: StoreState = {
   statusMessage: null,
   errorMessage: null,
   joinSheetOpen: false,
-  joinTab: "phone",
+  joinTab: "email",
+  joinEmailStep: "entry",
   joinPhoneStep: "entry",
   joinLoading: false,
   joinError: null,
+  pendingEmail: "",
+  pendingEmailMasked: "",
+  devEmailMagicLinkUrl: null,
+  emailVerifyStatus: "idle",
+  emailVerifyError: null,
+  emailVerifyRedirectTo: null,
   pendingPhoneE164: "",
   pendingOnboardingToken: "",
   pendingAction: null,
@@ -354,6 +474,8 @@ let currentState: StoreState = {
   exploreLoading: false,
   trendingLoading: true,
   explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
+  rightRailTrending: [],
+  rightRailArticles: [],
   marketsLoading: false,
   marketsViewMode: initialLocation.marketId || initialLocation.queryTicker ? "terminal" : "dashboard",
   predictions: [],
@@ -373,6 +495,8 @@ let currentState: StoreState = {
   worldStatus: null,
   perpPreview: null,
   leaderboard: [],
+  leaderboardAudience: "traders",
+  leaderboardTimeframe: "ALL",
   leaderboardScope: "players",
   leaderboardMetric: "net_profit",
   leaderboardPage: 1,
@@ -390,7 +514,7 @@ let currentState: StoreState = {
   tradeError: null,
   chatsLoading: false,
   chats: [],
-  selectedChatId: null,
+  selectedChatId: initialLocation.chatId,
   chatMessages: [],
   alphaInvites: [],
   chatSending: false,
@@ -402,6 +526,10 @@ let currentState: StoreState = {
   profileBundle: null,
   profileReplies: [],
   profileRepliesLoading: false,
+  profileLikes: [],
+  profileLikesLoading: false,
+  profileTrades: [],
+  profileTradesLoading: false,
   followListKind: null,
   followListHandle: null,
   followListItems: [],
@@ -414,10 +542,16 @@ let currentState: StoreState = {
   oauthConsent: null,
   oauthLoading: false,
   oauthError: null,
+  deviceLookup: null,
+  deviceLookupLoading: false,
   linkStatus: null,
   linkError: null,
   linkLoading: false,
   adminStatus: null,
+  adminReports: [],
+  adminUsers: [],
+  adminFacts: [],
+  adminTabLoading: false,
   adminLoading: false,
   adminMessage: null,
 };
@@ -426,6 +560,7 @@ const listeners = new Set<() => void>();
 let pendingActionSeq = 0;
 let toastSeq = 0;
 let onAuthChangedCallback: (() => void) | null = null;
+let onNavigateCallback: ((path: string) => Promise<void>) | null = null;
 
 export function registerAuthChangedHook(fn: () => void): void {
   onAuthChangedCallback = fn;
@@ -433,6 +568,16 @@ export function registerAuthChangedHook(fn: () => void): void {
 
 export function notifyAuthChanged(): void {
   onAuthChangedCallback?.();
+}
+
+export function registerNavigateHook(fn: (path: string) => Promise<void>): void {
+  onNavigateCallback = fn;
+}
+
+export async function navigateViaHook(path: string): Promise<void> {
+  if (onNavigateCallback) {
+    await onNavigateCallback(path);
+  }
 }
 
 export function getStoreSnapshot(): StoreState {
@@ -523,6 +668,10 @@ export function toSpecTab(tab: UiFeedTab): SpecFeedTab {
   return "TabLatest";
 }
 
+export function defaultJoinTab(s: StoreState = currentState): JoinTab {
+  return s.emailAuthEnabled ? "email" : "phone";
+}
+
 export function toSpecGatedKind(action: PendingAction["kind"]) {
   switch (action) {
     case "like":
@@ -542,6 +691,7 @@ export function toSpecGatedKind(action: PendingAction["kind"]) {
       return "GatedTrade" as const;
     case "persist_mode":
     case "switch_tab":
+    case "navigate":
       return "GatedPersistMode" as const;
   }
 }
@@ -555,7 +705,8 @@ export function requireAuthOrQueue(action: PendingAction): boolean {
   setStoreState({
     pendingAction: action,
     joinSheetOpen: true,
-    joinTab: "phone",
+    joinTab: defaultJoinTab(currentState),
+    joinEmailStep: "entry",
     joinPhoneStep: "entry",
     joinError: null,
   });
@@ -571,6 +722,7 @@ export function pushBrowserRoute(
   if (typeof window !== "undefined") {
     const current = `${window.location.pathname}${window.location.search}`;
     if (current !== nextPath) {
+      incrementSpaNavDepth();
       window.history.pushState(null, "", nextPath);
     }
   }
@@ -618,7 +770,8 @@ export function openComposeDialog(quotePost: AppPost | null = null): void {
   if (!currentState.viewer) {
     setStoreState({
       joinSheetOpen: true,
-      joinTab: "phone",
+      joinTab: defaultJoinTab(currentState),
+      joinEmailStep: "entry",
       joinPhoneStep: "entry",
       joinError: null,
     });
@@ -633,7 +786,13 @@ export function closeComposeDialog(): void {
 
 export function openReportDialog(target: GlobalReportTarget): void {
   if (!currentState.viewer) {
-    setStoreState({ joinSheetOpen: true, joinTab: "phone", joinPhoneStep: "entry", joinError: null });
+    setStoreState({
+      joinSheetOpen: true,
+      joinTab: defaultJoinTab(currentState),
+      joinEmailStep: "entry",
+      joinPhoneStep: "entry",
+      joinError: null,
+    });
     return;
   }
   setStoreState({ reportTarget: target });
@@ -645,7 +804,13 @@ export function closeReportDialog(): void {
 
 export function openBlockDialog(handle: string, currentlyActive: boolean): void {
   if (!currentState.viewer) {
-    setStoreState({ joinSheetOpen: true, joinTab: "phone", joinPhoneStep: "entry", joinError: null });
+    setStoreState({
+      joinSheetOpen: true,
+      joinTab: defaultJoinTab(currentState),
+      joinEmailStep: "entry",
+      joinPhoneStep: "entry",
+      joinError: null,
+    });
     return;
   }
   setStoreState({ blockTarget: { handle, currentlyActive } });
@@ -657,7 +822,13 @@ export function closeBlockDialog(): void {
 
 export function openMuteDialog(handle: string, currentlyActive: boolean): void {
   if (!currentState.viewer) {
-    setStoreState({ joinSheetOpen: true, joinTab: "phone", joinPhoneStep: "entry", joinError: null });
+    setStoreState({
+      joinSheetOpen: true,
+      joinTab: defaultJoinTab(currentState),
+      joinEmailStep: "entry",
+      joinPhoneStep: "entry",
+      joinError: null,
+    });
     return;
   }
   setStoreState({ muteTarget: { handle, currentlyActive } });

@@ -6,10 +6,10 @@ import {
   MarketsDashboard,
   MarketsTradingTerminal,
   PostComposer,
+  Skeleton,
   SpotlightTutorial,
   type ExistingPerpPosition,
   type ExistingPredictionHolding,
-  type MarketTimeRange,
   type MarketsDashboardSelection,
   type PerpMarketRow,
   type PerpPricePoint,
@@ -25,20 +25,12 @@ import { FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppWorldStatus } from "../types.ts";
 
-const RANGE_MS: Record<MarketTimeRange, number | null> = {
-  "1H": 3_600_000,
-  "4H": 14_400_000,
-  "1D": 86_400_000,
-  "1W": 604_800_000,
-  ALL: null,
-};
-
 function WorldClockHud({ status }: { readonly status: AppWorldStatus | null }) {
   if (!status) return null;
   return (
     <div
       aria-label={`World clock: Day ${status.currentDay}, Hour ${status.currentHour}, ${status.phase}`}
-      className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1 font-mono text-xs text-muted-foreground tabular-nums"
+      className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-2.5 py-1 font-mono text-xs text-muted-foreground tabular-nums"
     >
       <span
         aria-hidden="true"
@@ -106,22 +98,38 @@ type ActiveTerminalMarket =
   | { readonly kind: "perp"; readonly data: TerminalPerpMarket }
   | { readonly kind: "prediction"; readonly data: TerminalPredictionMarket };
 
+function toDashboardPredictionStatus(raw: string): PredictionMarketRow["status"] {
+  const lower = raw.toLowerCase();
+  if (lower === "resolved") return "resolved";
+  if (lower === "cancelled") return "cancelled";
+  return "active";
+}
+
+function toTerminalPredictionStatus(raw: string): TerminalPredictionMarket["status"] {
+  const lower = raw.toLowerCase();
+  if (lower === "resolved") return "resolved";
+  if (lower === "cancelled") return "cancelled";
+  if (lower === "expired" || lower === "awaiting_proof" || lower === "manual_hold") return "expired";
+  return "active";
+}
+
+function toTerminalOutcome(raw?: "YES" | "NO" | "CANCELLED"): "yes" | "no" | null {
+  if (raw === "YES") return "yes";
+  if (raw === "NO") return "no";
+  return null;
+}
+
 function buildTerminalMarket(
   s: ReturnType<typeof useAppStore>,
-  timeRange: MarketTimeRange,
 ): ActiveTerminalMarket | null {
   if (s.marketsViewMode !== "terminal") return null;
-  const rangeMs = RANGE_MS[timeRange];
-  const latestHistMs = s.marketHistory.reduce((acc, pt) => Math.max(acc, pt.recordedAt), 0);
-  const cutoffMs = rangeMs !== null && latestHistMs > 0 ? latestHistMs - rangeMs : null;
-  const filteredHistory = s.marketHistory.filter((pt) => cutoffMs === null || pt.recordedAt >= cutoffMs);
 
   if (s.selectedMarketKind === "perp") {
-    const selectedPerp = s.perps.find((m) => m.ticker.toUpperCase() === (s.selectedMarketId ?? "").toUpperCase())
-      ?? s.perps[0]
-      ?? null;
+    const selectedPerp = s.selectedMarketId
+      ? s.perps.find((m) => m.ticker.toUpperCase() === s.selectedMarketId?.toUpperCase()) ?? null
+      : null;
     if (!selectedPerp) return null;
-    const priceHistory: PerpPricePoint[] = filteredHistory.map((pt) => ({
+    const priceHistory: PerpPricePoint[] = s.marketHistory.map((pt) => ({
       time: pt.recordedAt,
       price: (pt.markPriceCents ?? pt.priceCents) / 100,
     }));
@@ -144,9 +152,11 @@ function buildTerminalMarket(
     };
   }
 
-  const selectedPrediction = s.predictions.find((m) => m.card.id === s.selectedMarketId) ?? s.predictions[0] ?? null;
+  const selectedPrediction = s.selectedMarketId
+    ? s.predictions.find((m) => m.card.id === s.selectedMarketId) ?? null
+    : null;
   if (!selectedPrediction) return null;
-  const probabilityHistory: PredictionProbabilityPoint[] = filteredHistory.map((pt) => ({
+  const probabilityHistory: PredictionProbabilityPoint[] = s.marketHistory.map((pt) => ({
     time: pt.recordedAt,
     yesPrice: Math.min(0.99, Math.max(0.01, (pt.yesPriceBps ?? pt.priceCents * 100) / 10000)),
   }));
@@ -157,12 +167,14 @@ function buildTerminalMarket(
       question: selectedPrediction.card.question,
       category: selectedPrediction.category,
       yesOddsPct: selectedPrediction.yesPriceBps / 100,
-      yesShares: selectedPrediction.yesShares > 0 ? selectedPrediction.yesShares / 100 : 50,
-      noShares: selectedPrediction.noShares > 0 ? selectedPrediction.noShares / 100 : 50,
+      yesShares: selectedPrediction.yesShares > 0 ? selectedPrediction.yesShares / 100 : 500,
+      noShares: selectedPrediction.noShares > 0 ? selectedPrediction.noShares / 100 : 500,
       liquidityPts: selectedPrediction.liquidityCents / 100,
       endsAtLabel: selectedPrediction.card.closesIn ?? selectedPrediction.card.timeframe,
       feeBps: 10,
       maxOddsMoveBps: 2000,
+      status: toTerminalPredictionStatus(selectedPrediction.status),
+      resolvedOutcome: toTerminalOutcome(selectedPrediction.card.resolvedOutcome),
       ...(selectedPrediction.resolutionProof
         ? { resolutionCriteria: selectedPrediction.resolutionProof }
         : selectedPrediction.description
@@ -222,7 +234,6 @@ export function MarketsScreen() {
   const handleSelectMarket = (selection: MarketsDashboardSelection) => {
     if (selection.kind === "perp") {
       storeActions.selectMarket("perp", selection.ticker);
-      void storeActions.previewPerpOrder(selection.ticker, "long", 10, 5);
       return;
     }
     storeActions.selectMarket("prediction", selection.id);
@@ -249,10 +260,17 @@ export function MarketsScreen() {
     liquidityPts: m.liquidityCents / 100,
     endsAtLabel: m.card.closesIn ?? m.card.timeframe,
     ...(m.expiresAtMs > 0 ? { endsAtMs: m.expiresAtMs } : {}),
+    status: toDashboardPredictionStatus(m.status),
+    resolvedOutcome: toTerminalOutcome(m.card.resolvedOutcome),
     isFavorite: favorites.has(`prediction:${m.card.id}`),
   }));
 
-  const terminalMarket = buildTerminalMarket(s, s.marketTimeRange);
+  const terminalMarket = buildTerminalMarket(s);
+  const missingTerminalTarget =
+    s.marketsViewMode === "terminal" && !terminalMarket && !s.marketsLoading;
+  const loadingTerminalTarget =
+    s.marketsViewMode === "terminal" && !terminalMarket && s.marketsLoading;
+
   const perpServerQuote: PerpServerQuote | null =
     terminalMarket?.kind === "perp" &&
     s.perpPreview &&
@@ -296,22 +314,22 @@ export function MarketsScreen() {
               <HelpIcon className="size-4" />
             </Button>
           ) : null}
-          <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/leaderboard"); }}>
+          <Button size="sm" variant="outline" onClick={() => { void storeActions.navigate("/leaderboard"); }}>
             Leaderboard
           </Button>
           {s.viewer ? (
-            <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/wallet"); }}>
+            <Button size="sm" variant="outline" onClick={() => { void storeActions.navigate("/wallet"); }}>
               Wallet
             </Button>
           ) : (
-            <Button size="sm" shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+            <Button size="sm" onClick={() => storeActions.openJoinSheet()}>
               Claim 100 pts
             </Button>
           )}
         </div>
       </header>
 
-      <div className="flex flex-col gap-4 p-4">
+      <div className="flex flex-col">
         {terminalMarket ? (
           <MarketsTradingTerminal
             key={`${terminalMarket.kind}:${terminalMarket.kind === "perp" ? terminalMarket.data.ticker : terminalMarket.data.id}`}
@@ -338,7 +356,7 @@ export function MarketsScreen() {
             submitting={s.tradeLoading}
             orderError={s.tradeError ?? undefined}
             onOpenPerp={(order) => {
-              void storeActions.submitPerpOrder(order.ticker, order.side, order.marginPts, order.leverage);
+              void storeActions.submitPerpOrder(order.ticker, order.side, order.marginPts, order.leverage, order.mode);
             }}
             onRebalancePerp={(order) => {
               void storeActions.rebalancePerpPosition(order);
@@ -364,9 +382,21 @@ export function MarketsScreen() {
               void storeActions.navigate(`/article/${encodeURIComponent(articleId)}`);
             }}
           />
+        ) : loadingTerminalTarget ? (
+          <div className="flex flex-col gap-3 p-4">
+            <Skeleton className="h-12" />
+            <Skeleton className="h-72" />
+          </div>
+        ) : missingTerminalTarget ? (
+          <div className="p-6">
+            <EmptyState title="Market not found">
+              <Button variant="outline" onClick={storeActions.openMarketsDashboard}>
+                Back to Markets
+              </Button>
+            </EmptyState>
+          </div>
         ) : (
           <MarketsDashboard
-            key={s.perps.length > 0 ? "perps-ready" : "preds-default"}
             perpMarkets={perpRows}
             predictionMarkets={predictionRows}
             defaultTab={s.perps.length > 0 ? "perps" : "predictions"}

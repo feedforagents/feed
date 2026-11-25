@@ -59,13 +59,12 @@ function ConfirmAlertDialog({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
-            <Button variant="outline" size="sm" shape="pill">Cancel</Button>
+            <Button variant="outline" size="sm">Cancel</Button>
           </AlertDialogCancel>
           <AlertDialogAction asChild>
             <Button
               variant={confirmVariant}
               size="sm"
-              shape="pill"
               onClick={() => {
                 onConfirm();
                 onClose();
@@ -170,7 +169,6 @@ export function GlobalDialogs() {
                   key={category}
                   type="button"
                   size="sm"
-                  shape="pill"
                   variant={reportCategory === category ? "primary" : "outline"}
                   onClick={() => setReportCategory(category)}
                 >
@@ -185,10 +183,10 @@ export function GlobalDialogs() {
               onChange={(e) => setReportDetails(e.target.value)}
             />
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" shape="pill" onClick={storeActions.closeReportDialog}>
+              <Button type="button" variant="outline" size="sm" onClick={storeActions.closeReportDialog}>
                 Cancel
               </Button>
-              <Button type="submit" variant="destructive" size="sm" shape="pill" loading={reportBusy}>
+              <Button type="submit" variant="destructive" size="sm" loading={reportBusy}>
                 Submit report
               </Button>
             </div>

@@ -48,6 +48,9 @@ export interface ViewerSession {
   readonly avatarUrl: string | null;
   readonly bannerUrl: string | null;
   readonly phoneLast2: string | null;
+  readonly phoneVerifiedAt: number | null;
+  readonly emailMasked: string | null;
+  readonly emailVerifiedAt: number | null;
   readonly uiMode: "game" | "social";
   readonly balanceCents: number;
   readonly startingGrantCents: number;
@@ -63,6 +66,8 @@ export interface AuthMePayload {
   readonly publicAppUrl: string;
   readonly turnstileSiteKey: string | null;
   readonly devSmsCodeEnabled: boolean;
+  readonly emailAuthEnabled: boolean;
+  readonly devEmailLinkEnabled: boolean;
 }
 
 export interface AppFeedPage {
@@ -218,6 +223,7 @@ export interface ExploreAccountHit {
   readonly displayName: string;
   readonly bio: string;
   readonly avatarUrl: string | null;
+  readonly viewerFollows: boolean;
 }
 
 export interface ExploreActorHit {
@@ -228,6 +234,7 @@ export interface ExploreActorHit {
   readonly description: string;
   readonly avatarUrl: string | null;
   readonly isParody: boolean;
+  readonly viewerFollows: boolean;
 }
 
 export interface ExploreOrgHit {
@@ -238,6 +245,12 @@ export interface ExploreOrgHit {
   readonly description: string;
   readonly avatarUrl: string | null;
   readonly initialPriceCents: number | null;
+}
+
+export interface SearchTagResult {
+  readonly tag: string;
+  readonly kind: "hashtag" | "ticker";
+  readonly postCount: number;
 }
 
 export interface AppArticle extends ArticleItem {
@@ -255,7 +268,7 @@ export interface ExploreData {
   readonly accounts: ReadonlyArray<ExploreAccountHit>;
   readonly actors: ReadonlyArray<ExploreActorHit>;
   readonly organizations: ReadonlyArray<ExploreOrgHit>;
-  readonly tags: ReadonlyArray<string>;
+  readonly tags: ReadonlyArray<SearchTagResult>;
 }
 
 export interface AppChatMember {
@@ -296,10 +309,19 @@ export interface AppAlphaInvite {
   readonly status: string;
 }
 
+export type AppNotificationEventKind =
+  | NotificationKind
+  | "ChatMessage"
+  | "SocialRepost";
+
 export interface AppNotification {
   readonly item: NotificationItem;
+  readonly eventKind: AppNotificationEventKind;
+  readonly actorIsVerified: boolean;
   readonly postId: string | null;
   readonly marketId: string | null;
+  readonly marketKind: "perp" | "prediction" | null;
+  readonly ticker: string | null;
   readonly chatId: string | null;
   readonly inviteId: string | null;
   readonly isGameOnly: boolean;
@@ -416,6 +438,46 @@ export interface AdminHoldMarket {
   readonly expiresLabel: string;
 }
 
+export interface DeviceLookupInfo {
+  readonly userCode: string;
+  readonly clientId: string;
+  readonly clientName: string;
+  readonly scopes: ReadonlyArray<string>;
+  readonly expiresAt: number;
+}
+
+export interface AdminReportRow {
+  readonly id: string;
+  readonly reporterHandle: string;
+  readonly targetKind: string;
+  readonly targetId: string;
+  readonly reason: string;
+  readonly status: string;
+  readonly createdAtLabel: string;
+}
+
+export interface AdminUserRow {
+  readonly accountId: string;
+  readonly handle: string;
+  readonly displayName: string;
+  readonly avatarUrl: string | null;
+  readonly uiMode: "game" | "social";
+  readonly balanceCents: number;
+  readonly isAdmin: boolean;
+  readonly isReviewer: boolean;
+  readonly phoneVerifiedAt: number | null;
+  readonly emailVerifiedAt: number | null;
+  readonly emailMasked: string | null;
+  readonly createdAtLabel: string;
+}
+
+export interface AdminWorldFactRow {
+  readonly id: string;
+  readonly factText: string;
+  readonly category: string;
+  readonly createdAtLabel: string;
+}
+
 export interface AdminStatusData {
   readonly currentDay: number;
   readonly currentHour: number;
@@ -436,7 +498,8 @@ export type PendingAction =
   | { readonly kind: "trade_prediction"; readonly marketId: string; readonly action: "Buy" | "Sell"; readonly side: "yes" | "no"; readonly amountPts: number; readonly shareUnits?: number; readonly label: string }
   | { readonly kind: "trade_perp"; readonly ticker: string; readonly side: "long" | "short"; readonly marginPts: number; readonly leverage: number; readonly label: string }
   | { readonly kind: "persist_mode"; readonly mode: "game" | "social"; readonly label: string }
-  | { readonly kind: "switch_tab"; readonly tab: "latest" | "following" | "top"; readonly label: string };
+  | { readonly kind: "switch_tab"; readonly tab: "latest" | "following" | "top"; readonly label: string }
+  | { readonly kind: "navigate"; readonly path: string; readonly label: string };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -491,9 +554,10 @@ export function formatFullTimestamp(ms: number): string {
 export function formatTimeLabel(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "just now";
   const diffSec = Math.floor((Date.now() - ms) / 1000);
-  if (diffSec < 60 && diffSec >= 0) return `${Math.max(1, diffSec)}s`;
-  if (diffSec < 3600 && diffSec >= 0) return `${Math.floor(diffSec / 60)}m`;
-  if (diffSec < 86400 && diffSec >= 0) return `${Math.floor(diffSec / 3600)}h`;
+  if (diffSec <= 0) return "just now";
+  if (diffSec < 60) return `${Math.max(1, diffSec)}s`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h`;
   return new Date(ms).toISOString().slice(0, 10);
 }
 
@@ -571,6 +635,16 @@ export function decodeAgentGrant(raw: unknown): AgentGrantSummary | null {
   };
 }
 
+function optNum(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
 export function decodeViewer(raw: unknown): ViewerSession | null {
   if (!isRecord(raw)) return null;
   const accountId = optStr(raw.accountId ?? raw.account_id);
@@ -585,6 +659,9 @@ export function decodeViewer(raw: unknown): ViewerSession | null {
     avatarUrl: optStr(raw.avatarUrl ?? raw.avatar_url),
     bannerUrl: optStr(raw.bannerUrl ?? raw.banner_url),
     phoneLast2: optStr(raw.phoneLast2 ?? raw.phone_last2),
+    phoneVerifiedAt: optNum(raw.phoneVerifiedAt ?? raw.phone_verified_at),
+    emailMasked: optStr(raw.emailMasked ?? raw.email_masked),
+    emailVerifiedAt: optNum(raw.emailVerifiedAt ?? raw.email_verified_at),
     uiMode: modeRaw === "social" || modeRaw === "SocialMode" ? "social" : "game",
     balanceCents: num(raw.balanceCents ?? raw.balance_cents, 0),
     startingGrantCents: num(raw.startingGrantCents ?? raw.starting_grant_cents, 10000),
@@ -606,24 +683,103 @@ export function decodeAuthMe(raw: unknown): AuthMePayload {
     publicAppUrl: str(rec.publicAppUrl, typeof window !== "undefined" ? window.location.origin : "https://feed.fun"),
     turnstileSiteKey: optStr(rec.turnstileSiteKey),
     devSmsCodeEnabled: bool(rec.devSmsCodeEnabled, false),
+    emailAuthEnabled: bool(rec.emailAuthEnabled, true),
+    devEmailLinkEnabled: bool(rec.devEmailLinkEnabled, false),
   };
+}
+
+function decodeBadgeSparkline(raw: unknown): Array<{ time: number; yesProbability: number }> | undefined {
+  const list = arr(raw);
+  if (list.length === 0) return undefined;
+  const now = Date.now();
+  const points: Array<{ time: number; yesProbability: number }> = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const item = list[i];
+    if (typeof item === "number" && Number.isFinite(item)) {
+      const ratio = item > 1 ? item / 100 : item;
+      points.push({
+        time: now - (list.length - 1 - i) * 60_000,
+        yesProbability: Math.min(1, Math.max(0, ratio)),
+      });
+    } else if (isRecord(item)) {
+      const time = num(item.time ?? item.recordedAt ?? item.timestamp, now - (list.length - 1 - i) * 60_000);
+      const rawProb =
+        item.yesProbability !== undefined
+          ? num(item.yesProbability, 0.5)
+          : item.yesPrice !== undefined
+            ? num(item.yesPrice, 0.5)
+            : item.yesPriceBps !== undefined
+              ? num(item.yesPriceBps, 5000) / 10000
+              : num(item.value, 0.5);
+      const ratio = rawProb > 1 ? rawProb / 100 : rawProb;
+      points.push({ time, yesProbability: Math.min(1, Math.max(0, ratio)) });
+    }
+  }
+  return points.length > 0 ? points : undefined;
+}
+
+function decodeBadgeStatus(raw: unknown, resolvedFlag: boolean): "active" | "resolved" | "cancelled" {
+  const lower = str(raw, "").toLowerCase();
+  if (lower === "cancelled") return "cancelled";
+  if (lower === "resolved" || resolvedFlag) return "resolved";
+  return "active";
+}
+
+function decodeBadgeResolvedOutcome(raw: unknown): "yes" | "no" | null {
+  if (typeof raw === "boolean") return raw ? "yes" : "no";
+  const lower = str(raw, "").toLowerCase();
+  if (lower === "yes") return "yes";
+  if (lower === "no") return "no";
+  return null;
 }
 
 function decodeMarketBadge(
   badgeRaw: Record<string, unknown> | null,
   ticker: string | null,
+  postMarketId: string | null,
   showTradeEmbed: boolean,
 ): PostCardData["marketBadge"] {
   if (!showTradeEmbed) return undefined;
   if (badgeRaw) {
     const kind = optStr(badgeRaw.kind);
     if (kind === "prediction") {
-      const question = str(badgeRaw.question, "Prediction market");
-      const yesBps = num(badgeRaw.yesPriceBps, 5000);
+      const marketId = optStr(badgeRaw.marketId ?? badgeRaw.market_id) ?? postMarketId ?? undefined;
+      const question = str(badgeRaw.question ?? badgeRaw.label, "Prediction market");
+      const rawOdds =
+        typeof badgeRaw.yesPct === "number"
+          ? badgeRaw.yesPct
+          : typeof badgeRaw.oddsPct === "number"
+            ? badgeRaw.oddsPct
+            : num(badgeRaw.yesPriceBps, 5000) / 100;
+      const oddsPct = Math.min(99, Math.max(1, Math.round(rawOdds)));
+      const rawClosesAt = badgeRaw.closesAt ?? badgeRaw.closes_at ?? badgeRaw.expiresAt ?? badgeRaw.expires_at;
+      const closesAt =
+        typeof rawClosesAt === "string" && rawClosesAt.trim() !== ""
+          ? rawClosesAt
+          : typeof rawClosesAt === "number" && rawClosesAt > 0
+            ? formatCountdown(rawClosesAt)
+            : undefined;
+      const status = decodeBadgeStatus(badgeRaw.status, bool(badgeRaw.resolved, false));
+      const resolvedOutcome = decodeBadgeResolvedOutcome(badgeRaw.resolvedOutcome ?? badgeRaw.resolved_outcome);
+      const yesShares = optNum(badgeRaw.yesShares ?? badgeRaw.yes_shares);
+      const noShares = optNum(badgeRaw.noShares ?? badgeRaw.no_shares);
+      const rawVolPts = optNum(badgeRaw.volumePts ?? badgeRaw.volume_pts);
+      const rawVolCents = optNum(badgeRaw.volumeCents ?? badgeRaw.volume_cents);
+      const volumePts = rawVolPts ?? (rawVolCents !== null ? rawVolCents / 100 : null);
+      const sparkline = decodeBadgeSparkline(badgeRaw.sparkline ?? badgeRaw.history);
       return {
-        ticker: ticker ?? "PRED",
+        kind: "prediction",
+        ...(marketId ? { marketId } : {}),
+        ticker: optStr(badgeRaw.ticker) ?? ticker ?? "",
         label: question,
-        oddsPct: Math.min(99, Math.max(1, Math.round(yesBps / 100))),
+        oddsPct,
+        ...(closesAt ? { closesAt } : {}),
+        status,
+        resolvedOutcome,
+        ...(yesShares !== null && yesShares > 0 ? { yesShares } : {}),
+        ...(noShares !== null && noShares > 0 ? { noShares } : {}),
+        ...(volumePts !== null && volumePts > 0 ? { volumePts } : {}),
+        ...(sparkline ? { sparkline } : {}),
       };
     }
     if (kind === "perp") {
@@ -634,6 +790,7 @@ function decodeMarketBadge(
         ? `${str(badgeRaw.name, perpTicker)} · ${formatPts(markCents / 100)}`
         : str(badgeRaw.name, perpTicker);
       return {
+        kind: "perp",
         ticker: perpTicker,
         label,
         ...(typeof badgeRaw.changePct === "number" ? { changePct: badgeRaw.changePct } : {}),
@@ -642,6 +799,7 @@ function decodeMarketBadge(
     const badgeTicker = str(badgeRaw.ticker, ticker ?? "");
     if (badgeTicker) {
       return {
+        kind: "perp",
         ticker: badgeTicker,
         label: str(badgeRaw.label, `Trade $${badgeTicker}`),
         ...(typeof badgeRaw.oddsPct === "number" ? { oddsPct: badgeRaw.oddsPct } : {}),
@@ -651,6 +809,7 @@ function decodeMarketBadge(
   }
   if (ticker) {
     return {
+      kind: "perp",
       ticker,
       label: `Trade $${ticker}`,
     };
@@ -666,24 +825,34 @@ export function decodePost(raw: unknown, viewerAccountId?: string | null): AppPo
   const authorHandle = str(raw.authorHandle ?? raw.author_handle, "unknown");
   const authorDisplayName = str(raw.authorDisplayName ?? raw.author_display_name, authorHandle);
   const createdAtMs = num(raw.createdAt ?? raw.created_at, 0);
+  const quotePostId = optStr(raw.quotePostId ?? raw.quote_post_id);
   const quoteRaw = raw.quotePost;
   const quoteAvatar = isRecord(quoteRaw) ? optStr(quoteRaw.avatarUrl ?? quoteRaw.authorAvatarUrl) : null;
-  const quotePost = isRecord(quoteRaw) && optStr(quoteRaw.id)
+  const quotePost = isRecord(quoteRaw) && (optStr(quoteRaw.id) || bool(quoteRaw.deleted, false))
     ? {
-        id: str(quoteRaw.id),
-        authorDisplayName: str(quoteRaw.authorDisplayName ?? quoteRaw.author_display_name, str(quoteRaw.authorHandle, "user")),
-        authorHandle: str(quoteRaw.authorHandle ?? quoteRaw.author_handle, "user"),
+        id: str(quoteRaw.id, quotePostId ?? "deleted"),
+        authorDisplayName: str(quoteRaw.authorDisplayName ?? quoteRaw.author_display_name, str(quoteRaw.authorHandle, "")),
+        authorHandle: str(quoteRaw.authorHandle ?? quoteRaw.author_handle, ""),
         ...(quoteAvatar ? { authorAvatarUrl: quoteAvatar } : {}),
         isNpcParody: bool(quoteRaw.isParody ?? quoteRaw.isNpcParody, false),
         content: str(quoteRaw.content),
         ...(bool(quoteRaw.deleted, false) ? { deleted: true } : {}),
       }
-    : undefined;
+    : quotePostId
+      ? {
+          id: quotePostId,
+          authorDisplayName: "",
+          authorHandle: "",
+          isNpcParody: false,
+          content: "",
+          deleted: true,
+        }
+      : undefined;
   const marketId = optStr(raw.marketId ?? raw.market_id);
   const ticker = optStr(raw.ticker);
   const showTradeEmbed = bool(raw.showTradeEmbed, true);
   const badgeRaw = isRecord(raw.marketBadge) ? raw.marketBadge : null;
-  const marketBadge = decodeMarketBadge(badgeRaw, ticker, showTradeEmbed);
+  const marketBadge = decodeMarketBadge(badgeRaw, ticker, marketId, showTradeEmbed);
   const avatarUrl = optStr(raw.avatarUrl ?? raw.authorAvatarUrl);
   const viaClientName = optStr(raw.viaClientName ?? raw.via_client_name);
   const replyToHandle = optStr(raw.replyToHandle ?? raw.reply_to_handle);
@@ -720,6 +889,9 @@ export function decodePost(raw: unknown, viewerAccountId?: string | null): AppPo
       liked: bool(raw.likedByViewer ?? raw.liked, false),
       reposted: bool(raw.repostedByViewer ?? raw.reposted, false),
       isOwn: Boolean(viewerAccountId && authorId && viewerAccountId === authorId),
+      isFollowingAuthor: bool(raw.isFollowingAuthor ?? raw.viewerFollows ?? raw.viewerFollowsAuthor, false),
+      isMutedAuthor: bool(raw.isMutedAuthor ?? raw.viewerMutes, false),
+      isBlockedAuthor: bool(raw.isBlockedAuthor ?? raw.viewerBlocks, false),
     },
   };
 }
@@ -998,7 +1170,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
           marketLabel: str(entry.question, marketId),
           side: rawSide === "yes" ? "YES" : "NO",
           quantityLabel: `${wholeShares.toFixed(2)} shares`,
-          entryLabel: formatPts(costCents / 100),
+          entryLabel: `${Math.round(avgPricePct)}%`,
           markLabel: `${Math.round(sidePriceBps / 100)}%`,
           pnlPts: unrealizedPnlCents / 100,
         },
@@ -1151,6 +1323,7 @@ export function decodeLeaderboardEntry(entry: unknown, fallbackRank = 1): AppLea
     handle: handle ?? accountId ?? "trader",
     ...(avatarUrl ? { avatarUrl } : {}),
     isNpc: bool(entry.isNpc, false),
+    isFollowing: bool(entry.isFollowing ?? entry.viewerFollows, false),
     netProfitPts: num(entry.netProfitPts, netProfitCents / 100),
     returnPct,
     roiPct: returnPct,
@@ -1327,6 +1500,7 @@ export function decodeExplore(raw: unknown, viewerAccountId?: string | null): Ex
         displayName: str(u.displayName, handle),
         bio: str(u.bio, ""),
         avatarUrl: optStr(u.avatarUrl ?? u.avatar_url),
+        viewerFollows: bool(u.viewerFollows ?? u.isFollowing, false),
       };
     })
     .filter((u): u is ExploreAccountHit => u !== null);
@@ -1343,6 +1517,7 @@ export function decodeExplore(raw: unknown, viewerAccountId?: string | null): Ex
         description: str(a.description, ""),
         avatarUrl: optStr(a.avatarUrl ?? a.avatar_url ?? a.profileImageUrl),
         isParody: bool(a.isParody, true),
+        viewerFollows: bool(a.viewerFollows ?? a.isFollowing, false),
       };
     })
     .filter((a): a is ExploreActorHit => a !== null);
@@ -1363,7 +1538,30 @@ export function decodeExplore(raw: unknown, viewerAccountId?: string | null): Ex
     })
     .filter((o): o is ExploreOrgHit => o !== null);
 
-  const tags = arr(searchRec.tags).filter((t): t is string => typeof t === "string" && t.trim() !== "");
+  const tags = arr(searchRec.tags)
+    .map((t): SearchTagResult | null => {
+      if (typeof t === "string" && t.trim() !== "") {
+        const trimmed = t.trim();
+        const isTicker = trimmed.startsWith("$");
+        return {
+          tag: trimmed.replace(/^[#$]+/u, ""),
+          kind: isTicker ? "ticker" : "hashtag",
+          postCount: 0,
+        };
+      }
+      if (isRecord(t)) {
+        const rawTag = optStr(t.tag);
+        if (!rawTag) return null;
+        const kind: "hashtag" | "ticker" = str(t.kind, "") === "ticker" || rawTag.startsWith("$") ? "ticker" : "hashtag";
+        return {
+          tag: rawTag.replace(/^[#$]+/u, ""),
+          kind,
+          postCount: num(t.postCount ?? t.post_count, 0),
+        };
+      }
+      return null;
+    })
+    .filter((t): t is SearchTagResult => t !== null);
 
   return { trending, articles, posts, accounts, actors, organizations, tags };
 }
@@ -1485,15 +1683,17 @@ export function decodeAlphaInvites(raw: unknown): ReadonlyArray<AppAlphaInvite> 
     .filter((inv): inv is AppAlphaInvite => inv !== null && inv.status === "pending");
 }
 
-function toNotificationKind(rawKind: string): NotificationKind {
+function toNotificationEventKind(rawKind: string): AppNotificationEventKind {
   switch (rawKind) {
     case "mention":
     case "SocialMention":
       return "SocialMention";
     case "like":
-    case "repost":
     case "SocialLike":
       return "SocialLike";
+    case "repost":
+    case "SocialRepost":
+      return "SocialRepost";
     case "follow":
     case "SocialFollow":
       return "SocialFollow";
@@ -1501,16 +1701,24 @@ function toNotificationKind(rawKind: string): NotificationKind {
     case "alpha_invite":
     case "GroupInvite":
       return "GroupInvite";
+    case "chat_message":
+    case "ChatMessage":
+      return "ChatMessage";
     case "market_resolved":
     case "MarketResolved":
       return "MarketResolved";
     case "pnl_digest":
     case "PnLDigest":
       return "PnLDigest";
-    case "chat_message":
     default:
       return "SocialReply";
   }
+}
+
+function toUiNotificationKind(eventKind: AppNotificationEventKind): NotificationKind {
+  if (eventKind === "SocialRepost") return "SocialLike";
+  if (eventKind === "ChatMessage") return "SocialReply";
+  return eventKind;
 }
 
 export function decodeNotifications(raw: unknown): AppNotificationsPayload {
@@ -1520,21 +1728,45 @@ export function decodeNotifications(raw: unknown): AppNotificationsPayload {
       if (!isRecord(n)) return null;
       const id = optStr(n.id);
       if (!id) return null;
-      const kind = toNotificationKind(str(n.kind, "reply"));
+      const eventKind = toNotificationEventKind(str(n.kind, "reply"));
+      const kind = toUiNotificationKind(eventKind);
       const createdAtMs = num(n.createdAt ?? n.created_at, 0);
       const actorName = optStr(n.actorName ?? n.actor_name);
       const actorHandle = optStr(n.actorHandle ?? n.actor_handle);
       const actorAvatarUrl = optStr(n.actorAvatarUrl ?? n.actor_avatar_url);
+      const actorIsVerified = bool(n.actorIsVerified ?? n.isVerified ?? n.actorIsParody ?? n.isParody, false);
       const detail = optStr(n.body ?? n.detail);
       const inviteId = optStr(n.inviteId ?? n.invite_id);
       const chatId = optStr(n.chatId ?? n.chat_id);
+      const marketId = optStr(n.marketId ?? n.market_id);
+      const ticker = optStr(n.ticker);
+      const rawMarketKind = str(n.marketKind ?? n.market_kind, "").toLowerCase();
+      const marketKind: "perp" | "prediction" | null =
+        rawMarketKind === "perp"
+          ? "perp"
+          : rawMarketKind === "prediction"
+            ? "prediction"
+            : ticker
+              ? "perp"
+              : marketId
+                ? "prediction"
+                : null;
       const read = bool(n.isRead ?? n.read, false);
+      const inviteStatus = str(n.inviteStatus ?? n.invite_status, "").toLowerCase();
+      const invitePending =
+        typeof n.invitePending === "boolean"
+          ? n.invitePending
+          : inviteStatus === "pending";
       return {
+        eventKind,
+        actorIsVerified,
         postId: optStr(n.postId ?? n.post_id),
-        marketId: optStr(n.marketId ?? n.market_id),
+        marketId,
+        marketKind,
+        ticker,
         chatId,
         inviteId,
-        isGameOnly: bool(n.isGameOnly ?? n.is_game_only, kind === "MarketResolved" || kind === "PnLDigest"),
+        isGameOnly: bool(n.isGameOnly ?? n.is_game_only, eventKind === "MarketResolved" || eventKind === "PnLDigest"),
         item: {
           id,
           kind,
@@ -1545,7 +1777,7 @@ export function decodeNotifications(raw: unknown): AppNotificationsPayload {
           ...(actorAvatarUrl ? { actorAvatarUrl } : {}),
           timestamp: typeof n.timestamp === "string" ? n.timestamp : formatTimeLabel(createdAtMs),
           read,
-          invitePending: bool(n.invitePending, kind === "GroupInvite" && Boolean(inviteId) && !read),
+          invitePending,
         },
       };
     })
@@ -1860,4 +2092,128 @@ export function decodePnlHistory(raw: unknown): ReadonlyArray<LightweightChartPo
       return { time, value };
     })
     .filter((pt): pt is LightweightChartPoint => pt !== null);
+}
+
+export function decodeDeviceLookup(raw: unknown): DeviceLookupInfo | null {
+  if (!isRecord(raw)) return null;
+  const userCode = optStr(raw.userCode ?? raw.user_code);
+  const clientId = optStr(raw.clientId ?? raw.client_id);
+  const clientName = optStr(raw.clientName ?? raw.client_name);
+  if (!userCode && !clientName) return null;
+  const scopeRaw = raw.scopes ?? raw.scope;
+  const scopes = Array.isArray(scopeRaw)
+    ? scopeRaw.filter((s): s is string => typeof s === "string")
+    : typeof scopeRaw === "string"
+      ? scopeRaw.trim().split(/\s+/u).filter(Boolean)
+      : ["read", "social:write", "messages", "trade"];
+  return {
+    userCode: userCode ?? "",
+    clientId: clientId ?? "",
+    clientName: clientName ?? clientId ?? "AI Agent",
+    scopes,
+    expiresAt: num(raw.expiresAt ?? raw.expires_at, 0),
+  };
+}
+
+export function decodeAdminReports(raw: unknown): ReadonlyArray<AdminReportRow> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.reports ?? raw.items) : [];
+  return list
+    .map((r): AdminReportRow | null => {
+      if (!isRecord(r)) return null;
+      const id = optStr(r.id);
+      if (!id) return null;
+      const createdAtMs = num(r.createdAt ?? r.created_at, 0);
+      return {
+        id,
+        reporterHandle: str(r.reporterHandle ?? r.reporter_handle ?? r.reporterId ?? r.reporter_id, "user"),
+        targetKind: str(r.targetKind ?? r.target_kind, "post"),
+        targetId: str(r.targetId ?? r.target_id, ""),
+        reason: str(r.reason, ""),
+        status: str(r.status, "open"),
+        createdAtLabel: createdAtMs > 0 ? formatTimeLabel(createdAtMs) : "just now",
+      };
+    })
+    .filter((r): r is AdminReportRow => r !== null);
+}
+
+export function decodeAdminUsers(raw: unknown): ReadonlyArray<AdminUserRow> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.users ?? raw.items) : [];
+  return list
+    .map((u): AdminUserRow | null => {
+      if (!isRecord(u)) return null;
+      const accountId = optStr(u.accountId ?? u.account_id);
+      const handle = optStr(u.handle);
+      if (!accountId || !handle) return null;
+      const createdAtMs = num(u.createdAt ?? u.created_at, 0);
+      return {
+        accountId,
+        handle,
+        displayName: str(u.displayName ?? u.display_name, handle),
+        avatarUrl: optStr(u.avatarUrl ?? u.avatar_url),
+        uiMode: str(u.uiMode ?? u.ui_mode) === "social" ? "social" : "game",
+        balanceCents: num(u.balanceCents ?? u.balance_cents, 0),
+        isAdmin: bool(u.isAdmin ?? u.is_admin, false),
+        isReviewer: bool(u.isReviewer ?? u.is_reviewer, false),
+        phoneVerifiedAt: optNum(u.phoneVerifiedAt ?? u.phone_verified_at),
+        emailVerifiedAt: optNum(u.emailVerifiedAt ?? u.email_verified_at),
+        emailMasked: optStr(u.emailMasked ?? u.email_masked),
+        createdAtLabel: createdAtMs > 0 ? formatTimeLabel(createdAtMs) : "",
+      };
+    })
+    .filter((u): u is AdminUserRow => u !== null);
+}
+
+export function decodeAdminWorldFacts(raw: unknown): ReadonlyArray<AdminWorldFactRow> {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.facts ?? raw.items) : [];
+  return list
+    .map((f): AdminWorldFactRow | null => {
+      if (!isRecord(f)) return null;
+      const id = optStr(f.id);
+      if (!id) return null;
+      const createdAtMs = num(f.createdAt ?? f.created_at, 0);
+      return {
+        id,
+        factText: str(f.factText ?? f.fact_text, ""),
+        category: str(f.category, "markets"),
+        createdAtLabel: createdAtMs > 0 ? formatTimeLabel(createdAtMs) : "",
+      };
+    })
+    .filter((f): f is AdminWorldFactRow => f !== null);
+}
+
+export function decodeUsersSearch(raw: unknown): {
+  readonly accounts: ReadonlyArray<ExploreAccountHit>;
+  readonly actors: ReadonlyArray<ExploreActorHit>;
+} {
+  const list = Array.isArray(raw) ? raw : isRecord(raw) ? arr(raw.items ?? raw.users) : [];
+  const accounts: ExploreAccountHit[] = [];
+  const actors: ExploreActorHit[] = [];
+  for (const item of list) {
+    if (!isRecord(item)) continue;
+    const handle = optStr(item.handle ?? item.username);
+    if (!handle) continue;
+    const isNpc = bool(item.isNpc, str(item.kind) === "npc");
+    if (isNpc) {
+      actors.push({
+        id: str(item.id, handle),
+        username: handle,
+        name: str(item.displayName ?? item.name, handle),
+        tier: str(item.tier, "NPC"),
+        description: str(item.description, ""),
+        avatarUrl: optStr(item.avatarUrl ?? item.avatar_url),
+        isParody: true,
+        viewerFollows: bool(item.viewerFollows ?? item.isFollowing, false),
+      });
+    } else {
+      accounts.push({
+        accountId: str(item.id ?? item.accountId, handle),
+        handle,
+        displayName: str(item.displayName ?? item.name, handle),
+        bio: str(item.bio, ""),
+        avatarUrl: optStr(item.avatarUrl ?? item.avatar_url),
+        viewerFollows: bool(item.viewerFollows ?? item.isFollowing, false),
+      });
+    }
+  }
+  return { accounts, actors };
 }

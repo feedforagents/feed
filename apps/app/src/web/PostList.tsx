@@ -13,14 +13,14 @@ export function BackHeader({
   readonly children: ReactNode;
 }) {
   const handleBack = () => {
-    if (typeof window !== "undefined" && window.history.length > 1) {
+    if (typeof window !== "undefined" && storeActions.hasInternalBackHistory()) {
       window.history.back();
       return;
     }
     void storeActions.navigate(fallbackPath);
   };
   return (
-    <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+    <header className="sticky top-[53px] z-20 flex h-10 items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0 md:h-[53px]">
       <Button variant="ghost" size="icon" shape="pill" aria-label="Back" onClick={handleBack} className="-ml-2">
         <ArrowLeftIcon className="size-4" />
       </Button>
@@ -76,7 +76,15 @@ export function FeedPostCard({
       onSelectHandle={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
       onHashtagClick={(tag) => { void storeActions.navigate(`/trending/${encodeURIComponent(tag)}`); }}
       onSelectTag={(tag) => { void storeActions.navigate(`/trending/${encodeURIComponent(tag)}`); }}
-      onMarketClick={(ticker) => { void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`); }}
+      onMarketClick={(ticker) => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(ticker)}`); }}
+      onPredictionClick={(marketId) => { void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}`); }}
+      onQuickTrade={(marketId, side) => {
+        if (!s.viewer) {
+          storeActions.openJoinSheet();
+          return;
+        }
+        void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}?side=${encodeURIComponent(side)}`);
+      }}
       onFollowAuthor={!isOwn ? (handle) => { void storeActions.toggleFollow(handle, post.card.isFollowingAuthor); } : undefined}
       onMuteAuthor={s.viewer && !isOwn ? (handle) => storeActions.openMuteDialog(handle, Boolean(post.card.isMutedAuthor)) : undefined}
       onBlockAuthor={s.viewer && !isOwn ? (handle) => storeActions.openBlockDialog(handle, Boolean(post.card.isBlockedAuthor)) : undefined}
