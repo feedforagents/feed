@@ -722,6 +722,8 @@ effect function executePublicSocialTool(
       const kind = asOptionalString(args.kind) ?? "all"
       const limit = clampCount(asOptionalInt(args.limit), 15, 50)
       const qLower = query.toLowerCase()
+      const strippedMarketQuery = qLower.replace(/^\$+/, "").trim()
+      const marketQuery = strippedMarketQuery === "" ? qLower : strippedMarketQuery
       const world = try searchWorld({
         query,
         mode: viewer.playMode,
@@ -734,13 +736,13 @@ effect function executePublicSocialTool(
       const includeArticles = kind === "all" || kind === "articles"
       const predictionMatches = includeMarkets
         ? (try listPredictionMarkets("open"))
-            .filter((m) => m.question.toLowerCase().includes(qLower) || m.description.toLowerCase().includes(qLower) || m.category.toLowerCase().includes(qLower))
+            .filter((m) => m.question.toLowerCase().includes(marketQuery) || m.description.toLowerCase().includes(marketQuery) || m.category.toLowerCase().includes(marketQuery))
             .slice(0, limit)
             .map(formatPredictionMarketForMcp)
         : []
       const perpMatches = includeMarkets
         ? (try listPerpMarkets())
-            .filter((m) => m.ticker.toLowerCase().includes(qLower) || m.name.toLowerCase().includes(qLower))
+            .filter((m) => m.ticker.toLowerCase().includes(marketQuery) || m.name.toLowerCase().includes(marketQuery))
             .slice(0, limit)
             .map(formatPerpMarketForMcp)
         : []

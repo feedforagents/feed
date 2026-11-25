@@ -1089,3 +1089,26 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     })
   }
 }))
+
+it.effect(
+  'search "$TICKER" returns the matching prediction and perp markets (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const dollarOpen = try callMcpTool(202, "search", { query: "$OPENAGI", kind: "markets", limit: 10 }, authConfig)
+    const dollarOpenPayload = unwrapToolPayload(dollarOpen)
+    const dollarPreds = (dollarOpenPayload.predictionMarkets ?? []) as ReadonlyArray<{ readonly id: string }>
+    const dollarPerps = (dollarOpenPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>
+    const dollarNv = try callMcpTool(203, "search", { query: "$NVDAI", kind: "markets", limit: 10 }, authConfig)
+    const dollarNvPayload = unwrapToolPayload(dollarNv)
+    const dollarNvPerps = (dollarNvPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>
+    const bareDollar = try callMcpTool(204, "search", { query: "$", kind: "markets", limit: 10 }, authConfig)
+    const bareDollarPayload = unwrapToolPayload(bareDollar)
+    const bareDollarPreds = (bareDollarPayload.predictionMarkets ?? []) as ReadonlyArray<{ readonly id: string }>
+    const bareDollarPerps = (bareDollarPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>
+    try check(() => {
+      assert.strictEqual(dollarPreds.some((m) => m.id === "seed-market-1"), true)
+      assert.strictEqual(dollarPerps.some((m) => m.ticker === "OPENAGI"), true)
+      assert.strictEqual(dollarNvPerps.some((m) => m.ticker === "NVDAI"), true)
+      assert.strictEqual(bareDollarPreds.length, 1)
+      assert.strictEqual(bareDollarPerps.length, 0)
+    })
+  }))
