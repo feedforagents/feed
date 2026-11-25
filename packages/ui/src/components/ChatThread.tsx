@@ -73,8 +73,8 @@ export type ChatThreadProps = Omit<ComponentProps<"section">, "children"> & {
   isGroupOwner?: boolean;
   /** Optional member roster used for owner member removal. */
   members?: ChatMemberItem[];
-  /** Called when a non-empty message within limit is submitted. */
-  onSendMessage?: (text: string) => void;
+  /** Called when a non-empty message within limit is submitted; returning `false` or rejecting preserves the draft. */
+  onSendMessage?: (text: string) => Promise<boolean> | Promise<void> | boolean | void;
   /** Called when a reaction chip or picker emoji is toggled. */
   onReact?: (messageId: string, emoji: string) => void;
   /** Marks the thread read. */
@@ -228,10 +228,10 @@ function ChatOwnerManageBar({
           onChange={(event) => onRenameDraftChange(event.target.value)}
           placeholder="Group title"
         />
-        <Button type="submit" size="sm" shape="pill" disabled={blocked || !renameDraft.trim()}>
+        <Button type="submit" size="sm" disabled={blocked || !renameDraft.trim()}>
           Save
         </Button>
-        <Button type="button" variant="ghost" size="sm" shape="pill" disabled={blocked} onClick={onClose}>
+        <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={onClose}>
           Cancel
         </Button>
       </form>
@@ -243,7 +243,7 @@ function ChatOwnerManageBar({
     <div className="flex flex-col gap-2 border-b border-border bg-muted px-4 py-2.5">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-foreground">Remove member</span>
-        <Button type="button" variant="ghost" size="sm" shape="pill" disabled={blocked} onClick={onClose}>
+        <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={onClose}>
           Done
         </Button>
       </div>
@@ -263,7 +263,6 @@ function ChatOwnerManageBar({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  shape="pill"
                   disabled={blocked}
                   onClick={() => !blocked && onRemoveMember?.(member.accountId)}
                   className="h-6 px-2 text-xs text-destructive"
@@ -283,7 +282,7 @@ function ChatOwnerManageBar({
             placeholder="handle"
             onChange={(event) => onRemoveHandleDraftChange(event.target.value)}
           />
-          <Button type="submit" variant="destructive" size="sm" shape="pill" disabled={blocked || !removeHandleDraft.trim()}>
+          <Button type="submit" variant="destructive" size="sm" disabled={blocked || !removeHandleDraft.trim()}>
             Remove
           </Button>
         </form>
@@ -320,11 +319,12 @@ export function ChatThread({
   ...props
 }: ChatThreadProps) {
   const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
   const [managePanel, setManagePanel] = useState<"none" | "rename" | "members">("none");
   const [renameDraft, setRenameDraft] = useState(title);
   const [removeHandleDraft, setRemoveHandleDraft] = useState("");
 
-  const blocked = disabled || loading;
+  const blocked = disabled || loading || sending;
   const trimmed = draft.trim();
   const overLimit = draft.length > maxMessageChars;
   const canSend = !blocked && trimmed.length > 0 && !overLimit && Boolean(onSendMessage);
@@ -332,9 +332,32 @@ export function ChatThread({
   const showOwnerMenu = chatType === "UserGroup" && isGroupOwner && Boolean(onRenameGroup || onRemoveMember || onDeleteGroup);
 
   const commitSend = () => {
-    if (!canSend) return;
-    onSendMessage?.(trimmed);
-    setDraft("");
+    if (!canSend || !onSendMessage) return;
+    const sentText = trimmed;
+    let outcome: Promise<boolean> | Promise<void> | boolean | void;
+    try {
+      outcome = onSendMessage(sentText);
+    } catch {
+      return;
+    }
+    if (outcome !== null && typeof outcome === "object" && "then" in outcome && typeof outcome.then === "function") {
+      setSending(true);
+      void Promise.resolve(outcome).then(
+        (ok) => {
+          setSending(false);
+          if (ok !== false) {
+            setDraft((prev) => (prev.trim() === sentText ? "" : prev));
+          }
+        },
+        () => {
+          setSending(false);
+        },
+      );
+      return;
+    }
+    if (outcome !== false) {
+      setDraft("");
+    }
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -391,7 +414,7 @@ export function ChatThread({
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/85 px-4 py-3 backdrop-blur-md">
         <div className="flex min-w-0 items-center gap-2">
           {onBack ? (
-            <Button variant="ghost" size="icon" shape="pill" aria-label="Back to chats" disabled={blocked} onClick={onBack} className="-ml-1.5">
+            <Button variant="ghost" size="icon" shape="pill" aria-label="Back to chats" disabled={blocked} onClick={onBack} className="-ml-1.5 md:hidden">
               <ArrowLeft aria-hidden className="size-4" />
             </Button>
           ) : null}
@@ -411,12 +434,12 @@ export function ChatThread({
 
         <div className="flex items-center gap-2">
           {unreadCount > 0 && onMarkRead ? (
-            <Button variant="outline" size="sm" shape="pill" disabled={blocked} onClick={() => !blocked && onMarkRead()}>
+            <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onMarkRead()}>
               Mark read
             </Button>
           ) : null}
           {chatType === "UserGroup" && onInvite ? (
-            <Button variant="outline" size="sm" shape="pill" disabled={blocked} onClick={() => !blocked && onInvite()}>
+            <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onInvite()}>
               <UserPlus aria-hidden className="size-4" />
               Invite
             </Button>
@@ -460,7 +483,7 @@ export function ChatThread({
             </DropdownMenu>
           ) : null}
           {chatType !== "Direct" && onLeave ? (
-            <Button variant="ghost" size="sm" shape="pill" disabled={blocked} onClick={() => !blocked && onLeave()}>
+            <Button variant="ghost" size="sm" disabled={blocked} onClick={() => !blocked && onLeave()}>
               <LogOut aria-hidden className="size-4" />
               Leave
             </Button>
@@ -506,7 +529,7 @@ export function ChatThread({
           onKeyDown={handleKeyDown}
           className="min-h-10 max-h-32 resize-none rounded-xl bg-muted/50 py-2"
         />
-        <Button type="submit" size="sm" shape="pill" loading={loading} disabled={!canSend} aria-label="Send message" className="h-10 px-4">
+        <Button type="submit" size="sm" loading={loading || sending} disabled={!canSend} aria-label="Send message" className="h-10 px-4">
           <Send aria-hidden className="size-4" />
           Send
         </Button>

@@ -34,7 +34,7 @@ export function DialogContent({ closeLabel = "Close", className, children, ...pr
       <DialogPrimitive.Overlay className={overlay} />
       <DialogPrimitive.Content aria-describedby={undefined} className={cn(panel, className)} {...props}>
         {children}
-        <DialogPrimitive.Close aria-label={closeLabel} className={cn(focusRing, "absolute top-4 right-4 rounded-sm p-1 text-muted-foreground hover:text-foreground")}>
+        <DialogPrimitive.Close aria-label={closeLabel} className={cn(focusRing, "absolute top-4 right-4 rounded-full p-1.5 text-muted-foreground transition-colors duration-fast hover:bg-accent hover:text-foreground")}>
           <X aria-hidden className="size-4" />
         </DialogPrimitive.Close>
       </DialogPrimitive.Content>

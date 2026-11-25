@@ -33,7 +33,7 @@ export function PostCardSkeleton({ className, ...props }: SkeletonProps) {
 /** Loading skeleton mimicking a right-rail widget card. */
 export function WidgetPanelSkeleton({ className, ...props }: SkeletonProps) {
   return (
-    <div aria-hidden className={cn("flex flex-col gap-3 rounded-xl border border-border bg-card p-4", className)} {...props}>
+    <div aria-hidden className={cn("flex flex-col gap-3 border-b border-border bg-background py-3", className)} {...props}>
       <Skeleton className="h-4 w-24" />
       <div className="flex flex-col gap-2.5">
         <Skeleton className="h-3.5 w-full" />

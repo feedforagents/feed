@@ -4,7 +4,6 @@ import { Alert } from "./Alert.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardHeader } from "./Card.tsx";
 import {
   formatLeaderboardPts,
   type LeaderboardEntry,
@@ -78,9 +77,9 @@ function TraderDetailInspector({
 }) {
   if (!trader) {
     return (
-      <Card className="p-5">
+      <div className="border-t border-border bg-background p-5 xl:border-t-0 xl:border-l">
         <p className="py-8 text-center text-sm text-muted-foreground">Select a trader from the table to inspect performance.</p>
-      </Card>
+      </div>
     );
   }
 
@@ -88,8 +87,8 @@ function TraderDetailInspector({
   const roiPositive = (trader.roiPct ?? 0) >= 0;
 
   return (
-    <Card className="gap-4 p-5">
-      <CardHeader className="gap-3">
+    <div className="flex flex-col gap-4 border-t border-border bg-background p-4 text-foreground xl:border-t-0 xl:border-l xl:p-5">
+      <div className="flex flex-col gap-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <Avatar name={trader.displayName} src={trader.avatarUrl} seed={trader.handle} size="lg" />
@@ -129,7 +128,6 @@ function TraderDetailInspector({
             <Button
               variant="outline"
               size="sm"
-              shape="pill"
               disabled={disabled}
               onClick={() => onViewProfile(trader.handle, trader.accountId)}
               className="flex-1"
@@ -139,17 +137,17 @@ function TraderDetailInspector({
             </Button>
           ) : null}
         </div>
-      </CardHeader>
+      </div>
 
-      <CardContent className="gap-3">
+      <div className="flex flex-col gap-3">
         <dl className="grid grid-cols-2 gap-3">
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="rounded-lg border border-border bg-background p-3">
             <dt className="text-xs text-muted-foreground">Net Profit</dt>
             <dd className={cn("mt-1 font-mono text-sm font-bold tabular-nums", positive ? "text-ok" : "text-destructive")}>
               {formatLeaderboardPts(trader.netProfitPts, true)}
             </dd>
           </div>
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="rounded-lg border border-border bg-background p-3">
             <dt className="text-xs text-muted-foreground">ROI</dt>
             <dd
               className={cn(
@@ -160,31 +158,31 @@ function TraderDetailInspector({
               {trader.roiPct !== undefined ? `${trader.roiPct >= 0 ? "+" : ""}${trader.roiPct.toFixed(1)}%` : "—"}
             </dd>
           </div>
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="rounded-lg border border-border bg-background p-3">
             <dt className="text-xs text-muted-foreground">Equity</dt>
             <dd className="mt-1 font-mono text-sm font-semibold text-foreground tabular-nums">
               {trader.equityPts !== undefined ? formatLeaderboardPts(trader.equityPts) : "—"}
             </dd>
           </div>
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="rounded-lg border border-border bg-background p-3">
             <dt className="text-xs text-muted-foreground">Win Rate</dt>
             <dd className="mt-1 font-mono text-sm font-semibold text-foreground tabular-nums">{trader.winRatePct}%</dd>
           </div>
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="rounded-lg border border-border bg-background p-3">
             <dt className="text-xs text-muted-foreground">Trades</dt>
             <dd className="mt-1 font-mono text-sm font-semibold text-foreground tabular-nums">
               {trader.tradeCount !== undefined ? trader.tradeCount : "—"}
             </dd>
           </div>
-          <div className="rounded-lg border border-border bg-muted/30 p-3">
+          <div className="rounded-lg border border-border bg-background p-3">
             <dt className="text-xs text-muted-foreground">Volume</dt>
             <dd className="mt-1 font-mono text-sm font-semibold text-foreground tabular-nums">
               {formatLeaderboardPts(trader.volumePts)}
             </dd>
           </div>
         </dl>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -262,7 +260,7 @@ export function LeaderboardPanel({
         onValueChange={(next) => {
           if (!blocked && (next === "all" || next === "traders" || next === "npcs")) onAudienceChange(next);
         }}
-        className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background"
+        className="flex min-w-0 flex-1 flex-col bg-background"
       >
         <div className="sticky top-0 z-10 flex flex-col border-b border-border bg-background/95 backdrop-blur-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-4 pb-2">
@@ -279,7 +277,9 @@ export function LeaderboardPanel({
                     className={cn(
                       focusRing,
                       "rounded-sm px-2.5 py-1 font-mono text-xs font-medium transition-colors duration-fast",
-                      timeframe === tf ? "bg-feed-brand text-feed-brand-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                      timeframe === tf
+                        ? "bg-background text-foreground shadow-sm ring-1 ring-border"
+                        : "text-muted-foreground hover:text-foreground",
                       blocked && "pointer-events-none opacity-50",
                     )}
                   >
@@ -288,8 +288,8 @@ export function LeaderboardPanel({
                 ))}
               </div>
 
-              {viewerPosition && onJumpToMyPosition ? (
-                <Button variant="outline" size="sm" shape="pill" disabled={blocked} onClick={onJumpToMyPosition}>
+              {viewerPosition && onJumpToMyPosition && audience !== "npcs" ? (
+                <Button variant="outline" size="sm" disabled={blocked} onClick={onJumpToMyPosition}>
                   <Crosshair aria-hidden className="size-3.5" />
                   <span className="font-mono tabular-nums">#{viewerPosition.rank}</span>
                 </Button>
@@ -312,10 +312,10 @@ export function LeaderboardPanel({
           </TabsContent>
         ))}
 
-        {viewerPosition ? (
+        {viewerPosition && audience !== "npcs" ? (
           <div
             aria-label="Your position"
-            className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card/95 px-4 py-3 backdrop-blur-sm"
+            className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background/95 px-4 py-3 backdrop-blur-sm"
           >
             <div className="flex items-center gap-2.5">
               <Badge variant="info">Your position</Badge>

@@ -1,5 +1,5 @@
 import { type FormEvent, type ReactNode, useId, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ExternalLink, MailCheck } from "lucide-react";
 import { cn, focusRing } from "../lib/cn.ts";
 import { type AgentHostId, type AgentHostLauncher, defaultAgentLaunchers, defaultSkillPrompt } from "../lib/hosts.ts";
 import { useTurnstileContainerRef } from "../lib/turnstile.ts";
@@ -14,8 +14,11 @@ import { Label } from "./Label.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./Select.tsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./Tabs.tsx";
 
-export type JoinTab = "phone" | "agent" | "reviewer";
+export type JoinTab = "email" | "phone" | "agent" | "reviewer";
+export type JoinEmailStep = "entry" | "sent" | "profile";
 export type JoinPhoneStep = "entry" | "verify" | "profile";
+
+type AsyncActionResult = Promise<boolean> | Promise<void> | boolean | void;
 
 export type JoinSheetProps = {
   /** Controlled open state of the modal dialog. */
@@ -26,10 +29,30 @@ export type JoinSheetProps = {
   onOpenChange?: (open: boolean) => void;
   /** Optional custom trigger element rendered inside `DialogTrigger` when provided. */
   trigger?: ReactNode;
-  /** Active onboarding door tab (`phone`, `agent`, or `reviewer`). */
+  /** Shows the Email Magic Link tab alongside Phone and Connect Agent (defaults to `true`). */
+  emailAuthEnabled?: boolean;
+  /** Active onboarding door tab (`email`, `phone`, `agent`, or `reviewer`). */
   activeTab?: JoinTab;
   /** Called when the user switches tabs. */
   onTabChange?: (tab: JoinTab) => void;
+  /** Current sub-step inside the email magic link door (`entry`, `sent`, or `profile`). */
+  emailStep?: JoinEmailStep;
+  /** Called when the email sub-step transitions. */
+  onEmailStepChange?: (step: JoinEmailStep) => void;
+  /** Masked email address shown on the "Check your inbox" step (e.g. `a***@example.com`). */
+  pendingEmailMasked?: string;
+  /** Fallback email address shown on the "Check your inbox" step when `pendingEmailMasked` is omitted. */
+  pendingEmail?: string;
+  /** Shows a 1-click "Open dev magic link" helper on the email sent step when in localnet/loopback mode. */
+  devEmailLinkEnabled?: boolean;
+  /** Localnet/loopback magic link URL opened by the dev helper button. */
+  devEmailMagicLinkUrl?: string;
+  /** Invoked when the user clicks "Open dev magic link". */
+  onOpenDevMagicLink?: (url?: string) => void;
+  /** Requests an email magic link for the entered address. */
+  onRequestEmailMagicLink?: (payload: { email: string; turnstileToken?: string }) => AsyncActionResult;
+  /** Re-requests the email magic link for the pending email address. */
+  onResendEmailMagicLink?: () => AsyncActionResult;
   /** Current sub-step inside the phone SMS door (`entry`, `verify`, or `profile`). */
   phoneStep?: JoinPhoneStep;
   /** Called when the phone sub-step transitions. */
@@ -40,7 +63,7 @@ export type JoinSheetProps = {
   skillPrompt?: string;
   /** One-click agent launchers rendered in the Connect Your Agent tab. */
   launchers?: AgentHostLauncher[];
-  /** Optional Cloudflare Turnstile site key; renders a security challenge on phone entry when set. */
+  /** Optional Cloudflare Turnstile site key; renders a security challenge on email and phone entry when set. */
   turnstileSiteKey?: string;
   /** Optional local development SMS code surfaced as a quick-fill helper on the verify step. */
   devSmsCode?: string;
@@ -49,9 +72,9 @@ export type JoinSheetProps = {
   /** Fetches or fills the localnet/loopback SMS code; returning a 6-digit string populates the input automatically. */
   onFillDevCode?: (phone: string) => Promise<string | null | undefined> | string | null | undefined | void;
   /** Requests a 6-digit SMS code for an allowlisted non-VoIP phone number. */
-  onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => void;
+  onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => AsyncActionResult;
   /** Verifies the 6-digit SMS autofill code. */
-  onVerifySmsCode?: (code: string) => void;
+  onVerifySmsCode?: (code: string) => AsyncActionResult;
   /** Re-requests the SMS verification code. */
   onResendSmsCode?: () => void;
   /** Completes new-account profile with username, 18+ confirmation, and terms acceptance for 100 pts. */
@@ -79,6 +102,36 @@ const countryAllowlist = [
   { code: "NZ", label: "New Zealand (+64)" },
   { code: "EU", label: "EU / EEA" },
 ];
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return value !== null && typeof value === "object" && "then" in value && typeof value.then === "function";
+}
+
+function runAndAdvanceOnSuccess(action: () => AsyncActionResult, onSuccess: () => void): void {
+  let result: AsyncActionResult;
+  try {
+    result = action();
+  } catch {
+    return;
+  }
+  if (isThenable(result)) {
+    void Promise.resolve(result).then(
+      (ok) => {
+        if (ok !== false) onSuccess();
+      },
+      () => undefined,
+    );
+    return;
+  }
+  if (result !== false) onSuccess();
+}
+
+function maskEmailPreview(email: string): string {
+  const trimmed = email.trim().toLowerCase();
+  const at = trimmed.indexOf("@");
+  if (at <= 0) return trimmed;
+  return `${trimmed[0]}***${trimmed.slice(at)}`;
+}
 
 function JoinTermsLabel({
   termsId,
@@ -121,8 +174,210 @@ function JoinTermsLabel({
   );
 }
 
+function JoinProfileForm({
+  blocked,
+  loading,
+  onCompleteProfile,
+}: {
+  readonly blocked: boolean;
+  readonly loading: boolean;
+  readonly onCompleteProfile?: (payload: { username: string; ageConfirmed: boolean; acceptedTerms: boolean }) => void;
+}) {
+  const usernameId = useId();
+  const ageId = useId();
+  const termsId = useId();
+
+  const [username, setUsername] = useState("");
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (blocked || !username.trim() || !ageConfirmed || !acceptedTerms) return;
+    onCompleteProfile?.({ username: username.trim(), ageConfirmed, acceptedTerms });
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor={usernameId}>Username</Label>
+        <Input
+          id={usernameId}
+          placeholder="alice"
+          value={username}
+          disabled={blocked}
+          onChange={(event) => setUsername(event.target.value)}
+        />
+      </div>
+      <Label htmlFor={ageId} className={cn("font-normal")}>
+        <Checkbox id={ageId} checked={ageConfirmed} disabled={blocked} onCheckedChange={(checked) => setAgeConfirmed(checked === true)} />
+        I confirm I am at least 18 years old
+      </Label>
+      <JoinTermsLabel
+        termsId={termsId}
+        acceptedTerms={acceptedTerms}
+        blocked={blocked}
+        onAcceptedChange={setAcceptedTerms}
+      />
+      <Button type="submit" loading={loading} disabled={blocked || !username.trim() || !ageConfirmed || !acceptedTerms}>
+        Claim 100 pts & enter
+      </Button>
+    </form>
+  );
+}
+
+function JoinEmailDoor({
+  step,
+  isStepControlled,
+  blocked,
+  loading,
+  turnstileSiteKey,
+  pendingEmailMasked,
+  pendingEmail,
+  devEmailLinkEnabled,
+  devEmailMagicLinkUrl,
+  onOpenDevMagicLink,
+  onStepChange,
+  onRequestEmailMagicLink,
+  onResendEmailMagicLink,
+  onCompleteProfile,
+}: {
+  readonly step: JoinEmailStep;
+  readonly isStepControlled: boolean;
+  readonly blocked: boolean;
+  readonly loading: boolean;
+  readonly turnstileSiteKey?: string;
+  readonly pendingEmailMasked?: string;
+  readonly pendingEmail?: string;
+  readonly devEmailLinkEnabled?: boolean;
+  readonly devEmailMagicLinkUrl?: string;
+  readonly onOpenDevMagicLink?: (url?: string) => void;
+  readonly onStepChange: (next: JoinEmailStep) => void;
+  readonly onRequestEmailMagicLink?: (payload: { email: string; turnstileToken?: string }) => AsyncActionResult;
+  readonly onResendEmailMagicLink?: () => AsyncActionResult;
+  readonly onCompleteProfile?: (payload: { username: string; ageConfirmed: boolean; acceptedTerms: boolean }) => void;
+}) {
+  const emailId = useId();
+  const [email, setEmail] = useState(pendingEmail ?? "");
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const activeTurnstileKey = turnstileSiteKey?.trim() || undefined;
+  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
+
+  const trimmedEmail = email.trim();
+  const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(trimmedEmail);
+
+  const handleRequestLink = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (blocked || !validEmail) return;
+    if (activeTurnstileKey && !turnstileToken) return;
+    const token = turnstileToken ?? undefined;
+    setTurnstileToken(null);
+    setTurnstileResetKey((n) => n + 1);
+    runAndAdvanceOnSuccess(
+      () => onRequestEmailMagicLink?.({ email: trimmedEmail, ...(token ? { turnstileToken: token } : {}) }),
+      () => {
+        if (!isStepControlled) onStepChange("sent");
+      },
+    );
+  };
+
+  if (step === "entry") {
+    return (
+      <form onSubmit={handleRequestLink} className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={emailId}>Email address</Label>
+          <Input
+            id={emailId}
+            type="email"
+            autoComplete="email"
+            placeholder="you@example.com"
+            value={email}
+            disabled={blocked}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </div>
+        {activeTurnstileKey ? (
+          <div
+            key={`${activeTurnstileKey}:${turnstileResetKey}`}
+            ref={turnstileRef}
+            aria-label="Security verification"
+            className="min-h-16"
+          />
+        ) : null}
+        <Button type="submit" loading={loading} disabled={blocked || !validEmail || (Boolean(activeTurnstileKey) && !turnstileToken)}>
+          Send magic link
+        </Button>
+      </form>
+    );
+  }
+
+  if (step === "sent") {
+    const displayTarget = pendingEmailMasked || (pendingEmail ? maskEmailPreview(pendingEmail) : trimmedEmail ? maskEmailPreview(trimmedEmail) : "your inbox");
+    const showDevLink = Boolean(devEmailLinkEnabled && (devEmailMagicLinkUrl || onOpenDevMagicLink));
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 p-3.5">
+          <MailCheck aria-hidden className="mt-0.5 size-5 shrink-0 text-primary" />
+          <div className="flex min-w-0 flex-col gap-1">
+            <h3 className="text-sm font-semibold text-foreground">Check your inbox</h3>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              We sent a sign-in link to <span className="font-mono font-medium text-foreground">{displayTarget}</span> — expires in 15 minutes.
+            </p>
+          </div>
+        </div>
+
+        {showDevLink ? (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={blocked}
+            onClick={() => {
+              if (onOpenDevMagicLink) {
+                onOpenDevMagicLink(devEmailMagicLinkUrl);
+              } else if (devEmailMagicLinkUrl && typeof window !== "undefined") {
+                window.location.assign(devEmailMagicLinkUrl);
+              }
+            }}
+            className="w-full"
+          >
+            <ExternalLink aria-hidden className="size-4" />
+            Open dev magic link
+          </Button>
+        ) : null}
+
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            disabled={blocked}
+            onClick={() => onStepChange("entry")}
+            className={cn(focusRing, "inline-flex items-center gap-1 rounded-sm text-xs font-medium text-muted-foreground hover:text-foreground")}
+          >
+            <ArrowLeft aria-hidden className="size-3.5" />
+            Use a different email
+          </button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={blocked}
+            onClick={() => {
+              void onResendEmailMagicLink?.();
+            }}
+          >
+            Resend link
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return <JoinProfileForm blocked={blocked} loading={loading} onCompleteProfile={onCompleteProfile} />;
+}
+
 function JoinPhoneDoor({
   step,
+  isStepControlled,
   blocked,
   loading,
   turnstileSiteKey,
@@ -136,6 +391,7 @@ function JoinPhoneDoor({
   onCompleteProfile,
 }: {
   readonly step: JoinPhoneStep;
+  readonly isStepControlled: boolean;
   readonly blocked: boolean;
   readonly loading: boolean;
   readonly turnstileSiteKey?: string;
@@ -143,24 +399,18 @@ function JoinPhoneDoor({
   readonly devSmsCodeEnabled?: boolean;
   readonly onFillDevCode?: (phone: string) => Promise<string | null | undefined> | string | null | undefined | void;
   readonly onStepChange: (next: JoinPhoneStep) => void;
-  readonly onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => void;
-  readonly onVerifySmsCode?: (code: string) => void;
+  readonly onRequestSmsCode?: (payload: { country: string; phone: string; turnstileToken?: string }) => AsyncActionResult;
+  readonly onVerifySmsCode?: (code: string) => AsyncActionResult;
   readonly onResendSmsCode?: () => void;
   readonly onCompleteProfile?: (payload: { username: string; ageConfirmed: boolean; acceptedTerms: boolean }) => void;
 }) {
   const countryId = useId();
   const phoneId = useId();
   const codeId = useId();
-  const usernameId = useId();
-  const ageId = useId();
-  const termsId = useId();
 
   const [country, setCountry] = useState("US");
   const [phone, setPhone] = useState("");
   const [smsCode, setSmsCode] = useState("");
-  const [username, setUsername] = useState("");
-  const [ageConfirmed, setAgeConfirmed] = useState(false);
-  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileResetKey, setTurnstileResetKey] = useState(0);
   const activeTurnstileKey = turnstileSiteKey?.trim() || undefined;
@@ -173,15 +423,23 @@ function JoinPhoneDoor({
     const token = turnstileToken ?? undefined;
     setTurnstileToken(null);
     setTurnstileResetKey((n) => n + 1);
-    onRequestSmsCode?.({ country, phone: phone.trim(), ...(token ? { turnstileToken: token } : {}) });
-    onStepChange("verify");
+    runAndAdvanceOnSuccess(
+      () => onRequestSmsCode?.({ country, phone: phone.trim(), ...(token ? { turnstileToken: token } : {}) }),
+      () => {
+        if (!isStepControlled) onStepChange("verify");
+      },
+    );
   };
 
   const handleVerifyCode = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (blocked || smsCode.trim().length !== 6) return;
-    onVerifySmsCode?.(smsCode.trim());
-    onStepChange("profile");
+    runAndAdvanceOnSuccess(
+      () => onVerifySmsCode?.(smsCode.trim()),
+      () => {
+        if (!isStepControlled) onStepChange("profile");
+      },
+    );
   };
 
   const handleFillDevCode = async () => {
@@ -196,12 +454,6 @@ function JoinPhoneDoor({
       const digits = result.replace(/\D/g, "").slice(0, 6);
       if (digits.length > 0) setSmsCode(digits);
     }
-  };
-
-  const handleCompleteProfile = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (blocked || !username.trim() || !ageConfirmed || !acceptedTerms) return;
-    onCompleteProfile?.({ username: username.trim(), ageConfirmed, acceptedTerms });
   };
 
   const showDevCodeHelper = Boolean(devSmsCode) || (Boolean(devSmsCodeEnabled) && Boolean(onFillDevCode));
@@ -243,7 +495,7 @@ function JoinPhoneDoor({
             className="min-h-16"
           />
         ) : null}
-        <Button type="submit" shape="pill" loading={loading} disabled={blocked || !phone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
+        <Button type="submit" loading={loading} disabled={blocked || !phone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
           Send 6-digit SMS code
         </Button>
       </form>
@@ -268,7 +520,6 @@ function JoinPhoneDoor({
               type="button"
               variant="outline"
               size="sm"
-              shape="pill"
               disabled={blocked}
               onClick={() => {
                 void handleFillDevCode();
@@ -293,10 +544,10 @@ function JoinPhoneDoor({
           />
         </div>
         <div className="flex items-center justify-between gap-2">
-          <Button type="button" variant="ghost" size="sm" shape="pill" disabled={blocked} onClick={() => onResendSmsCode?.()}>
+          <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={() => onResendSmsCode?.()}>
             Resend code
           </Button>
-          <Button type="submit" shape="pill" loading={loading} disabled={blocked || smsCode.length !== 6}>
+          <Button type="submit" loading={loading} disabled={blocked || smsCode.length !== 6}>
             Verify code
           </Button>
         </div>
@@ -304,33 +555,7 @@ function JoinPhoneDoor({
     );
   }
 
-  return (
-    <form onSubmit={handleCompleteProfile} className="flex flex-col gap-3">
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor={usernameId}>Username</Label>
-        <Input
-          id={usernameId}
-          placeholder="alice"
-          value={username}
-          disabled={blocked}
-          onChange={(event) => setUsername(event.target.value)}
-        />
-      </div>
-      <Label htmlFor={ageId} className={cn("font-normal")}>
-        <Checkbox id={ageId} checked={ageConfirmed} disabled={blocked} onCheckedChange={(checked) => setAgeConfirmed(checked === true)} />
-        I confirm I am at least 18 years old
-      </Label>
-      <JoinTermsLabel
-        termsId={termsId}
-        acceptedTerms={acceptedTerms}
-        blocked={blocked}
-        onAcceptedChange={setAcceptedTerms}
-      />
-      <Button type="submit" shape="pill" loading={loading} disabled={blocked || !username.trim() || !ageConfirmed || !acceptedTerms}>
-        Claim 100 pts & enter
-      </Button>
-    </form>
-  );
+  return <JoinProfileForm blocked={blocked} loading={loading} onCompleteProfile={onCompleteProfile} />;
 }
 
 function JoinReviewerForm({
@@ -365,7 +590,7 @@ function JoinReviewerForm({
           className={cn(focusRing, "inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-muted-foreground hover:text-foreground")}
         >
           <ArrowLeft aria-hidden className="size-3.5" />
-          Back to phone & agent sign-in
+          Back to sign-in
         </button>
       </div>
       <div className="flex flex-col gap-1.5">
@@ -387,7 +612,7 @@ function JoinReviewerForm({
           onChange={(event) => setReviewerPassword(event.target.value)}
         />
       </div>
-      <Button type="submit" shape="pill" loading={loading} disabled={blocked || !reviewerId.trim() || !reviewerPassword}>
+      <Button type="submit" loading={loading} disabled={blocked || !reviewerId.trim() || !reviewerPassword}>
         Sign in as reviewer
       </Button>
     </form>
@@ -395,7 +620,7 @@ function JoinReviewerForm({
 }
 
 /**
- * Onboarding dialog with Phone SMS and Connect Agent tabs plus a subtle Reviewer sign-in footer link.
+ * Onboarding dialog with Email Magic Link, Phone SMS, and Connect Agent tabs plus a subtle Reviewer sign-in footer link.
  * @model spec/app/onboarding.md
  */
 export function JoinSheet({
@@ -403,8 +628,18 @@ export function JoinSheet({
   defaultOpen,
   onOpenChange,
   trigger,
+  emailAuthEnabled = true,
   activeTab,
   onTabChange,
+  emailStep,
+  onEmailStepChange,
+  pendingEmailMasked,
+  pendingEmail,
+  devEmailLinkEnabled = false,
+  devEmailMagicLinkUrl,
+  onOpenDevMagicLink,
+  onRequestEmailMagicLink,
+  onResendEmailMagicLink,
   phoneStep,
   onPhoneStepChange,
   pendingActionLabel,
@@ -425,11 +660,16 @@ export function JoinSheet({
   disabled = false,
   error,
 }: JoinSheetProps) {
-  const [internalTab, setInternalTab] = useState<JoinTab>("phone");
-  const [internalStep, setInternalStep] = useState<JoinPhoneStep>("entry");
+  const defaultDoor: JoinTab = emailAuthEnabled ? "email" : "phone";
+  const [internalTab, setInternalTab] = useState<JoinTab>(defaultDoor);
+  const [internalEmailStep, setInternalEmailStep] = useState<JoinEmailStep>("entry");
+  const [internalPhoneStep, setInternalPhoneStep] = useState<JoinPhoneStep>("entry");
+  const [formResetKey, setFormResetKey] = useState(0);
 
-  const currentTab = activeTab ?? internalTab;
-  const currentStep = phoneStep ?? internalStep;
+  const rawTab = activeTab ?? internalTab;
+  const currentTab: JoinTab = !emailAuthEnabled && rawTab === "email" ? "phone" : rawTab;
+  const currentEmailStep = emailStep ?? internalEmailStep;
+  const currentPhoneStep = phoneStep ?? internalPhoneStep;
   const blocked = disabled || loading;
 
   const setTab = (next: JoinTab) => {
@@ -438,20 +678,30 @@ export function JoinSheet({
     onTabChange?.(next);
   };
 
-  const setStep = (next: JoinPhoneStep) => {
+  const setEmailStep = (next: JoinEmailStep) => {
     if (blocked) return;
-    if (phoneStep === undefined) setInternalStep(next);
+    if (emailStep === undefined) setInternalEmailStep(next);
+    onEmailStepChange?.(next);
+  };
+
+  const setPhoneStep = (next: JoinPhoneStep) => {
+    if (blocked) return;
+    if (phoneStep === undefined) setInternalPhoneStep(next);
     onPhoneStepChange?.(next);
   };
 
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (blocked) return;
+    if (!nextOpen) {
+      setFormResetKey((n) => n + 1);
+      if (emailStep === undefined) setInternalEmailStep("entry");
+      if (phoneStep === undefined) setInternalPhoneStep("entry");
+    }
+    onOpenChange?.(nextOpen);
+  };
+
   return (
-    <Dialog
-      open={open}
-      defaultOpen={defaultOpen}
-      onOpenChange={(nextOpen) => {
-        if (!blocked) onOpenChange?.(nextOpen);
-      }}
-    >
+    <Dialog open={open} defaultOpen={defaultOpen} onOpenChange={handleOpenChange}>
       {trigger ? (
         <DialogTrigger asChild disabled={blocked}>
           {trigger}
@@ -461,7 +711,11 @@ export function JoinSheet({
         <div className="flex flex-col gap-1">
           <DialogTitle>Join Feed</DialogTitle>
           <DialogDescription>
-            {pendingActionLabel ? `Sign in to ${pendingActionLabel}. New verified accounts receive 100 pts.` : "Sign in with your phone or connect one AI agent."}
+            {pendingActionLabel
+              ? `Sign in to ${pendingActionLabel}. New verified accounts receive 100 pts.`
+              : emailAuthEnabled
+                ? "Sign in with email, phone, or connect one AI agent."
+                : "Sign in with your phone or connect one AI agent."}
           </DialogDescription>
         </div>
 
@@ -469,29 +723,64 @@ export function JoinSheet({
 
         {currentTab === "reviewer" ? (
           <JoinReviewerForm
+            key={`reviewer:${formResetKey}`}
             blocked={blocked}
             loading={loading}
             onSubmitReviewer={onSubmitReviewer}
-            onBack={() => setTab("phone")}
+            onBack={() => setTab(defaultDoor)}
           />
         ) : (
           <>
-            <Tabs value={currentTab} onValueChange={(next) => setTab(next === "agent" ? "agent" : "phone")}>
-              <TabsList variant="underline" className="grid w-full grid-cols-2">
-                <TabsTrigger value="phone" disabled={blocked}>Phone SMS</TabsTrigger>
+            <Tabs
+              value={currentTab}
+              onValueChange={(next) => {
+                if (next === "email" && emailAuthEnabled) setTab("email");
+                else if (next === "agent") setTab("agent");
+                else setTab("phone");
+              }}
+            >
+              <TabsList variant="underline" className={cn("grid w-full", emailAuthEnabled ? "grid-cols-3" : "grid-cols-2")}>
+                {emailAuthEnabled ? (
+                  <TabsTrigger value="email" disabled={blocked}>Email</TabsTrigger>
+                ) : null}
+                <TabsTrigger value="phone" disabled={blocked}>Phone</TabsTrigger>
                 <TabsTrigger value="agent" disabled={blocked}>Connect Agent</TabsTrigger>
               </TabsList>
 
+              {emailAuthEnabled ? (
+                <TabsContent value="email">
+                  <JoinEmailDoor
+                    key={`email:${formResetKey}`}
+                    step={currentEmailStep}
+                    isStepControlled={emailStep !== undefined}
+                    blocked={blocked}
+                    loading={loading}
+                    turnstileSiteKey={turnstileSiteKey}
+                    pendingEmailMasked={pendingEmailMasked}
+                    pendingEmail={pendingEmail}
+                    devEmailLinkEnabled={devEmailLinkEnabled}
+                    devEmailMagicLinkUrl={devEmailMagicLinkUrl}
+                    onOpenDevMagicLink={onOpenDevMagicLink}
+                    onStepChange={setEmailStep}
+                    onRequestEmailMagicLink={onRequestEmailMagicLink}
+                    onResendEmailMagicLink={onResendEmailMagicLink}
+                    onCompleteProfile={onCompleteProfile}
+                  />
+                </TabsContent>
+              ) : null}
+
               <TabsContent value="phone">
                 <JoinPhoneDoor
-                  step={currentStep}
+                  key={`phone:${formResetKey}`}
+                  step={currentPhoneStep}
+                  isStepControlled={phoneStep !== undefined}
                   blocked={blocked}
                   loading={loading}
                   turnstileSiteKey={turnstileSiteKey}
                   devSmsCode={devSmsCode}
                   devSmsCodeEnabled={devSmsCodeEnabled}
                   onFillDevCode={onFillDevCode}
-                  onStepChange={setStep}
+                  onStepChange={setPhoneStep}
                   onRequestSmsCode={onRequestSmsCode}
                   onVerifySmsCode={onVerifySmsCode}
                   onResendSmsCode={onResendSmsCode}
@@ -509,10 +798,10 @@ export function JoinSheet({
                   copyLabels={{ ready: "Copy", copied: "Copied", failed: "Select text" }}
                   onCopy={onCopySkillPrompt}
                 />
-                <div className="flex items-center justify-between gap-3 rounded-xl bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-                  <span>Agents never receive phone numbers or SMS codes.</span>
-                  <Button type="button" variant="outline" size="sm" shape="pill" disabled={blocked} onClick={() => setTab("phone")}>
-                    Verify phone
+                <div className="flex items-center justify-between gap-3 rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+                  <span>Agents never receive your email, phone number, or sign-in codes.</span>
+                  <Button type="button" variant="outline" size="sm" disabled={blocked} onClick={() => setTab(defaultDoor)}>
+                    {emailAuthEnabled ? "Sign in" : "Verify phone"}
                   </Button>
                 </div>
               </TabsContent>

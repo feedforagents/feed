@@ -49,6 +49,10 @@ export interface PredictionMarketRow {
   endsAtLabel: string;
   /** Optional numeric resolution timestamp in ms for sorting. */
   endsAtMs?: number;
+  /** Lifecycle status of the prediction market (`active`, `resolved`, or `cancelled`). */
+  status?: "active" | "resolved" | "cancelled";
+  /** Settled outcome when `status` is `resolved`. */
+  resolvedOutcome?: "yes" | "no" | null;
   /** True when starred in the trader's watchlist. */
   isFavorite?: boolean;
 }
@@ -315,7 +319,23 @@ function PredictionsMarketsTable({
                   {formatCompactPts(market.liquidityPts)}
                 </TableCell>
                 <TableCell className="text-right font-mono text-xs text-muted-foreground tabular-nums">
-                  {market.endsAtLabel}
+                  {market.status === "resolved" ? (
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "border-transparent font-semibold",
+                        market.resolvedOutcome === "yes"
+                          ? "bg-ok-solid text-ok-solid-foreground"
+                          : "bg-danger-solid text-danger-solid-foreground",
+                      )}
+                    >
+                      Resolved {market.resolvedOutcome === "yes" ? "YES" : "NO"}
+                    </Badge>
+                  ) : market.status === "cancelled" ? (
+                    <Badge variant="secondary">Cancelled</Badge>
+                  ) : (
+                    market.endsAtLabel
+                  )}
                 </TableCell>
               </TableRow>
             );
@@ -342,6 +362,7 @@ export function MarketsDashboard({
 }: MarketsDashboardProps) {
   const blocked = disabled || loading;
   const [tab, setTab] = useState<"perps" | "predictions">(defaultTab);
+  const [predStatusFilter, setPredStatusFilter] = useState<"active" | "resolved">("active");
   const [query, setQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [perpSort, setPerpSort] = useState<PerpSortColumn>("volume");
@@ -394,8 +415,18 @@ export function MarketsDashboard({
     });
   }, [perpMarkets, favoritesOnly, normalizedQuery, perpSort, perpSortDir]);
 
+  const hasClosedPredictions = useMemo(
+    () => predictionMarkets.some((m) => m.status === "resolved" || m.status === "cancelled"),
+    [predictionMarkets],
+  );
+
   const visiblePredictions = useMemo(() => {
     const filtered = predictionMarkets.filter((m) => {
+      if (hasClosedPredictions) {
+        const isClosed = m.status === "resolved" || m.status === "cancelled";
+        if (predStatusFilter === "active" && isClosed) return false;
+        if (predStatusFilter === "resolved" && !isClosed) return false;
+      }
       if (favoritesOnly && !m.isFavorite) return false;
       if (!normalizedQuery) return true;
       return (
@@ -416,7 +447,7 @@ export function MarketsDashboard({
           return mult * ((a.endsAtMs ?? 0) - (b.endsAtMs ?? 0));
       }
     });
-  }, [predictionMarkets, favoritesOnly, normalizedQuery, predSort, predSortDir]);
+  }, [predictionMarkets, hasClosedPredictions, predStatusFilter, favoritesOnly, normalizedQuery, predSort, predSortDir]);
 
   const statusView = error ? (
     <div className="p-4">
@@ -435,7 +466,7 @@ export function MarketsDashboard({
       aria-busy={loading || undefined}
       aria-disabled={blocked || undefined}
       onClick={blocked ? undefined : onClick}
-      className={cn("flex min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-background text-foreground", className)}
+      className={cn("flex min-h-0 flex-1 flex-col overflow-hidden bg-background text-foreground", className)}
       {...props}
     >
       <Tabs
@@ -456,6 +487,28 @@ export function MarketsDashboard({
               </TabsTrigger>
             </TabsList>
             <div className="flex flex-wrap items-center gap-2 pb-2">
+              {tab === "predictions" && hasClosedPredictions ? (
+                <div role="group" aria-label="Prediction status filter" className="inline-flex items-center gap-0.5 rounded-md border border-border bg-muted p-0.5">
+                  {(["active", "resolved"] as const).map((statusOption) => (
+                    <button
+                      key={statusOption}
+                      type="button"
+                      disabled={blocked}
+                      aria-pressed={predStatusFilter === statusOption}
+                      onClick={() => setPredStatusFilter(statusOption)}
+                      className={cn(
+                        focusRing,
+                        "rounded-sm px-2.5 py-1 text-xs font-medium capitalize transition-colors duration-fast",
+                        predStatusFilter === statusOption
+                          ? "bg-background text-foreground shadow-sm ring-1 ring-border"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {statusOption}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <div className="relative w-56 sm:w-64">
                 <Search aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input

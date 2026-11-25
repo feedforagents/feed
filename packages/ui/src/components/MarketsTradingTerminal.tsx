@@ -3,12 +3,14 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bot,
+  CheckCircle2,
   ExternalLink,
   HelpCircle,
   Info,
   Maximize2,
   Minimize2,
   RefreshCw,
+  XCircle,
 } from "lucide-react";
 import { cn, focusRing } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
@@ -16,7 +18,6 @@ import { Alert } from "./Alert.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardHeader, CardTitle } from "./Card.tsx";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./Dialog.tsx";
 import { Input } from "./Input.tsx";
 import { Label } from "./Label.tsx";
@@ -78,6 +79,10 @@ export interface TerminalPredictionMarket {
   feeBps?: number;
   /** Maximum allowed single-trade odds move in basis points (defaults to 2000). */
   maxOddsMoveBps?: number;
+  /** Optional lifecycle status (`active`, `resolved`, `cancelled`, or `expired`). */
+  status?: "active" | "resolved" | "cancelled" | "expired";
+  /** Settled winning side when `status` is `resolved`. */
+  resolvedOutcome?: "yes" | "no" | null;
   /** Resolution rule summary shown in the info modal. */
   resolutionCriteria?: string;
   /** Optional article ID backing resolution evidence. */
@@ -163,10 +168,12 @@ export interface PerpOpenOrderInput {
   marginPts: number;
   notionalPts: number;
   leverage: number;
+  mode?: "open" | "flip";
 }
 
 export interface PerpRebalanceOrderInput {
   action: "add" | "reduce" | "flip";
+  mode?: "add" | "reduce" | "flip";
   positionId: string;
   ticker: string;
   currentSide: "long" | "short";
@@ -331,12 +338,30 @@ function formatPricePts(value: number): string {
 
 function calcFeePts(notionalPts: number, feeBps: number): number {
   if (notionalPts <= 0 || feeBps <= 0) return 0;
-  return Math.max(0.01, (notionalPts * feeBps) / 10_000);
+  const notionalCents = Math.round(notionalPts * 100);
+  return Math.ceil((notionalCents * feeBps) / 10_000) / 100;
+}
+
+function calcMaxMarginPts(availablePts: number, leverage: number, feeBps: number): number {
+  const availCents = Math.floor(Math.max(0, availablePts) * 100);
+  if (availCents <= 0 || leverage <= 0) return 0;
+  let marginCents = Math.floor((availCents * 10_000) / (10_000 + leverage * feeBps));
+  while (marginCents > 0) {
+    const notionalCents = Math.round(marginCents * leverage);
+    const feeCents = feeBps > 0 ? Math.ceil((notionalCents * feeBps) / 10_000) : 0;
+    if (marginCents + feeCents <= availCents) break;
+    marginCents -= 1;
+  }
+  return marginCents / 100;
+}
+
+function floorCents(value: number): number {
+  return Math.floor(Math.max(0, value) * 100) / 100;
 }
 
 function calcLiquidationPrice(entryPrice: number, side: "long" | "short", leverage: number): number {
   if (entryPrice <= 0 || leverage <= 0) return 0;
-  const maintenanceBuffer = 0.9 / leverage;
+  const maintenanceBuffer = Math.max(0, 1 / leverage - 0.025);
   return side === "long" ? Math.max(0, entryPrice * (1 - maintenanceBuffer)) : entryPrice * (1 + maintenanceBuffer);
 }
 
@@ -346,33 +371,110 @@ function calcLiquidationDistancePct(markPrice: number, liquidationPrice: number,
   return Math.max(0, (diff / markPrice) * 100);
 }
 
+function bigIntSqrt(n: bigint): bigint {
+  if (n <= 0n) return 0n;
+  let x = n;
+  let y = (x + 1n) >> 1n;
+  while (y < x) {
+    x = y;
+    y = (x + n / x) >> 1n;
+  }
+  return x;
+}
+
 function estimateCpmmBuy(
   yesShares: number,
   noShares: number,
   side: "YES" | "NO",
   amountPts: number,
   feeBps: number,
-): { shares: number; avgPricePct: number; priceImpactPct: number; feePts: number; payoutPts: number; roiPct: number } {
+): {
+  shares: number;
+  avgPricePct: number;
+  priceImpactPct: number;
+  postYesPct: number;
+  feePts: number;
+  payoutPts: number;
+  roiPct: number;
+} {
   const feePts = calcFeePts(amountPts, feeBps);
-  const netPts = Math.max(0, amountPts - feePts);
-  const total = yesShares + noShares;
-  if (yesShares <= 0 || noShares <= 0 || netPts <= 0 || total <= 0) {
-    return { shares: 0, avgPricePct: 50, priceImpactPct: 0, feePts, payoutPts: 0, roiPct: 0 };
+  const amountCents = Math.round(Math.max(0, amountPts) * 100);
+  const feeCents = Math.round(feePts * 100);
+  const netCents = Math.max(0, amountCents - feeCents);
+  const yesR = BigInt(Math.max(0, Math.round(yesShares * 100)));
+  const noR = BigInt(Math.max(0, Math.round(noShares * 100)));
+  const total = yesR + noR;
+  if (yesR <= 0n || noR <= 0n || netCents <= 0 || total <= 0n) {
+    const fallbackYesPct = total > 0n ? Number((noR * 10_000n) / total) / 100 : 50;
+    return { shares: 0, avgPricePct: side === "YES" ? fallbackYesPct : 100 - fallbackYesPct, priceImpactPct: 0, postYesPct: fallbackYesPct, feePts, payoutPts: 0, roiPct: 0 };
   }
-  const initialYesPct = (noShares / total) * 100;
+  const initialYesPct = Number((noR * 10_000n) / total) / 100;
   const initialSidePct = side === "YES" ? initialYesPct : 100 - initialYesPct;
-  const k = yesShares * noShares;
-  const nextYes = side === "YES" ? k / (noShares + netPts) : yesShares + netPts;
-  const nextNo = side === "YES" ? noShares + netPts : k / (yesShares + netPts);
-  const shares = (side === "YES" ? yesShares - nextYes : noShares - nextNo) + netPts;
-  const nextTotal = nextYes + nextNo;
-  const postYesPct = nextTotal > 0 ? (nextNo / nextTotal) * 100 : initialYesPct;
+  const net = BigInt(netCents);
+  const denom = side === "YES" ? noR + net : yesR + net;
+  const nextSideR = (yesR * noR + denom - 1n) / denom;
+  const boughtCentShares = (side === "YES" ? yesR : noR) - nextSideR + net;
+  const postYesR = side === "YES" ? nextSideR : yesR + net;
+  const postNoR = side === "YES" ? noR + net : nextSideR;
+  const postTotal = postYesR + postNoR;
+  const postYesPct = postTotal > 0n ? Number((postNoR * 10_000n) / postTotal) / 100 : initialYesPct;
   const postSidePct = side === "YES" ? postYesPct : 100 - postYesPct;
+  const shares = boughtCentShares > 0n ? Number(boughtCentShares) / 100 : 0;
+  const netPts = netCents / 100;
   const avgPricePct = shares > 0 ? (netPts / shares) * 100 : initialSidePct;
   const priceImpactPct = Math.abs(postSidePct - initialSidePct);
   const payoutPts = shares;
   const roiPct = amountPts > 0 ? ((payoutPts - amountPts) / amountPts) * 100 : 0;
-  return { shares, avgPricePct, priceImpactPct, feePts, payoutPts, roiPct };
+  return { shares, avgPricePct, priceImpactPct, postYesPct, feePts, payoutPts, roiPct };
+}
+
+function estimateCpmmSell(
+  yesShares: number,
+  noShares: number,
+  side: "YES" | "NO",
+  sellWholeShares: number,
+  feeBps: number,
+): {
+  grossPts: number;
+  feePts: number;
+  netPts: number;
+  avgPricePct: number;
+  priceImpactPct: number;
+  postYesPct: number;
+} {
+  const yesR = BigInt(Math.max(0, Math.round(yesShares * 100)));
+  const noR = BigInt(Math.max(0, Math.round(noShares * 100)));
+  const total = yesR + noR;
+  const initialYesPct = total > 0n ? Number((noR * 10_000n) / total) / 100 : 50;
+  const initialSidePct = side === "YES" ? initialYesPct : 100 - initialYesPct;
+  const sellCentShares = BigInt(Math.max(0, Math.round(sellWholeShares * 100)));
+  if (yesR <= 0n || noR <= 0n || sellCentShares <= 0n) {
+    return { grossPts: 0, feePts: 0, netPts: 0, avgPricePct: initialSidePct, priceImpactPct: 0, postYesPct: initialYesPct };
+  }
+  const sideR = side === "YES" ? yesR : noR;
+  const oppR = side === "YES" ? noR : yesR;
+  const sum = sideR + oppR + sellCentShares;
+  const diff = sideR + oppR - sellCentShares;
+  const disc = diff * diff + 4n * sideR * sellCentShares;
+  const rootFloor = bigIntSqrt(disc);
+  const rootCeil = rootFloor * rootFloor >= disc ? rootFloor : rootFloor + 1n;
+  const denom = sum + rootCeil;
+  const raw = denom > 0n ? (2n * sellCentShares * oppR) / denom : 0n;
+  const maxOut = oppR > 1n ? (oppR - 1n < sellCentShares ? oppR - 1n : sellCentShares) : 0n;
+  const grossCents = raw < 0n ? 0n : raw > maxOut ? maxOut : raw;
+  const postSideR = sideR + sellCentShares - grossCents;
+  const postOppR = oppR - grossCents;
+  const postYesR = side === "YES" ? postSideR : postOppR;
+  const postNoR = side === "YES" ? postOppR : postSideR;
+  const postTotal = postYesR + postNoR;
+  const postYesPct = postTotal > 0n ? Number((postNoR * 10_000n) / postTotal) / 100 : initialYesPct;
+  const postSidePct = side === "YES" ? postYesPct : 100 - postYesPct;
+  const grossPts = Number(grossCents) / 100;
+  const feePts = calcFeePts(grossPts, feeBps);
+  const netPts = Math.max(0, Math.round((grossPts - feePts) * 100) / 100);
+  const avgPricePct = sellCentShares > 0n ? (Number(grossCents) / Number(sellCentShares)) * 100 : initialSidePct;
+  const priceImpactPct = Math.abs(postSidePct - initialSidePct);
+  return { grossPts, feePts, netPts, avgPricePct, priceImpactPct, postYesPct };
 }
 
 /** Live trade tape list for a perpetual or prediction market. */
@@ -411,7 +513,7 @@ export function AssetTradesFeed({
               </div>
               <span className="font-mono text-xs text-muted-foreground tabular-nums">
                 @{trade.handle} · {trade.priceLabel}
-                {trade.shares !== undefined ? ` · ${trade.shares.toFixed(1)} sh` : ""}
+                {trade.shares !== undefined ? ` · ${trade.shares.toFixed(2)} sh` : ""}
               </span>
             </div>
           </div>
@@ -444,7 +546,7 @@ function OrderPolarityToggle<T extends string>({
     <div
       role="radiogroup"
       aria-label={ariaLabel}
-      className="grid w-full grid-cols-2 gap-1 rounded-md border border-input bg-muted p-1"
+      className="grid w-full grid-cols-2 gap-1 rounded-md border border-border bg-muted p-1"
     >
       <button
         type="button"
@@ -456,7 +558,7 @@ function OrderPolarityToggle<T extends string>({
           focusRing,
           "h-9 w-full rounded-sm px-3 text-sm transition-colors duration-fast disabled:pointer-events-none disabled:opacity-50",
           value === positiveOption.value
-            ? "bg-ok font-semibold text-background shadow-sm"
+            ? "bg-ok-solid font-semibold text-ok-solid-foreground shadow-sm"
             : "bg-transparent font-medium text-muted-foreground hover:text-foreground",
         )}
       >
@@ -563,6 +665,45 @@ function ExistingPositionSummaryCard({ position }: { position: ExistingPerpPosit
   );
 }
 
+function RebalanceSummaryList({
+  mode,
+  reduceExceedsSize,
+  nextSide,
+  resultingNotionalPts,
+  feeBps,
+  estimatedFeePts,
+  totalRequiredPts,
+}: {
+  mode: "add" | "reduce" | "close" | "flip";
+  reduceExceedsSize: boolean;
+  nextSide: "long" | "short";
+  resultingNotionalPts: number;
+  feeBps: number;
+  estimatedFeePts: number;
+  totalRequiredPts: number;
+}) {
+  return (
+    <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-3 font-mono text-xs tabular-nums">
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">Resulting Position</dt>
+        <dd className="font-semibold text-foreground">
+          {mode === "close" || reduceExceedsSize ? "Closed (0 pts)" : `${nextSide.toUpperCase()} ${formatPts(resultingNotionalPts)}`}
+        </dd>
+      </div>
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">Est. Fee ({feeBps} bps)</dt>
+        <dd className="text-foreground">{formatPts(estimatedFeePts)}</dd>
+      </div>
+      {mode === "add" || mode === "flip" ? (
+        <div className="flex justify-between">
+          <dt className="text-muted-foreground">Additional Required</dt>
+          <dd className="font-semibold text-foreground">{formatPts(totalRequiredPts)}</dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
 function RebalancePerpForm({
   market,
   balancePts,
@@ -612,14 +753,22 @@ function RebalancePerpForm({
           ? deltaNotionalPts
           : 0;
 
-  const estimatedFeePts =
-    mode === "flip"
-      ? calcFeePts(existingPosition.notionalPts, feeBps) + calcFeePts(deltaNotionalPts, feeBps)
-      : calcFeePts(deltaNotionalPts, feeBps);
+  const closeFeePts = calcFeePts(existingPosition.notionalPts, feeBps);
+  const openFeePts = calcFeePts(deltaNotionalPts, feeBps);
+  const estimatedFeePts = mode === "flip" ? closeFeePts + openFeePts : openFeePts;
+
+  const netCloseEquityPts = Math.max(0, existingPosition.marginPts + existingPosition.unrealizedPnlPts - closeFeePts);
+  const flipAvailablePts = balancePts + netCloseEquityPts;
+  const availableForModePts = mode === "flip" ? flipAvailablePts : balancePts;
 
   const marginNeeded = mode === "add" || mode === "flip" ? Math.max(0, numericInput) : 0;
-  const totalRequiredPts = mode === "reduce" || mode === "close" ? estimatedFeePts : marginNeeded + estimatedFeePts;
-  const insufficientBalance = (mode === "add" || mode === "flip") && totalRequiredPts > balancePts;
+  const totalRequiredPts =
+    mode === "reduce" || mode === "close"
+      ? estimatedFeePts
+      : mode === "flip"
+        ? marginNeeded + openFeePts
+        : marginNeeded + estimatedFeePts;
+  const insufficientBalance = (mode === "add" || mode === "flip") && totalRequiredPts > availableForModePts + 1e-9;
   const belowMinNotional = (mode === "add" || mode === "flip") && deltaNotionalPts > 0 && deltaNotionalPts < MIN_PERP_NOTIONAL_PTS;
   const reduceExceedsSize = mode === "reduce" && numericInput >= existingPosition.notionalPts;
 
@@ -631,11 +780,11 @@ function RebalancePerpForm({
 
   const applyPreset = (ratio: number) => {
     if (mode === "reduce") {
-      setInputValue((existingPosition.notionalPts * ratio).toFixed(2));
+      setInputValue(floorCents(existingPosition.notionalPts * ratio).toFixed(2));
       return;
     }
-    const maxMargin = Math.max(0, balancePts / (1 + (activeLeverage * feeBps) / 10_000));
-    setInputValue((maxMargin * ratio).toFixed(2));
+    const maxMargin = calcMaxMarginPts(availableForModePts, activeLeverage, feeBps);
+    setInputValue(floorCents(maxMargin * ratio).toFixed(2));
   };
 
   const execute = () => {
@@ -645,6 +794,7 @@ function RebalancePerpForm({
     }
     onRebalancePerp?.({
       action: mode,
+      mode,
       positionId: existingPosition.id,
       ticker: market.ticker,
       currentSide: existingPosition.side,
@@ -720,7 +870,9 @@ function RebalancePerpForm({
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <Label htmlFor={amountId}>{mode === "reduce" ? "Reduce Notional (pts)" : "Margin (pts)"}</Label>
-            <span className="font-mono text-xs text-muted-foreground tabular-nums">Avail {formatPts(balancePts)}</span>
+            <span className="font-mono text-xs text-muted-foreground tabular-nums">
+              {mode === "flip" ? `Flip Avail ${formatPts(availableForModePts)}` : `Avail ${formatPts(balancePts)}`}
+            </span>
           </div>
           <Input
             id={amountId}
@@ -771,36 +923,30 @@ function RebalancePerpForm({
         </div>
       ) : null}
 
-      <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-3 font-mono text-xs tabular-nums">
-        <div className="flex justify-between">
-          <dt className="text-muted-foreground">Resulting Position</dt>
-          <dd className="font-semibold text-foreground">
-            {mode === "close" || reduceExceedsSize ? "Closed (0 pts)" : `${nextSide.toUpperCase()} ${formatPts(resultingNotionalPts)}`}
-          </dd>
-        </div>
-        <div className="flex justify-between">
-          <dt className="text-muted-foreground">Est. Fee ({feeBps} bps)</dt>
-          <dd className="text-foreground">{formatPts(estimatedFeePts)}</dd>
-        </div>
-        {mode === "add" || mode === "flip" ? (
-          <div className="flex justify-between">
-            <dt className="text-muted-foreground">Additional Required</dt>
-            <dd className="font-semibold text-foreground">{formatPts(totalRequiredPts)}</dd>
-          </div>
-        ) : null}
-      </dl>
+      <RebalanceSummaryList
+        mode={mode}
+        reduceExceedsSize={reduceExceedsSize}
+        nextSide={nextSide}
+        resultingNotionalPts={resultingNotionalPts}
+        feeBps={feeBps}
+        estimatedFeePts={estimatedFeePts}
+        totalRequiredPts={totalRequiredPts}
+      />
 
       {belowMinNotional ? <Alert variant="warn">Minimum order notional is {formatPts(MIN_PERP_NOTIONAL_PTS)}.</Alert> : null}
-      {insufficientBalance ? <Alert variant="destructive">Insufficient spendable balance ({formatPts(balancePts)}).</Alert> : null}
+      {insufficientBalance ? <Alert variant="destructive">Insufficient available balance ({formatPts(availableForModePts)}).</Alert> : null}
       {error ? <Alert variant="destructive">{error}</Alert> : null}
 
       <Button
         type="submit"
-        shape="pill"
-        variant={mode === "close" || (mode === "flip" && oppositeSide === "short") ? "destructive" : "primary"}
+        variant={mode === "close" || mode === "reduce" || (mode === "flip" && oppositeSide === "short") ? "destructive" : "primary"}
         loading={submitting}
         disabled={submitting || !validInput || insufficientBalance || belowMinNotional}
-        className="w-full"
+        className={cn(
+          "h-10 w-full",
+          (mode === "add" || (mode === "flip" && oppositeSide === "long")) &&
+            "bg-ok-solid text-ok-solid-foreground hover:bg-ok-solid/90",
+        )}
       >
         <RefreshCw aria-hidden className="size-4" />
         {mode === "close" || reduceExceedsSize
@@ -903,24 +1049,22 @@ export function PerpOrderPanel({
 
   if (existingPosition) {
     return (
-      <Card className="gap-4 p-4">
-        <CardHeader className="flex-row items-center justify-between gap-2">
-          <CardTitle className="text-sm">{`Manage $${market.ticker}`}</CardTitle>
+      <div className="flex flex-col gap-4 bg-background text-foreground">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">{`Manage $${market.ticker}`}</h3>
           <span className="font-mono text-xs text-muted-foreground tabular-nums">Avail {formatPts(balancePts)}</span>
-        </CardHeader>
-        <CardContent>
-          <RebalancePerpForm
-            market={market}
-            balancePts={balancePts}
-            existingPosition={existingPosition}
-            onRebalancePerp={onRebalancePerp}
-            onClosePerp={onClosePerp}
-            confirmBeforeSubmit={confirmBeforeSubmit}
-            submitting={submitting}
-            error={error}
-          />
-        </CardContent>
-      </Card>
+        </div>
+        <RebalancePerpForm
+          market={market}
+          balancePts={balancePts}
+          existingPosition={existingPosition}
+          onRebalancePerp={onRebalancePerp}
+          onClosePerp={onClosePerp}
+          confirmBeforeSubmit={confirmBeforeSubmit}
+          submitting={submitting}
+          error={error}
+        />
+      </div>
     );
   }
 
@@ -983,8 +1127,8 @@ export function PerpOrderPanel({
   };
 
   const applyMarginPreset = (ratio: number) => {
-    const maxMargin = Math.max(0, balancePts / (1 + (leverage * feeBps) / 10_000));
-    const nextVal = Number((maxMargin * ratio).toFixed(2));
+    const maxMargin = calcMaxMarginPts(balancePts, leverage, feeBps);
+    const nextVal = floorCents(maxMargin * ratio);
     setMarginText(nextVal.toFixed(2));
     if (nextVal > 0) requestPreview(side, nextVal, leverage);
   };
@@ -1016,116 +1160,116 @@ export function PerpOrderPanel({
   };
 
   return (
-    <Card className="gap-4 p-4">
-      <CardHeader className="flex-row items-center justify-between gap-2">
-        <CardTitle className="text-sm">{`Trade $${market.ticker}`}</CardTitle>
+    <div className="flex flex-col gap-4 bg-background text-foreground">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">{`Trade $${market.ticker}`}</h3>
         <span className="font-mono text-xs text-muted-foreground tabular-nums">Avail {formatPts(balancePts)}</span>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <OrderPolarityToggle
-            ariaLabel="Perp direction"
-            value={side}
+      </div>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <OrderPolarityToggle
+          ariaLabel="Perp direction"
+          value={side}
+          disabled={submitting}
+          onChange={handleSideChange}
+          positiveOption={{ value: "long", label: "Long" }}
+          negativeOption={{ value: "short", label: "Short" }}
+        />
+
+        <div className="flex flex-col gap-2">
+          <Label htmlFor={marginId}>Margin (pts)</Label>
+          <Input
+            id={marginId}
+            type="number"
+            min="0.01"
+            step="any"
+            value={marginText}
             disabled={submitting}
-            onChange={handleSideChange}
-            positiveOption={{ value: "long", label: "Long" }}
-            negativeOption={{ value: "short", label: "Short" }}
+            invalid={!validMargin && marginText !== ""}
+            onChange={(event) => handleMarginChange(event.target.value)}
+            className="font-mono tabular-nums"
           />
-
-          <div className="flex flex-col gap-2">
-            <Label htmlFor={marginId}>Margin (pts)</Label>
-            <Input
-              id={marginId}
-              type="number"
-              min="0.01"
-              step="any"
-              value={marginText}
-              disabled={submitting}
-              invalid={!validMargin && marginText !== ""}
-              onChange={(event) => handleMarginChange(event.target.value)}
-              className="font-mono tabular-nums"
-            />
-            <div className="grid grid-cols-4 gap-1.5">
-              {PERCENT_PRESETS.map((preset) => (
-                <Button
-                  key={preset.label}
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={submitting}
-                  onClick={() => applyMarginPreset(preset.ratio)}
-                  className="font-mono text-xs tabular-nums"
-                >
-                  {preset.label}
-                </Button>
-              ))}
-            </div>
+          <div className="grid grid-cols-4 gap-1.5">
+            {PERCENT_PRESETS.map((preset) => (
+              <Button
+                key={preset.label}
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={submitting}
+                onClick={() => applyMarginPreset(preset.ratio)}
+                className="font-mono text-xs tabular-nums"
+              >
+                {preset.label}
+              </Button>
+            ))}
           </div>
+        </div>
 
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor={leverageId}>Leverage</Label>
-              <Badge variant={leverage >= 10 ? "warn" : "outline"} className="font-mono tabular-nums">
-                {leverage}x
-              </Badge>
-            </div>
-            <input
-              id={leverageId}
-              type="range"
-              min={1}
-              max={maxLev}
-              step={1}
-              value={leverage}
-              disabled={submitting}
-              onChange={(event) => handleLeverageChange(Number(event.target.value))}
-              className="w-full accent-primary disabled:opacity-50"
-            />
-            <div className="grid grid-cols-5 gap-1">
-              {LEVERAGE_CHIPS.filter((chip) => chip <= maxLev).map((chip) => (
-                <Button
-                  key={chip}
-                  type="button"
-                  variant={leverage === chip ? "primary" : "outline"}
-                  size="sm"
-                  disabled={submitting}
-                  onClick={() => handleLeverageChange(chip)}
-                  className="px-2 font-mono text-xs tabular-nums"
-                >
-                  {chip}x
-                </Button>
-              ))}
-            </div>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <Label htmlFor={leverageId}>Leverage</Label>
+            <Badge variant={leverage >= 10 ? "warn" : "outline"} className="font-mono tabular-nums">
+              {leverage}x
+            </Badge>
           </div>
-
-          <PerpOrderSummary
-            validMargin={validMargin}
-            notionalPts={notionalPts}
-            liveQuote={activeQuote !== null}
-            estEntryPrice={estEntryPrice}
-            impactPct={impactPct}
-            liqPrice={liqPrice}
-            liqDistPct={liqDistPct}
-            feeBps={feeBps}
-            estimatedFeePts={estimatedFeePts}
-            totalRequiredPts={totalRequiredPts}
+          <input
+            id={leverageId}
+            type="range"
+            min={1}
+            max={maxLev}
+            step={1}
+            value={leverage}
+            disabled={submitting}
+            onChange={(event) => handleLeverageChange(Number(event.target.value))}
+            className="w-full accent-primary disabled:opacity-50"
           />
+          <div className="grid grid-cols-5 gap-1">
+            {LEVERAGE_CHIPS.filter((chip) => chip <= maxLev).map((chip) => (
+              <Button
+                key={chip}
+                type="button"
+                variant={leverage === chip ? "primary" : "outline"}
+                size="sm"
+                disabled={submitting}
+                onClick={() => handleLeverageChange(chip)}
+                className="px-2 font-mono text-xs tabular-nums"
+              >
+                {chip}x
+              </Button>
+            ))}
+          </div>
+        </div>
 
-          {belowMinNotional ? <Alert variant="warn">Minimum notional size is {formatPts(MIN_PERP_NOTIONAL_PTS)}.</Alert> : null}
-          {insufficientBalance ? <Alert variant="destructive">Insufficient balance ({formatPts(balancePts)} available).</Alert> : null}
-          {error ? <Alert variant="destructive">{error}</Alert> : null}
+        <PerpOrderSummary
+          validMargin={validMargin}
+          notionalPts={notionalPts}
+          liveQuote={activeQuote !== null}
+          estEntryPrice={estEntryPrice}
+          impactPct={impactPct}
+          liqPrice={liqPrice}
+          liqDistPct={liqDistPct}
+          feeBps={feeBps}
+          estimatedFeePts={estimatedFeePts}
+          totalRequiredPts={totalRequiredPts}
+        />
 
-          <Button
-            type="submit"
-            shape="pill"
-            variant={side === "short" ? "destructive" : "primary"}
-            loading={submitting}
-            disabled={submitting || !validMargin || belowMinNotional || insufficientBalance}
-            className="w-full"
-          >
-            Open {side === "long" ? "Long" : "Short"} {leverage}x
-          </Button>
-        </form>
-      </CardContent>
+        {belowMinNotional ? <Alert variant="warn">Minimum notional size is {formatPts(MIN_PERP_NOTIONAL_PTS)}.</Alert> : null}
+        {insufficientBalance ? <Alert variant="destructive">Insufficient balance ({formatPts(balancePts)} available).</Alert> : null}
+        {error ? <Alert variant="destructive">{error}</Alert> : null}
+
+        <Button
+          type="submit"
+          variant={side === "short" ? "destructive" : "primary"}
+          loading={submitting}
+          disabled={submitting || !validMargin || belowMinNotional || insufficientBalance}
+          className={cn(
+            "h-10 w-full",
+            side === "long" && "bg-ok-solid text-ok-solid-foreground hover:bg-ok-solid/90",
+          )}
+        >
+          Open {side === "long" ? "Long" : "Short"} {leverage}x
+        </Button>
+      </form>
 
       <PendingTradeDialog
         details={pendingConfirm}
@@ -1133,7 +1277,139 @@ export function PerpOrderPanel({
         onClear={() => setPendingConfirm(null)}
         onExecute={executeOpen}
       />
-    </Card>
+    </div>
+  );
+}
+
+function PredictionClosedBanner({
+  market,
+  onOpenResolutionArticle,
+}: {
+  market: TerminalPredictionMarket;
+  onOpenResolutionArticle?: (articleId: string) => void;
+}) {
+  const isResolved = market.status === "resolved";
+  const isCancelled = market.status === "cancelled";
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-3 rounded-lg border border-border bg-background p-4",
+        isResolved && market.resolvedOutcome === "yes" && "border-ok/40 bg-ok/5",
+        isResolved && market.resolvedOutcome === "no" && "border-destructive/40 bg-destructive/5",
+      )}
+    >
+      <div className="flex items-center gap-2">
+        {isResolved && market.resolvedOutcome === "yes" ? (
+          <CheckCircle2 aria-hidden className="size-5 shrink-0 text-ok" />
+        ) : (
+          <XCircle aria-hidden className={cn("size-5 shrink-0", isResolved ? "text-destructive" : "text-muted-foreground")} />
+        )}
+        <div className="flex flex-col">
+          <span className="text-sm font-semibold text-foreground">
+            {isResolved
+              ? `Market Resolved: ${market.resolvedOutcome === "yes" ? "YES" : "NO"}`
+              : isCancelled
+                ? "Market Cancelled"
+                : "Trading Closed"}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            {isResolved
+              ? "Settlement is complete and trading is disabled."
+              : isCancelled
+                ? "This market was cancelled and shares were refunded."
+                : "This market has closed and is awaiting resolution."}
+          </span>
+        </div>
+      </div>
+      {market.resolutionCriteria ? (
+        <p className="text-xs leading-relaxed text-muted-foreground">{market.resolutionCriteria}</p>
+      ) : null}
+      {market.resolutionArticleId ? (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => onOpenResolutionArticle?.(market.resolutionArticleId ?? "")}
+          className="self-start"
+        >
+          <ExternalLink aria-hidden className="size-3.5" />
+          View Resolution Article
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function PredictionQuoteSummary({
+  action,
+  validInput,
+  exceedsOddsMove,
+  feeBps,
+  buyQuote,
+  sellQuote,
+}: {
+  action: "buy" | "sell";
+  validInput: boolean;
+  exceedsOddsMove: boolean;
+  feeBps: number;
+  buyQuote: ReturnType<typeof estimateCpmmBuy>;
+  sellQuote: ReturnType<typeof estimateCpmmSell>;
+}) {
+  return (
+    <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-3 font-mono text-xs tabular-nums">
+      {action === "buy" ? (
+        <>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Est. Shares</dt>
+            <dd className="font-semibold text-foreground">{validInput ? buyQuote.shares.toFixed(2) : "—"}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Avg Price</dt>
+            <dd className="text-foreground">{buyQuote.avgPricePct.toFixed(1)}%</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Price Impact</dt>
+            <dd className={cn(exceedsOddsMove ? "font-semibold text-warn" : "text-foreground")}>
+              {buyQuote.priceImpactPct.toFixed(2)}%
+            </dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
+            <dd className="text-foreground">{validInput ? formatPts(buyQuote.feePts) : "—"}</dd>
+          </div>
+          <div className="flex justify-between border-t border-border pt-1.5">
+            <dt className="text-muted-foreground">Est. Payout / ROI</dt>
+            <dd className="font-bold text-ok">
+              {validInput ? `${formatPts(buyQuote.payoutPts)} (+${buyQuote.roiPct.toFixed(1)}%)` : "—"}
+            </dd>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Avg Sell Price</dt>
+            <dd className="text-foreground">{validInput ? `${sellQuote.avgPricePct.toFixed(1)}%` : "—"}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Price Impact</dt>
+            <dd className={cn(exceedsOddsMove ? "font-semibold text-warn" : "text-foreground")}>
+              {validInput ? `${sellQuote.priceImpactPct.toFixed(2)}%` : "—"}
+            </dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Gross Proceeds</dt>
+            <dd className="text-foreground">{validInput ? formatPts(sellQuote.grossPts) : "—"}</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
+            <dd className="text-foreground">{validInput ? formatPts(sellQuote.feePts) : "—"}</dd>
+          </div>
+          <div className="flex justify-between border-t border-border pt-1.5">
+            <dt className="text-muted-foreground">Net Proceeds</dt>
+            <dd className="font-bold text-ok">{validInput ? formatPts(sellQuote.netPts) : "—"}</dd>
+          </div>
+        </>
+      )}
+    </dl>
   );
 }
 
@@ -1159,23 +1435,41 @@ export function PredictionOrderPanel({
   const [resolutionOpen, setResolutionOpen] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<TradeConfirmationDetails | null>(null);
 
+  const isResolved = market.status === "resolved";
+  const isCancelled = market.status === "cancelled";
+  const isExpired = market.status === "expired";
+  const isMarketClosed = isResolved || isCancelled || isExpired;
+
   const numericValue = Number(amountText);
   const validInput = Number.isFinite(numericValue) && numericValue > 0;
   const ownedShares = side === "YES" ? yesPositionShares : noPositionShares;
-  const sideOddsPct = side === "YES" ? market.yesOddsPct : 100 - market.yesOddsPct;
 
   const buyQuote = useMemo(
     () => estimateCpmmBuy(market.yesShares, market.noShares, side, validInput ? numericValue : 0, feeBps),
     [market.yesShares, market.noShares, side, validInput, numericValue, feeBps],
   );
 
-  const sellGrossPts = validInput ? (numericValue * sideOddsPct) / 100 : 0;
-  const sellFeePts = calcFeePts(sellGrossPts, feeBps);
-  const sellNetPts = Math.max(0, sellGrossPts - sellFeePts);
+  const sellQuote = useMemo(
+    () => estimateCpmmSell(market.yesShares, market.noShares, side, validInput ? numericValue : 0, feeBps),
+    [market.yesShares, market.noShares, side, validInput, numericValue, feeBps],
+  );
 
-  const insufficientBalance = action === "buy" && validInput && numericValue > balancePts;
-  const insufficientShares = action === "sell" && validInput && numericValue > ownedShares;
-  const exceedsOddsMove = action === "buy" && buyQuote.priceImpactPct >= maxOddsMovePct;
+  const belowMinimum = validInput && numericValue < 1;
+  const insufficientBalance = action === "buy" && validInput && numericValue > balancePts + 1e-9;
+  const insufficientShares = action === "sell" && validInput && numericValue > ownedShares + 1e-9;
+  const activePriceImpactPct = action === "buy" ? buyQuote.priceImpactPct : sellQuote.priceImpactPct;
+  const activePostYesPct = action === "buy" ? buyQuote.postYesPct : sellQuote.postYesPct;
+  const exceedsOddsMove = validInput && activePriceImpactPct > maxOddsMovePct;
+  const exceedsOddsBounds = validInput && (activePostYesPct < 2 || activePostYesPct > 98);
+  const cannotSubmit =
+    isMarketClosed ||
+    submitting ||
+    !validInput ||
+    belowMinimum ||
+    insufficientBalance ||
+    insufficientShares ||
+    exceedsOddsMove ||
+    exceedsOddsBounds;
 
   const executeOrder = () => {
     onSubmitOrder({ marketId: market.id, action, side, amountOrShares: numericValue });
@@ -1183,7 +1477,7 @@ export function PredictionOrderPanel({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (submitting || !validInput || insufficientBalance || insufficientShares) return;
+    if (cannotSubmit) return;
     if (!confirmBeforeSubmit) {
       executeOrder();
       return;
@@ -1207,25 +1501,29 @@ export function PredictionOrderPanel({
         question: market.question,
         side,
         shares: numericValue,
-        avgPricePct: sideOddsPct,
-        grossProceedsPts: sellGrossPts,
-        estimatedFeePts: sellFeePts,
-        netProceedsPts: sellNetPts,
+        avgPricePct: sellQuote.avgPricePct,
+        grossProceedsPts: sellQuote.grossPts,
+        estimatedFeePts: sellQuote.feePts,
+        netProceedsPts: sellQuote.netPts,
       });
     }
   };
 
+  const isBuyYes = action === "buy" && side === "YES";
+
   return (
-    <Card className="gap-4 p-4">
-      <CardHeader className="flex-row items-center justify-between gap-2">
-        <CardTitle className="text-sm">Trade Prediction</CardTitle>
+    <div className="flex flex-col gap-4 bg-background text-foreground">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">Trade Prediction</h3>
         <Button variant="ghost" size="sm" onClick={() => setResolutionOpen(true)} className="h-7 gap-1 px-2 text-xs">
           <Info aria-hidden className="size-3.5" />
           Rules
         </Button>
-      </CardHeader>
+      </div>
 
-      <CardContent>
+      {isMarketClosed ? (
+        <PredictionClosedBanner market={market} onOpenResolutionArticle={onOpenResolutionArticle} />
+      ) : (
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <OrderPolarityToggle
             ariaLabel="Prediction action"
@@ -1256,11 +1554,11 @@ export function PredictionOrderPanel({
               <Input
                 id={inputId}
                 type="number"
-                min="0.01"
+                min="1"
                 step="any"
                 value={amountText}
                 disabled={submitting}
-                invalid={!validInput && amountText !== ""}
+                invalid={(!validInput || belowMinimum) && amountText !== ""}
                 onChange={(event) => setAmountText(event.target.value)}
                 className="font-mono tabular-nums"
               />
@@ -1270,7 +1568,7 @@ export function PredictionOrderPanel({
                   variant="outline"
                   size="sm"
                   disabled={submitting || ownedShares <= 0}
-                  onClick={() => setAmountText(ownedShares.toFixed(2))}
+                  onClick={() => setAmountText(floorCents(ownedShares).toFixed(2))}
                 >
                   Max
                 </Button>
@@ -1286,7 +1584,7 @@ export function PredictionOrderPanel({
                     variant="outline"
                     size="sm"
                     disabled={submitting}
-                    onClick={() => setAmountText((balancePts * preset.ratio).toFixed(2))}
+                    onClick={() => setAmountText(floorCents(balancePts * preset.ratio).toFixed(2))}
                     className="font-mono text-xs tabular-nums"
                   >
                     {preset.label}
@@ -1296,55 +1594,28 @@ export function PredictionOrderPanel({
             ) : null}
           </div>
 
-          <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-3 font-mono text-xs tabular-nums">
-            {action === "buy" ? (
-              <>
-                <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Est. Shares</dt>
-                  <dd className="font-semibold text-foreground">{validInput ? buyQuote.shares.toFixed(2) : "—"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Avg Price</dt>
-                  <dd className="text-foreground">{buyQuote.avgPricePct.toFixed(1)}%</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Price Impact</dt>
-                  <dd className={cn(exceedsOddsMove ? "font-semibold text-warn" : "text-foreground")}>
-                    {buyQuote.priceImpactPct.toFixed(2)}%
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
-                  <dd className="text-foreground">{validInput ? formatPts(buyQuote.feePts) : "—"}</dd>
-                </div>
-                <div className="flex justify-between border-t border-border pt-1.5">
-                  <dt className="text-muted-foreground">Est. Payout / ROI</dt>
-                  <dd className="font-bold text-ok">
-                    {validInput ? `${formatPts(buyQuote.payoutPts)} (+${buyQuote.roiPct.toFixed(1)}%)` : "—"}
-                  </dd>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Gross Proceeds</dt>
-                  <dd className="text-foreground">{validInput ? formatPts(sellGrossPts) : "—"}</dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
-                  <dd className="text-foreground">{validInput ? formatPts(sellFeePts) : "—"}</dd>
-                </div>
-                <div className="flex justify-between border-t border-border pt-1.5">
-                  <dt className="text-muted-foreground">Net Proceeds</dt>
-                  <dd className="font-bold text-ok">{validInput ? formatPts(sellNetPts) : "—"}</dd>
-                </div>
-              </>
-            )}
-          </dl>
+          <PredictionQuoteSummary
+            action={action}
+            validInput={validInput}
+            exceedsOddsMove={exceedsOddsMove}
+            feeBps={feeBps}
+            buyQuote={buyQuote}
+            sellQuote={sellQuote}
+          />
 
-          {exceedsOddsMove ? (
+          {belowMinimum ? (
             <Alert variant="warn">
-              Price impact ({buyQuote.priceImpactPct.toFixed(2)}%) exceeds the {maxOddsMovePct.toFixed(1)}% max single-trade odds move guard.
+              {action === "buy" ? "Minimum buy order is 1.00 pt." : "Minimum sell order is 1.00 share."}
+            </Alert>
+          ) : null}
+          {exceedsOddsMove ? (
+            <Alert variant="destructive">
+              Price impact ({activePriceImpactPct.toFixed(2)}%) exceeds the {maxOddsMovePct.toFixed(1)}% max single-trade odds move guard.
+            </Alert>
+          ) : null}
+          {exceedsOddsBounds ? (
+            <Alert variant="destructive">
+              Order would push market odds outside the allowed 2%–98% range.
             </Alert>
           ) : null}
           {insufficientBalance ? <Alert variant="destructive">Insufficient balance ({formatPts(balancePts)} available).</Alert> : null}
@@ -1353,22 +1624,24 @@ export function PredictionOrderPanel({
 
           <Button
             type="submit"
-            shape="pill"
-            variant={action === "buy" && side === "NO" ? "destructive" : "primary"}
+            variant={isBuyYes ? "primary" : "destructive"}
             loading={submitting}
-            disabled={submitting || !validInput || insufficientBalance || insufficientShares}
-            className="w-full"
+            disabled={cannotSubmit}
+            className={cn(
+              "h-10 w-full",
+              isBuyYes && "bg-ok-solid text-ok-solid-foreground hover:bg-ok-solid/90",
+            )}
           >
             {action === "buy" ? `Buy ${side}` : `Sell ${side}`}
           </Button>
         </form>
-      </CardContent>
+      )}
 
       <Dialog open={resolutionOpen} onOpenChange={setResolutionOpen}>
         <DialogContent className="max-w-md">
           <DialogTitle>Resolution Rules</DialogTitle>
           <DialogDescription>{market.question}</DialogDescription>
-          <p className="text-sm leading-relaxed text-card-foreground">
+          <p className="text-sm leading-relaxed text-foreground">
             {market.resolutionCriteria ?? "Resolves YES or NO at market close based on the verified in-world news oracle and settlement event."}
           </p>
           {market.resolutionArticleId ? (
@@ -1391,7 +1664,7 @@ export function PredictionOrderPanel({
         onClear={() => setPendingConfirm(null)}
         onExecute={executeOrder}
       />
-    </Card>
+    </div>
   );
 }
 
@@ -1411,13 +1684,13 @@ function PositionsSidebarList({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col divide-y divide-border">
       {perpPositions.map((pos) => {
         const liqDist = calcLiquidationDistancePct(pos.markPrice, pos.liquidationPrice, pos.side);
         const nearLiq = liqDist < 5;
         const posPnl = pos.unrealizedPnlPts >= 0;
         return (
-          <div key={pos.id} className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3">
+          <div key={pos.id} className="flex flex-col gap-2 bg-background py-3 first:pt-0">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <Badge variant={pos.side === "long" ? "ok" : "destructive"} className="font-mono uppercase">{pos.side}</Badge>
@@ -1447,7 +1720,7 @@ function PositionsSidebarList({
       {predictionPositions.map((pos) => {
         const posPnl = pos.unrealizedPnlPts >= 0;
         return (
-          <div key={pos.id} className="flex flex-col gap-1.5 rounded-lg border border-border bg-card p-3">
+          <div key={pos.id} className="flex flex-col gap-1.5 bg-background py-3 first:pt-0">
             <div className="flex items-center justify-between gap-2">
               <Badge variant={pos.side === "YES" ? "ok" : "destructive"}>{pos.side}</Badge>
               <span className={cn("font-mono text-xs font-bold tabular-nums", posPnl ? "text-ok" : "text-destructive")}>
@@ -1456,7 +1729,7 @@ function PositionsSidebarList({
             </div>
             <p className="line-clamp-2 text-xs font-medium text-foreground">{pos.question}</p>
             <span className="font-mono text-xs text-muted-foreground tabular-nums">
-              {pos.shares.toFixed(1)} sh · Avg {pos.avgPricePct.toFixed(0)}% → {pos.currentPricePct.toFixed(0)}%
+              {pos.shares.toFixed(2)} sh · Avg {pos.avgPricePct.toFixed(0)}% → {pos.currentPricePct.toFixed(0)}%
             </span>
           </div>
         );
@@ -1646,8 +1919,8 @@ export function MarketsTradingTerminal({
   return (
     <div
       className={cn(
-        "flex min-h-0 flex-col bg-background text-foreground",
-        fullscreen ? "fixed inset-0 z-40 overflow-auto" : "rounded-xl border border-border",
+        "flex min-h-0 flex-1 flex-col bg-background text-foreground",
+        fullscreen && "fixed inset-0 z-40 overflow-auto",
         className,
       )}
       {...props}
@@ -1763,12 +2036,14 @@ export function MarketsTradingTerminal({
       >
         <Sheet open={mobileSheetOpen} onOpenChange={setMobileSheetOpen}>
           <SheetTrigger asChild>
-            <Button variant="primary" shape="pill" className="w-full">
+            <Button variant="primary" className="w-full">
               {market.kind === "perp"
                 ? activePerpPosition
                   ? `Manage $${market.data.ticker}`
                   : `Trade $${market.data.ticker}`
-                : "Trade YES / NO"}
+                : market.data.status === "resolved" || market.data.status === "cancelled" || market.data.status === "expired"
+                  ? "View Resolution"
+                  : "Trade YES / NO"}
             </Button>
           </SheetTrigger>
           <SheetContent side="bottom" className="p-4">

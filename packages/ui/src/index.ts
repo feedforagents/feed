@@ -22,6 +22,7 @@ export * from "./components/CopyButton.tsx";
 export * from "./components/Dialog.tsx";
 export * from "./components/DropdownMenu.tsx";
 export * from "./components/EmptyState.tsx";
+export * from "./components/FeedMarketCard.tsx";
 export * from "./components/Input.tsx";
 export * from "./components/JoinSheet.tsx";
 export * from "./components/Label.tsx";

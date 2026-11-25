@@ -3,6 +3,7 @@ import { Flag, Heart, Link2, MessageCircle, MoreHorizontal, Quote, Repeat2, Shar
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { Avatar } from "./Avatar.tsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./DropdownMenu.tsx";
+import { FeedMarketCard, type FeedMarketStatus } from "./FeedMarketCard.tsx";
 import type { UiMode } from "./ModeToggle.tsx";
 import { TaggedText } from "./TaggedText.tsx";
 import { VerifiedBadge } from "./VerifiedBadge.tsx";
@@ -29,10 +30,28 @@ export interface PostMarketBadge {
   ticker: string;
   /** Market headline or contract summary. */
   label: string;
-  /** Optional YES odds percentage for prediction markets. */
+  /** Optional market kind (`prediction` renders an embedded prediction card; `perp` renders a compact ticker strip). */
+  kind?: "prediction" | "perp";
+  /** Optional prediction market identifier for direct deep-linking and quick trades. */
+  marketId?: string;
+  /** Optional YES odds percentage for prediction markets (`0..100`). */
   oddsPct?: number;
   /** Optional 24h change percentage for perp markets. */
   changePct?: number;
+  /** Optional formatted countdown or close time label. */
+  closesAt?: string;
+  /** Lifecycle status for embedded prediction market cards. */
+  status?: FeedMarketStatus;
+  /** Settled outcome for resolved prediction market cards. */
+  resolvedOutcome?: "yes" | "no" | null;
+  /** Optional YES share reserve count. */
+  yesShares?: number;
+  /** Optional NO share reserve count. */
+  noShares?: number;
+  /** Optional traded pool volume in virtual points. */
+  volumePts?: number;
+  /** Optional probability history points (`0..1` ratios) rendered inside the inset chart. */
+  sparkline?: ReadonlyArray<{ time: number; yesProbability: number }>;
 }
 
 export interface PostCardData {
@@ -115,6 +134,10 @@ export type PostCardProps = Omit<ComponentProps<"article">, "children"> & {
   onSelectTag?: (tag: string) => void;
   /** Called when a cashtag or market badge is clicked in `GameMode`. */
   onMarketClick?: (ticker: string) => void;
+  /** Called when a prediction market inset is opened in `GameMode`. */
+  onPredictionClick?: (marketId: string) => void;
+  /** Called when a quick `BUY YES` / `BUY NO` button inside an embedded prediction market is clicked. */
+  onQuickTrade?: (marketId: string, side: "yes" | "no") => void;
   /** Called when Follow/Unfollow author is chosen from the menu. */
   onFollowAuthor?: (handle: string) => void;
   /** Called when Mute author is chosen from the menu. */
@@ -420,6 +443,8 @@ export function PostCard({
   onHashtagClick,
   onSelectTag,
   onMarketClick,
+  onPredictionClick,
+  onQuickTrade,
   onFollowAuthor,
   onMuteAuthor,
   onBlockAuthor,
@@ -437,12 +462,19 @@ export function PostCard({
   const resolvedHashtag = onSelectTag ?? onHashtagClick;
   const showDelete = Boolean(onDelete) && (canDelete !== undefined ? canDelete : Boolean(post.isOwn));
   const repostHandle = post.repostedBy?.handle ?? post.repostedByHandle;
+  const badge = isGame ? post.marketBadge : undefined;
+  const isPredictionBadge = Boolean(badge && (badge.kind === "prediction" || badge.marketId !== undefined || badge.oddsPct !== undefined));
+  const resolvedPredictionId = badge?.marketId ?? badge?.ticker ?? "";
+  const handleOpenPrediction = (marketId: string) => {
+    if (onPredictionClick) onPredictionClick(marketId);
+    else onMarketClick?.(marketId);
+  };
 
   return (
     <article
       onClick={clickableRow ? () => onOpen?.(post.id) : undefined}
       className={cn(
-        "flex flex-col gap-1.5 border-b border-border bg-background px-4 py-3.5 text-foreground transition-colors duration-fast",
+        "flex flex-col gap-2 border-b border-border bg-background px-4 py-3.5 text-foreground transition-colors duration-fast",
         clickableRow && "cursor-pointer hover:bg-muted/30",
         !clickableRow && !isDetail && "hover:bg-muted/30",
         className,
@@ -492,8 +524,8 @@ export function PostCard({
         )}
 
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <div className="flex min-w-0 items-center justify-between gap-2">
-            <div className="flex min-w-0 flex-1 items-center gap-1 text-sm">
+          <div className="flex min-w-0 items-start justify-between gap-2">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1 gap-y-0.5 text-sm leading-tight">
               {onAuthorClick ? (
                 <button
                   type="button"
@@ -502,19 +534,18 @@ export function PostCard({
                     e.stopPropagation();
                     if (!disabled) onAuthorClick(post.authorHandle);
                   }}
-                  className={cn(focusRing, inactive, "inline-flex min-w-0 items-center gap-1 rounded-sm font-bold text-foreground hover:underline")}
+                  className={cn(focusRing, inactive, "inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm font-bold text-foreground hover:underline")}
                 >
-                  <span className="min-w-0 truncate">{post.authorDisplayName}</span>
+                  <span className="truncate">{post.authorDisplayName}</span>
                   {post.isNpcParody ? <VerifiedBadge size="sm" /> : null}
-                  <span className="min-w-0 truncate font-normal text-muted-foreground">@{post.authorHandle}</span>
                 </button>
               ) : (
-                <span className="inline-flex min-w-0 items-center gap-1">
-                  <span className="min-w-0 truncate font-bold text-foreground">{post.authorDisplayName}</span>
+                <span className="inline-flex max-w-full min-w-0 items-center gap-1">
+                  <span className="truncate font-bold text-foreground">{post.authorDisplayName}</span>
                   {post.isNpcParody ? <VerifiedBadge size="sm" /> : null}
-                  <span className="min-w-0 truncate text-muted-foreground">@{post.authorHandle}</span>
                 </span>
               )}
+              <span className="max-w-full truncate text-muted-foreground">@{post.authorHandle}</span>
               <span className="shrink-0 whitespace-nowrap text-muted-foreground">· {post.createdAt}</span>
               {post.viaClientName ? (
                 <span className="hidden shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:inline">
@@ -556,7 +587,7 @@ export function PostCard({
             </p>
           ) : null}
 
-          <p className={cn("text-foreground", isDetail ? "text-lg leading-normal" : "text-base leading-snug")}>
+          <p className={cn("text-foreground", isDetail ? "text-lg leading-normal" : "text-[15px] leading-normal")}>
             <TaggedText
               text={post.content}
               showCashtags={isGame}
@@ -578,48 +609,70 @@ export function PostCard({
             />
           ) : null}
 
-          {isGame && post.marketBadge ? (
+          {badge && !isPredictionBadge ? (
             <button
               type="button"
               disabled={disabled}
               onClick={(e) => {
                 e.stopPropagation();
-                if (!disabled) onMarketClick?.(post.marketBadge!.ticker);
+                if (!disabled) onMarketClick?.(badge.ticker);
               }}
               className={cn(
                 focusRing,
                 inactive,
-                "flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2 text-left text-xs transition-colors duration-fast hover:bg-accent",
+                "flex items-center justify-between gap-3 rounded-lg border border-border/80 bg-background px-3 py-2 text-left text-xs transition-colors duration-fast hover:bg-muted/40",
               )}
             >
               <span className="flex min-w-0 items-center gap-2">
                 <TrendingUp aria-hidden className="size-4 shrink-0 text-primary" />
-                <span className="font-mono font-semibold text-primary">${post.marketBadge.ticker}</span>
-                <span className="truncate text-foreground">{post.marketBadge.label}</span>
+                <span className="font-mono font-semibold text-primary">${badge.ticker}</span>
+                <span className="truncate text-foreground">{badge.label}</span>
               </span>
-              <span className="shrink-0 font-mono font-semibold text-foreground tabular-nums">
-                {post.marketBadge.oddsPct !== undefined
-                  ? `${post.marketBadge.oddsPct}% YES`
-                  : post.marketBadge.changePct !== undefined
-                    ? `${post.marketBadge.changePct >= 0 ? "+" : ""}${post.marketBadge.changePct}%`
-                    : null}
-              </span>
+              {badge.changePct !== undefined ? (
+                <span className={cn("shrink-0 font-mono font-semibold tabular-nums", badge.changePct >= 0 ? "text-ok" : "text-destructive")}>
+                  {badge.changePct >= 0 ? "+" : ""}{badge.changePct}%
+                </span>
+              ) : null}
             </button>
           ) : null}
+        </div>
+      </div>
 
-          <PostActionBar
-            post={post}
-            isDetail={isDetail}
+      {badge && isPredictionBadge ? (
+        <div className="sm:pl-[52px]">
+          <FeedMarketCard
+            variant="embedded"
+            marketId={resolvedPredictionId}
+            question={badge.label}
+            yesOddsPct={badge.oddsPct ?? 50}
+            closesAt={badge.closesAt}
+            status={badge.status}
+            resolvedOutcome={badge.resolvedOutcome}
+            volumePts={badge.volumePts}
+            yesShares={badge.yesShares}
+            noShares={badge.noShares}
+            sparkline={badge.sparkline}
+            category={badge.ticker && badge.ticker !== "PRED" ? `$${badge.ticker}` : undefined}
             disabled={disabled}
-            showDelete={showDelete}
-            onReply={onReply}
-            onRepost={onRepost}
-            onLike={onLike}
-            onQuote={onQuote}
-            onShare={onShare}
-            onDelete={onDelete}
+            onOpen={onPredictionClick || onMarketClick ? handleOpenPrediction : undefined}
+            onQuickTrade={onQuickTrade}
           />
         </div>
+      ) : null}
+
+      <div className="pl-[52px]">
+        <PostActionBar
+          post={post}
+          isDetail={isDetail}
+          disabled={disabled}
+          showDelete={showDelete}
+          onReply={onReply}
+          onRepost={onRepost}
+          onLike={onLike}
+          onQuote={onQuote}
+          onShare={onShare}
+          onDelete={onDelete}
+        />
       </div>
     </article>
   );

@@ -4,7 +4,6 @@ import { cn } from "../lib/cn.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "./Card.tsx";
 
 export type PredictionMarketPhase = "PendingOpen" | "Trading" | "AwaitingProof" | "ManualReviewHold" | "Resolved" | "Cancelled";
 
@@ -75,8 +74,8 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
         : "Resolved";
 
     return (
-      <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
-        <CardHeader className="gap-2">
+      <div className={cn("flex flex-col gap-4 rounded-lg border border-border bg-background p-4 text-foreground transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
+        <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
               <Badge variant="outline" className="font-mono">{market.timeframe}</Badge>
@@ -93,30 +92,30 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
           <div className="flex items-start gap-2.5">
             {market.orgAvatarUrl ? <Avatar name={market.question} src={market.orgAvatarUrl} size="sm" className="mt-0.5" /> : null}
             <div className="flex min-w-0 flex-1 flex-col gap-1">
-              <CardTitle className="leading-snug">{market.question}</CardTitle>
+              <h3 className="text-base leading-snug font-semibold">{market.question}</h3>
               {market.description ? <p className="line-clamp-2 text-xs text-muted-foreground">{market.description}</p> : null}
             </div>
           </div>
-        </CardHeader>
+        </div>
 
-        <CardContent className="gap-2">
+        <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between font-mono text-sm font-semibold tabular-nums">
             <span className="text-ok">YES {yesPct}%</span>
             <span className="text-destructive">NO {noPct}%</span>
           </div>
           <div role="img" aria-label={`YES ${yesPct} percent, NO ${noPct} percent`} className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
-            <div className="h-full bg-ok" style={{ width: `${yesPct}%` }} />
-            <div className="h-full bg-destructive" style={{ width: `${noPct}%` }} />
+            <div className="h-full bg-ok-solid" style={{ width: `${yesPct}%` }} />
+            <div className="h-full bg-danger-solid" style={{ width: `${noPct}%` }} />
           </div>
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
             <span>Pool {market.liquidityPts}</span>
             {market.volume24hPts ? <span className="font-mono tabular-nums">24h Vol {market.volume24hPts}</span> : null}
             {!onSelect && isResolved ? <span className="font-semibold text-foreground">{resolvedLabel}</span> : null}
           </div>
-        </CardContent>
+        </div>
 
         {onSelect ? (
-          <CardFooter className="justify-between">
+          <div className="flex items-center justify-between gap-2 pt-1">
             {isResolved ? (
               <span className="text-xs font-semibold text-foreground">{resolvedLabel}</span>
             ) : (
@@ -125,15 +124,15 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
             <Button
               variant={selected && !isResolved ? "primary" : "outline"}
               size="sm"
-              shape="pill"
               disabled={disabled}
               onClick={() => !disabled && onSelect(market.id)}
+              className={cn(selected && !isResolved && "bg-ok-solid text-ok-solid-foreground hover:bg-ok-solid/90")}
             >
               {isResolved ? "View market" : "Trade YES / NO"}
             </Button>
-          </CardFooter>
+          </div>
         ) : null}
-      </Card>
+      </div>
     );
   }
 
@@ -141,8 +140,8 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
   const positive = (market.change24hPct ?? 0) >= 0;
 
   return (
-    <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
-      <CardHeader className="gap-2">
+    <div className={cn("flex flex-col gap-4 rounded-lg border border-border bg-background p-4 text-foreground transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
+      <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2.5">
             {market.orgAvatarUrl ? <Avatar name={market.name} src={market.orgAvatarUrl} seed={market.ticker} size="sm" /> : null}
@@ -164,10 +163,10 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
             </span>
           ) : null}
         </div>
-        <CardTitle className="text-sm font-medium text-muted-foreground">{market.name}</CardTitle>
-      </CardHeader>
+        <h3 className="text-sm font-medium text-muted-foreground">{market.name}</h3>
+      </div>
 
-      <CardContent>
+      <div className="flex flex-col gap-2">
         <dl className="grid grid-cols-2 gap-3 text-xs">
           <div>
             <dt className="text-muted-foreground">Spot Index</dt>
@@ -186,15 +185,15 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
             <dd className="font-mono text-sm font-medium text-foreground tabular-nums">{market.volume24hPts ?? market.openInterestPts}</dd>
           </div>
         </dl>
-      </CardContent>
+      </div>
 
       {onSelect ? (
-        <CardFooter>
-          <Button variant={selected ? "primary" : "outline"} size="sm" shape="pill" disabled={disabled} onClick={() => !disabled && onSelect(market.id)}>
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <Button variant={selected ? "primary" : "outline"} size="sm" disabled={disabled} onClick={() => !disabled && onSelect(market.id)}>
             Trade Perp
           </Button>
-        </CardFooter>
+        </div>
       ) : null}
-    </Card>
+    </div>
   );
 }
