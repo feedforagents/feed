@@ -630,16 +630,18 @@ it.effect('Session cookie slides with the server session (spec/app/index.md, "St
     try check(() => assert.strictEqual(meFresh.headers.get("set-cookie"), null))
 
     try TestClock.adjust("25 days")
-    const meLater = try callApp("/api/auth/me", { cookie: player.cookie })
-    const meLaterBody = try readJson(meLater)
-    try check(() => assert.strictEqual(meLaterBody.authenticated, true))
-    const refreshedMaxAge = sessionCookieMaxAge(meLater.headers.get("set-cookie"))
-    const refreshedPair = extractSessionCookie(meLater)
+    const marketsLater = try callApp("/api/markets", { cookie: player.cookie })
+    try check(() => assert.strictEqual(marketsLater.status, 200))
+    const refreshedMaxAge = sessionCookieMaxAge(marketsLater.headers.get("set-cookie"))
+    const refreshedPair = extractSessionCookie(marketsLater)
     try check(() => assert.deepStrictEqual(
       { refreshedMaxAge, sameToken: refreshedPair === player.cookie },
       { refreshedMaxAge: 30 * 86_400, sameToken: true }
     ))
-
+    const meLater = try callApp("/api/auth/me", { cookie: player.cookie })
+    const meLaterBody = try readJson(meLater)
+    try check(() => assert.strictEqual(meLaterBody.authenticated, true))
+    try check(() => assert.strictEqual(meLater.headers.get("set-cookie"), null))
     try TestClock.adjust("25 days")
     const meStill = try callApp("/api/auth/me", { cookie: player.cookie })
     const meStillBody = try readJson(meStill)
