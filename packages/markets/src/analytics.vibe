@@ -290,7 +290,7 @@ export effect function getPredictionPriceHistory(
 ): PriceHistoryResult {
   return try withPriceHistoryTx(input, effect (tx, { range, safeLimit, now }) => {
     const [market] = try tx.query(
-      "SELECT id, yes_shares, no_shares, status, resolved_at FROM feed_prediction_markets WHERE id = $1 LIMIT 1",
+      "SELECT id, yes_shares, no_shares, status, resolved_outcome, resolved_at FROM feed_prediction_markets WHERE id = $1 LIMIT 1",
       [input.marketId]
     )
     if (market === undefined) {
@@ -298,6 +298,13 @@ export effect function getPredictionPriceHistory(
     }
     const liveYesBps = yesOddsBps(toInt(market.yes_shares), toInt(market.no_shares))
     const livePriceCents = Math.max(1, Math.min(99, Math.round(liveYesBps / 100)))
+    // A resolved market settles at 10_000 bps (YES) or 0 bps (NO), not at
+    // the pre-resolution odds. Use the settlement price for the final point.
+    const resolvedOutcome = toText(market.resolved_outcome)?.toLowerCase() ?? null
+    const isResolved = requiredText(market.status, "open") === "resolved" && (resolvedOutcome === "yes" || resolvedOutcome === "no")
+    const finalYesBps = isResolved ? (resolvedOutcome === "yes" ? 10_000 : 0) : liveYesBps
+    const finalPriceCents = isResolved ? (resolvedOutcome === "yes" ? 100 : 0) : livePriceCents
+
     const durationMs = rangeDurationMs(range)
     const cutoffMs = durationMs === null ? null : now - durationMs
     let rows = cutoffMs === null
@@ -333,13 +340,13 @@ export effect function getPredictionPriceHistory(
     const marketEndTs = optionalInt(market.resolved_at) ?? now
     if (
       last === undefined ||
-      last.yesPriceBps !== liveYesBps ||
+      last.yesPriceBps !== finalYesBps ||
       marketEndTs - last.timestamp > 60_000
     ) {
       points.push({
         timestamp: Math.max(marketEndTs, last !== undefined ? last.timestamp + 1 : marketEndTs),
-        priceCents: livePriceCents,
-        yesPriceBps: liveYesBps,
+        priceCents: finalPriceCents,
+        yesPriceBps: finalYesBps,
         volumeCents: 0
       })
     }
