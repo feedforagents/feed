@@ -24,13 +24,14 @@ import {
   recoverExpiredMarkets,
   type RecoveryRunResult,
 } from "./narrative-arc.vibe"
-import { groundingRosterSummary, renderPrompt } from "./prompts.vibe"
+import { groundingRosterSummary, orgPromptIdForType, renderPrompt, sampleOrgPostExamples } from "./prompts.vibe"
 import {
   EngineFailure,
   advanceDayHour,
   displayNameForEntity,
   ensureWorldStateTx,
   executeHttpWithTimeout,
+  hasFirstPersonSingularLeak,
   hashString,
   isRuntimeNpcActor,
   maybePublishFeedEvent,
@@ -40,8 +41,11 @@ import {
   recordTickHealth,
   replaceActorSlugsWithNames,
   resolveClockNow,
+  safeNonNegInt,
   sanitizeNarrativeText,
   sanitizeText,
+  scrubRealWorldNames,
+  stripLeadingSelfPrefix,
 } from "./shared.vibe"
 import { getDailySpendStatus, reconcileStaleUncertainSpend } from "./spend-budget.vibe"
 
@@ -106,9 +110,15 @@ export const DEFAULT_RSS_URLS: ReadonlyArray<string> = [
   "https://feeds.npr.org/1004/rss.xml",
 ]
 
-const JOB_LOCK_NAMESPACE = 2525100
+const JOB_LEASE_TTL_MS = 120_000
+const ORG_POST_COOLDOWN_MS = 30 * 60_000
 const activeLocalJobLocks = new Set<string>()
 const majorOrgSet = new Set(manifest.orgPriorities.major)
+const packOrgById = new Map(organizations.map((o) => [o.id, o]))
+
+export function utcMinuteCycle(nowMs: number): number {
+  return Math.floor(nowMs / 60_000)
+}
 
 export function resolveClockMode(): ClockMode {
   const modeEnv = readEnv("FEED_CLOCK_MODE")?.trim().toLowerCase()
@@ -119,9 +129,15 @@ export function resolveClockMode(): ClockMode {
   return deployEnv === "production" || nodeEnv === "production" ? "ClockRealtime" : "ClockSimulated"
 }
 
-function jobLockKey(jobName: string): number {
-  const hashed = hashString(`feed:job:${jobName}`) & 0x7fffffff
-  return hashed === 0 ? 1 : hashed
+effect function ensureJobLeasesTableTx(tx: Tx): void!StoreFailure {
+  try tx.query(
+    `CREATE TABLE IF NOT EXISTS feed_job_leases (
+       job_name text PRIMARY KEY,
+       owner_id text NOT NULL,
+       lease_until bigint NOT NULL,
+       updated_at bigint NOT NULL
+     )`,
+  )
 }
 
 function formatErrorMessage(err: unknown): string {
@@ -156,36 +172,47 @@ effect function withJobLockAndErrorHealth<A, E>(
   runBody: () => A!E!Store,
 ): A!(E | StoreFailure)!Store {
   const store = try Store
-  const lockId = jobLockKey(jobName)
-  const useSessionAdvisoryLock = store.location.kind !== "pg"
   if (activeLocalJobLocks.has(jobName)) {
     const endWall = try Clock.currentTimeMillis
     try recordTickHealth(jobName, resolvedNow, "skipped", "Job already running in worker", 0, null, endWall - startWall)
     return onLockBusy()
   }
   activeLocalJobLocks.add(jobName)
+  const ownerId = newEngineId("lease")
   return try scoped(effect {
-    const pgLocked = try acquireRelease(
+    const leaseAcquired = try acquireRelease(
       effect {
-        if (!useSessionAdvisoryLock) return true
-        const rows = try store.transaction(effect (tx: Tx) =>
-          try tx.query("SELECT pg_try_advisory_lock($1, $2) AS locked", [JOB_LOCK_NAMESPACE, lockId]),
-        )
-        return rows[0]?.locked === true
+        const leaseNow = try Clock.currentTimeMillis
+        const leaseUntil = leaseNow + JOB_LEASE_TTL_MS
+        const rows = try store.transaction(effect (tx: Tx) => {
+          try ensureJobLeasesTableTx(tx)
+          return try tx.query(
+            `INSERT INTO feed_job_leases (job_name, owner_id, lease_until, updated_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (job_name) DO UPDATE
+             SET owner_id = EXCLUDED.owner_id,
+                 lease_until = EXCLUDED.lease_until,
+                 updated_at = EXCLUDED.updated_at
+             WHERE feed_job_leases.lease_until <= $4
+             RETURNING job_name`,
+            [jobName, ownerId, leaseUntil, leaseNow],
+          )
+        })
+        return rows.length > 0
       },
       (acquired) =>
         effect {
           activeLocalJobLocks.delete(jobName)
-          if (useSessionAdvisoryLock && acquired) {
+          if (acquired) {
             store.transaction(effect (tx: Tx) =>
-              try tx.query("SELECT pg_advisory_unlock($1, $2)", [JOB_LOCK_NAMESPACE, lockId]),
+              try tx.query("DELETE FROM feed_job_leases WHERE job_name = $1 AND owner_id = $2", [jobName, ownerId]),
             ) catch effect () => undefined
           }
         },
     )
-    if (!pgLocked) {
+    if (!leaseAcquired) {
       const endWall = try Clock.currentTimeMillis
-      try recordTickHealth(jobName, resolvedNow, "skipped", "Advisory lock held by concurrent job", 0, null, endWall - startWall)
+      try recordTickHealth(jobName, resolvedNow, "skipped", "Job lease held by concurrent worker", 0, null, endWall - startWall)
       return onLockBusy()
     }
     return runBody() catch effect (err: E) => {
@@ -208,12 +235,12 @@ effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
      WHERE singleton = true`,
   )
   const row = rows[0] ?? {}
-  const prevTickAt = Math.max(0, toInt(row.last_tick_at))
+  const prevTickAt = safeNonNegInt(row.last_tick_at, 0)
   const monotonicNow = Math.max(nowMs, prevTickAt)
-  const prevDay = Math.max(1, toInt(row.current_day) || 1)
+  const prevDay = Math.max(1, safeNonNegInt(row.current_day, 1))
   const { nextDay, nextHour } = advanceDayHour(prevDay, prevTickAt, monotonicNow)
   const gameRunning = row.game_running !== false
-  const fundingCutoverPeriod = Math.max(0, toInt(row.funding_cutover_period))
+  const fundingCutoverPeriod = safeNonNegInt(row.funding_cutover_period, 0)
   try tx.query(
     `UPDATE feed_world_state
      SET current_day = $1, current_hour = $2, last_tick_at = $3, updated_at = $3
@@ -255,7 +282,7 @@ effect function simulateCorrelatedSpotActivity(nowMs: number): number!StoreFailu
     const actorRows = (try tx.query(
       `SELECT id, name, username, balance_cents
        FROM feed_actors
-       WHERE id NOT LIKE 'test-%' AND balance_cents >= 50000
+       WHERE id NOT LIKE 'test-%' AND id NOT LIKE 'org-%' AND balance_cents >= 50000
        ORDER BY id ASC`,
     )).filter((r) => isRuntimeNpcActor(toText(r.id) ?? "", toText(r.name), toText(r.username)))
     const holdingRows = try tx.query(
@@ -354,6 +381,8 @@ effect function simulateCorrelatedSpotActivity(nowMs: number): number!StoreFailu
         ticker: trade.ticker,
         side: effectiveSide,
         quoteCents: trade.quoteCents,
+        indexPriceCents: receipt.indexPriceCents,
+        markPriceCents: receipt.markPriceCents,
       })
     }
   }
@@ -395,6 +424,7 @@ export effect function runMinuteTick(nowMs?: number): MinuteTickResult!(EngineFa
       }
       reconcileStaleUncertainSpend(world.nowMs) catch effect () => null
       const phaseRes = try advanceNarrativePhases(world.nowMs)
+      const fundingAccrued = checkAndAccrueFunding(world.nowMs, world.fundingCutoverPeriod) catch effect () => false
       const liquidated = liquidateEligiblePositions() catch effect () => null
       const liquidatedCount = liquidated === null ? 0 : liquidated.liquidatedCount
       const spotTradesSimulated = simulateCorrelatedSpotActivity(world.nowMs) catch effect () => 0
@@ -407,7 +437,7 @@ export effect function runMinuteTick(nowMs?: number): MinuteTickResult!(EngineFa
         flippedWindows: phaseRes.flippedWindows,
         newlyExpired: phaseRes.newlyExpired,
         liquidatedCount,
-        fundingAccrued: false,
+        fundingAccrued,
         spotTradesSimulated,
       }
     },
@@ -483,7 +513,23 @@ export effect function runMarketsTick(nowMs?: number): {
         try recordTickHealth("markets-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
         return { skipped: true, flippedWindows: 0, newlyExpired: 0, cluesPublished: 0, seededMarketIds: [] }
       }
-      const phaseRes = try advanceNarrativePhases(resolvedNow)
+      const store = try Store
+      const needsPhaseAdvance = try store.transaction(effect (tx: Tx) => {
+        const rows = try tx.query(
+          `SELECT 1
+           FROM feed_prediction_markets
+           WHERE status = 'open'
+             AND (
+               expires_at <= $1
+               OR (phase = 'opening' AND ($1 - created_at) * 3 >= GREATEST(1, expires_at - created_at))
+               OR (phase = 'mid' AND ($1 - created_at) * 3 >= 2 * GREATEST(1, expires_at - created_at))
+             )
+           LIMIT 1`,
+          [resolvedNow],
+        )
+        return rows.length > 0
+      })
+      const phaseRes = needsPhaseAdvance ? try advanceNarrativePhases(resolvedNow) : { flippedWindows: 0, newlyExpired: 0 }
       const cluesPublished = try publishPhaseClues(resolvedNow)
       const seededMarketIds = try ensureRollingMarketSlots(resolvedNow)
       snapshotMarketPrices(resolvedNow) catch effect () => ({ perpCount: 0, predictionCount: 0 })
@@ -550,7 +596,14 @@ export effect function runNpcTick(nowMs?: number): NpcTickBatchSummary!(EngineFa
   )
 }
 
-const STRATIFIED_ORG_TYPES: ReadonlyArray<string> = ["company", "media", "vc", "government", "financial", "organization"]
+const WEIGHTED_ORG_TYPES: ReadonlyArray<{ readonly type: string; readonly weight: number }> = [
+  { type: "media", weight: 15 },
+  { type: "company", weight: 12 },
+  { type: "vc", weight: 10 },
+  { type: "organization", weight: 8 },
+  { type: "financial", weight: 7 },
+  { type: "government", weight: 6 },
+]
 
 function orgTypeStyleHint(orgType: string, baseStyle: string): string {
   switch (orgType) {
@@ -567,6 +620,31 @@ function orgTypeStyleHint(orgType: string, baseStyle: string): string {
     default:
       return `Corporate product/earnings PR (${baseStyle})`
   }
+}
+
+function pickWeightedOrgTypes(
+  availableTypes: ReadonlyArray<string>,
+  count: number,
+  bucket: number,
+): ReadonlyArray<string> {
+  const remaining = WEIGHTED_ORG_TYPES.filter((entry) => availableTypes.includes(entry.type))
+  const chosen: string[] = []
+  for (let slot = 0; slot < count && remaining.length > 0; slot += 1) {
+    let totalWeight = 0
+    for (const item of remaining) totalWeight += item.weight
+    let cursor = hashString(`org-type:${bucket}:${slot}`) % Math.max(1, totalWeight)
+    let pickedIdx = 0
+    for (let i = 0; i < remaining.length; i += 1) {
+      cursor -= remaining[i]!.weight
+      if (cursor < 0) {
+        pickedIdx = i
+        break
+      }
+    }
+    chosen.push(remaining[pickedIdx]!.type)
+    remaining.splice(pickedIdx, 1)
+  }
+  return chosen
 }
 
 export effect function runOrganizationTick(nowMs?: number): { readonly skipped: boolean; readonly postsCreated: number }!(EngineFailure | StoreFailure | SocialFailure)!Store {
@@ -595,44 +673,78 @@ export effect function runOrganizationTick(nowMs?: number): { readonly skipped: 
            WHERE can_be_involved = true
            ORDER BY id ASC`,
         )
+        const recentOrgPostRows = try tx.query(
+          `SELECT author_id, content, created_at
+           FROM feed_posts
+           WHERE author_kind = 'org' AND deleted_at IS NULL AND created_at >= $1
+           ORDER BY created_at DESC
+           LIMIT 120`,
+          [resolvedNow - 6 * 3_600_000],
+        )
         const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
-        return { orgRows, worldContext: snapshot.worldContext }
+        return { orgRows, recentOrgPostRows, worldContext: snapshot.worldContext }
       })
       if (context.orgRows.length === 0) {
         const endWall = try Clock.currentTimeMillis
         try recordTickHealth("organization-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
         return { skipped: true, postsCreated: 0 }
       }
+      const cooldownCutoff = resolvedNow - ORG_POST_COOLDOWN_MS
+      const recentlyPostedOrgIds = new Set<string>()
+      const recentPostsByOrgId = new Map<string, Array<string>>()
+      for (const row of context.recentOrgPostRows) {
+        const authorId = toText(row.author_id) ?? ""
+        const createdAt = safeNonNegInt(row.created_at, 0)
+        const content = sanitizeNarrativeText(toText(row.content) ?? "", 140)
+        if (!authorId) continue
+        if (createdAt >= cooldownCutoff) recentlyPostedOrgIds.add(authorId)
+        if (content.length > 0) {
+          const list = recentPostsByOrgId.get(authorId) ?? []
+          if (list.length < 4) {
+            list.push(content)
+            recentPostsByOrgId.set(authorId, list)
+          }
+        }
+      }
+      const cooledRows = context.orgRows.filter((row) => !recentlyPostedOrgIds.has(toText(row.id) ?? ""))
+      const candidateRows = cooledRows.length >= targetOrgs ? cooledRows : context.orgRows
       const bucket = Math.floor(resolvedNow / (routeCadenceMinutes("RouteOrganizationTick") * 60_000))
       const byType = new Map<string, Array<Readonly<Record<string, unknown>>>>()
-      for (const row of context.orgRows) {
+      for (const row of candidateRows) {
         const orgType = (toText(row.org_type) ?? "company").toLowerCase()
         const list = byType.get(orgType) ?? []
         list.push(row)
         byType.set(orgType, list)
       }
-      const availableTypes = STRATIFIED_ORG_TYPES.filter((t) => (byType.get(t)?.length ?? 0) > 0)
+      const availableTypes = WEIGHTED_ORG_TYPES.map((e) => e.type).filter((t) => (byType.get(t)?.length ?? 0) > 0)
+      const chosenTypes = pickWeightedOrgTypes(availableTypes, Math.min(targetOrgs, availableTypes.length), bucket)
       const selected: Array<Readonly<Record<string, unknown>>> = []
       const chosenIds = new Set<string>()
-      for (let slot = 0; slot < Math.min(targetOrgs, availableTypes.length); slot += 1) {
-        const typeKey = availableTypes[(bucket + slot) % availableTypes.length]!
+      for (let slot = 0; slot < chosenTypes.length; slot += 1) {
+        const typeKey = chosenTypes[slot]!
         const pool = byType.get(typeKey) ?? []
         if (pool.length === 0) continue
-        const pick = pool[hashString(`org:${bucket}:${typeKey}:${slot}`) % pool.length]!
-        const id = toText(pick.id) ?? ""
-        if (id && !chosenIds.has(id)) {
-          selected.push(pick)
-          chosenIds.add(id)
+        const startIdx = hashString(`org:${bucket}:${typeKey}:${slot}`) % pool.length
+        for (let offset = 0; offset < pool.length; offset += 1) {
+          const pick = pool[(startIdx + offset) % pool.length]!
+          const id = toText(pick.id) ?? ""
+          if (id && !chosenIds.has(id)) {
+            selected.push(pick)
+            chosenIds.add(id)
+            break
+          }
         }
       }
-      while (selected.length < Math.min(targetOrgs, context.orgRows.length)) {
-        const fallback = context.orgRows[hashString(`org-fill:${bucket}:${selected.length}`) % context.orgRows.length]!
-        const id = toText(fallback.id) ?? ""
-        if (id && !chosenIds.has(id)) {
-          selected.push(fallback)
-          chosenIds.add(id)
-        } else {
-          break
+      const targetCount = Math.min(targetOrgs, candidateRows.length)
+      if (selected.length < targetCount) {
+        const startIdx = hashString(`org-fill:${bucket}:${selected.length}`) % candidateRows.length
+        for (let offset = 0; offset < candidateRows.length && selected.length < targetCount; offset += 1) {
+          const fallback = candidateRows[(startIdx + offset) % candidateRows.length]!
+          const id = toText(fallback.id) ?? ""
+          if (id && !chosenIds.has(id)) {
+            selected.push(fallback)
+            chosenIds.add(id)
+          }
         }
       }
       let postsCreated = 0
@@ -642,25 +754,38 @@ export effect function runOrganizationTick(nowMs?: number): { readonly skipped: 
         const ticker = toText(org.ticker) ?? ""
         const orgType = (toText(org.org_type) ?? "company").toLowerCase()
         const baseStyle = toText(org.post_style) ?? "confident corporate PR"
-        const rendered = renderPrompt("orgPost", {
+        const packOrg = packOrgById.get(orgId)
+        const orgHandle = packOrg?.username ?? orgId
+        const promptId = orgPromptIdForType(orgType)
+        const sampledExamples = sampleOrgPostExamples(packOrg, hashString(`${orgId}:${bucket}`), 4)
+        const ownRecent = recentPostsByOrgId.get(orgId) ?? []
+        const rendered = renderPrompt(promptId, {
           orgName,
-          ticker: ticker || "PRIVATE",
+          tickerSuffix: ticker ? ` ($${ticker})` : "",
           postStyle: orgTypeStyleHint(orgType, baseStyle),
           orgDescription: toText(org.description) ?? orgName,
+          orgExamples: sampledExamples.length > 0 ? sampledExamples.map((e) => `- "${e}"`).join("\n") : "(none)",
+          recentOrgPosts: ownRecent.length > 0 ? ownRecent.map((p) => `- ${p}`).join("\n") : "(none)",
           worldContext: context.worldContext,
         })
         const completion = try generateCompletion({
-          promptId: "orgPost",
+          promptId,
           system: rendered.system,
           user: rendered.user,
           maxTokens: rendered.maxTokens,
           temperature: rendered.temperature,
           nowMs: resolvedNow,
+          actorId: orgId,
         })
+        let postContent = sanitizeNarrativeText(stripLeadingSelfPrefix(completion.text, orgName, orgHandle), 260)
+        if (postContent.length === 0 || hasFirstPersonSingularLeak(postContent)) {
+          const safeFallback = sampledExamples[0] ?? `${orgName} desk tracking live developments across Feed markets.`
+          postContent = sanitizeNarrativeText(safeFallback, 260)
+        }
         try createPost({
           authorId: orgId,
           authorKind: "org",
-          content: sanitizeNarrativeText(completion.text, 260),
+          content: postContent,
           ...(ticker ? { ticker } : {}),
         })
         try maybePublishFeedEvent({ type: "org.posted", organizationId: orgId, ticker })
@@ -705,7 +830,7 @@ export effect function runArticleTick(nowMs?: number): { readonly skipped: boole
       })
       const fallbackOrg = organizations.find((o) => o.type === "media") ?? organizations[0]
       const cadenceBucket = Math.floor(resolvedNow / (routeCadenceMinutes("RouteArticleTick") * 60_000))
-      const chosen = data.mediaRows.length > 0 ? data.mediaRows[cadenceBucket % data.mediaRows.length]! : null
+      const chosen = data.mediaRows.length > 0 ? data.mediaRows[hashString(`article:${cadenceBucket}`) % data.mediaRows.length]! : null
       const orgId = toText(chosen?.id) ?? fallbackOrg?.id ?? "feed-wire"
       const orgName = toText(chosen?.name) ?? fallbackOrg?.name ?? "The Feed Wire"
       const orgDesc = toText(chosen?.description) ?? fallbackOrg?.description ?? "Feed financial wire"
@@ -722,14 +847,17 @@ export effect function runArticleTick(nowMs?: number): { readonly skipped: boole
         temperature: rendered.temperature,
         jsonMode: true,
         nowMs: resolvedNow,
+        actorId: orgId,
       })
       const parsed = parseLlmJsonRecord(completion.text)
       const title = sanitizeNarrativeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
       const summary = sanitizeNarrativeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
-      const body = replaceActorSlugsWithNames(
-        typeof parsed?.body === "string" && parsed.body.trim().length > 0
-          ? parsed.body.trim()
-          : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`,
+      const body = scrubRealWorldNames(
+        replaceActorSlugsWithNames(
+          typeof parsed?.body === "string" && parsed.body.trim().length > 0
+            ? parsed.body.trim()
+            : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`,
+        ),
       )
       const articleId = newEngineId("art")
       try store.transaction(effect (tx: Tx) => {
@@ -773,7 +901,7 @@ export effect function runPerpFundingTick(nowMs?: number): {
         try ensureWorldStateTx(tx, resolvedNow)
         const rows = try tx.query("SELECT game_running, funding_cutover_period FROM feed_world_state WHERE singleton = true")
         const gameRunning = rows[0]?.game_running !== false
-        let cutover = Math.max(0, toInt(rows[0]?.funding_cutover_period))
+        let cutover = safeNonNegInt(rows[0]?.funding_cutover_period, 0)
         if (gameRunning && cutover === 0) {
           cutover = period + 1
           try tx.query("UPDATE feed_world_state SET funding_cutover_period = $1, updated_at = $2 WHERE singleton = true", [cutover, resolvedNow])
@@ -918,7 +1046,7 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
       const store = try Store
       const lastRunAt = try store.transaction(effect (tx: Tx) => {
         const rows = try tx.query("SELECT last_success_at FROM feed_tick_health WHERE job_name = 'rss-refresh'")
-        return rows.length > 0 ? toInt(rows[0]?.last_success_at) : 0
+        return rows.length > 0 ? safeNonNegInt(rows[0]?.last_success_at, 0) : 0
       })
       if (lastRunAt > 0 && resolvedNow - lastRunAt < cadenceMs) {
         return { skipped: true, fetchedCount: 0, insertedCount: 0 }
@@ -995,10 +1123,10 @@ export effect function fastForwardSimulatedHours(hours: number): FastForwardResu
   return try store.transaction(effect (tx: Tx) => {
     try ensureWorldStateTx(tx, wallNow)
     const rows = try tx.query("SELECT current_day, last_tick_at FROM feed_world_state WHERE singleton = true")
-    const prevTickAt = Math.max(0, toInt(rows[0]?.last_tick_at))
+    const prevTickAt = safeNonNegInt(rows[0]?.last_tick_at, 0)
     const baseMs = Math.max(wallNow, prevTickAt)
     const nextMs = baseMs + deltaMs
-    const prevDay = Math.max(1, toInt(rows[0]?.current_day) || 1)
+    const prevDay = Math.max(1, safeNonNegInt(rows[0]?.current_day, 1))
     const { nextDay, nextHour } = advanceDayHour(prevDay, baseMs, nextMs)
     try tx.query(
       `UPDATE feed_world_state
@@ -1037,13 +1165,13 @@ export effect function getEngineAdminStatus(): EngineAdminStatus!(EngineFailure 
     const w = worldRows[0] ?? {}
     const c = countsRows[0] ?? {}
     return {
-      currentDay: Math.max(1, toInt(w.current_day) || 1),
-      currentHour: Math.max(0, toInt(w.current_hour)),
+      currentDay: Math.max(1, safeNonNegInt(w.current_day, 1)),
+      currentHour: safeNonNegInt(w.current_hour, 0),
       phase: toText(w.phase) ?? "active",
       gameRunning: w.game_running !== false,
-      lastTickAt: Math.max(0, toInt(w.last_tick_at)),
-      pendingResolutions: Math.max(0, toInt(c.pending_resolutions)),
-      manualHoldCount: Math.max(0, toInt(c.manual_hold_count)),
+      lastTickAt: safeNonNegInt(w.last_tick_at, 0),
+      pendingResolutions: safeNonNegInt(c.pending_resolutions, 0),
+      manualHoldCount: safeNonNegInt(c.manual_hold_count, 0),
     }
   })
   return {
