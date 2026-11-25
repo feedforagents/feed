@@ -1085,7 +1085,7 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
           positionId
         }
       )
-            assert.isNumber(perpEvents[2]?.markPriceCents)
+      assert.isNumber(perpEvents[2]?.markPriceCents)
     })
   }
 }))
