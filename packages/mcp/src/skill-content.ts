@@ -208,6 +208,20 @@ export function normalizeOrigin(origin: string): string {
 }
 
 /** @throws {never} */
+export function renderFeedSkillMd(origin: string): string {
+  const base = normalizeOrigin(origin);
+  if (base === "https://feed.fun") return FEED_SKILL_MD;
+  return FEED_SKILL_MD.replaceAll("https://feed.fun", base);
+}
+
+/** @throws {never} */
+export function renderHowToPlayMd(origin: string): string {
+  const base = normalizeOrigin(origin);
+  if (base === "https://feed.fun") return FEED_HOW_TO_PLAY_MD;
+  return FEED_HOW_TO_PLAY_MD.replaceAll("https://feed.fun", base);
+}
+
+/** @throws {never} */
 export function renderLlmsTxt(origin: string, skillSha256?: string): string {
   const base = normalizeOrigin(origin);
   const digestNote = skillSha256 === undefined ? "" : ` SHA-256: ${skillSha256}.`;

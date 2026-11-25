@@ -38,6 +38,7 @@ import {
 export type PerpSide = "long" | "short"
 export type PerpPositionStatus = "open" | "closed" | "liquidated"
 export type PerpOrderAction = "open" | "add" | "reduce" | "close" | "flip"
+export type PerpOrderMode = "open" | "add" | "reduce" | "flip"
 
 export const MAX_PERP_USER_EXPOSURE_CENTS = 100_000_000
 export const MAX_POSITIONS_PER_USER = 50
@@ -120,6 +121,7 @@ export interface OpenPerpInput {
   readonly side: PerpSide
   readonly collateralCents: number
   readonly leverage: number
+  readonly mode?: PerpOrderMode
   readonly maxSlippageBps?: number
   readonly viaClientName?: string
 }
@@ -171,6 +173,7 @@ export interface PreviewPerpOrderInput {
   readonly side: PerpSide
   readonly collateralCents: number
   readonly leverage: number
+  readonly mode?: PerpOrderMode
 }
 
 export interface PerpOrderPreview {
@@ -728,6 +731,9 @@ effect function settlePerpCloseSliceTx(
   if (!isFullClose && (params.closeSizeCents < MIN_ORDER_SIZE_CENTS || remainingSizeCents < MIN_ORDER_SIZE_CENTS)) {
     throw marketFail("ORDER_TOO_SMALL", `Partial close and remaining size must each be at least ${MIN_ORDER_SIZE_CENTS} cents`)
   }
+  if (!isFullClose && specPos.marginCents <= 1) {
+    throw marketFail("ORDER_TOO_SMALL", "Remaining position margin would be zero; close the full position instead")
+  }
   const closedMarginCents = isFullClose
     ? specPos.marginCents
     : Math.max(1, Math.min(specPos.marginCents - 1, Math.floor((specPos.marginCents * params.closeSizeCents) / specPos.sizeCents)))
@@ -748,7 +754,10 @@ effect function settlePerpCloseSliceTx(
   const rawFee = canonicalTradingFee(params.closeSizeCents)
   const collectedFeeCents = minInt(rawFee, grossCents)
   const netCreditCents = clampMin0(grossCents - rawFee)
-  const openFeeCents = canonicalTradingFee(params.closeSizeCents)
+  const totalOpenFeeEstimate = canonicalTradingFee(specPos.sizeCents)
+  const openFeeCents = isFullClose
+    ? totalOpenFeeEstimate
+    : Math.floor((totalOpenFeeEstimate * params.closeSizeCents) / specPos.sizeCents)
   const realizedPnlCents = netCreditCents - closedMarginCents - openFeeCents
   const updatedRows = isFullClose
     ? try tx.query(
@@ -901,6 +910,7 @@ effect function insertFreshPerpPositionTx(
     readonly action: "open" | "flip"
     readonly realizedPnlCents: number
     readonly closedPositionId: string | null
+    readonly priorFeeCents?: number
     readonly now: number
   }
 ): OpenPerpReceipt!(MarketFailure | StoreFailure) {
@@ -962,7 +972,7 @@ effect function insertFreshPerpPositionTx(
     collateralCents: params.collateralCents,
     sizeCents: params.sizeCents,
     leverage: params.leverage,
-    feeCents,
+    feeCents: feeCents + (params.priorFeeCents ?? 0),
     executionPriceCents: postOpenMark,
     realizedPnlCents: params.realizedPnlCents,
     closedPositionId: params.closedPositionId,
@@ -1120,15 +1130,63 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
           fundingRateBps: boundedPremiumBps(nextLong, nextShort)
         }
       }
+      if (input.mode === "flip") {
+        const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
+        const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
+        const finalLong = input.side === "long" ? afterCloseLong + sizeCents : afterCloseLong
+        const finalShort = input.side === "short" ? afterCloseShort + sizeCents : afterCloseShort
+        const executionPriceCents = computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+        const closeFeeCents = canonicalTradingFee(existing.sizeCents)
+        const openFeeCents = canonicalTradingFee(sizeCents)
+        const feeCents = closeFeeCents + openFeeCents
+        const estLiq = computeLiquidationPriceCents({
+          posId: 1,
+          owner: input.ownerId ?? "",
+          perpSide: input.side === "short" ? "Short" : "Long",
+          sizeCents,
+          leverage: input.leverage,
+          marginCents: input.collateralCents,
+          entryPriceCents: executionPriceCents,
+          openedPeriod: 0,
+          lastFundingPeriod: 0,
+          fundingPaidCents: 0
+        })
+        return {
+          ticker: input.ticker,
+          side: input.side,
+          action: "flip",
+          collateralCents: input.collateralCents,
+          sizeCents,
+          leverage: input.leverage,
+          feeCents,
+          totalDebitCents: input.collateralCents + openFeeCents,
+          indexPriceCents,
+          preMarkPriceCents,
+          executionPriceCents,
+          priceImpactBps: computePriceImpactBps(preMarkPriceCents, executionPriceCents),
+          estimatedLiquidationPriceCents: estLiq,
+          fundingRateBps: boundedPremiumBps(finalLong, finalShort)
+        }
+      }
       if (sizeCents <= existing.sizeCents) {
         const isFull = sizeCents === existing.sizeCents
+        const remSize = existing.sizeCents - sizeCents
+        if (!isFull && (sizeCents < MIN_ORDER_SIZE_CENTS || remSize < MIN_ORDER_SIZE_CENTS)) {
+          throw marketFail("ORDER_TOO_SMALL", `Partial close and remaining size must each be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+        }
         const nextLong = existingSide === "long" ? Math.max(0, longOi - sizeCents) : longOi
         const nextShort = existingSide === "short" ? Math.max(0, shortOi - sizeCents) : shortOi
         const executionPriceCents = computeMarkPriceCents(indexPriceCents, nextLong, nextShort)
         const feeCents = canonicalTradingFee(sizeCents)
-        const remSize = existing.sizeCents - sizeCents
-        const remMargin = isFull ? 0 : existing.marginCents - Math.floor((existing.marginCents * sizeCents) / existing.sizeCents)
-        const estLiq = isFull ? 0 : computeLiquidationPriceCents({ ...existing, sizeCents: remSize, marginCents: remMargin })
+        const closedMargin = isFull
+          ? existing.marginCents
+          : Math.max(1, Math.min(existing.marginCents - 1, Math.floor((existing.marginCents * sizeCents) / existing.sizeCents)))
+        const closedFunding = isFull
+          ? existing.fundingPaidCents
+          : Math.trunc((existing.fundingPaidCents * sizeCents) / existing.sizeCents)
+        const remMargin = isFull ? 0 : existing.marginCents - closedMargin
+        const remFunding = isFull ? 0 : existing.fundingPaidCents - closedFunding
+        const estLiq = isFull ? 0 : computeLiquidationPriceCents({ ...existing, sizeCents: remSize, marginCents: remMargin, fundingPaidCents: remFunding })
         return {
           ticker: input.ticker,
           side: input.side,
@@ -1147,6 +1205,9 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
         }
       }
       const flipSize = sizeCents - existing.sizeCents
+      if (flipSize < MIN_ORDER_SIZE_CENTS) {
+        throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+      }
       const flipMargin = ceilDiv(flipSize, input.leverage)
       const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
       const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
@@ -1272,6 +1333,40 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
         now
       })
     }
+    if (input.mode === "flip") {
+      const closedOld = try settlePerpCloseSliceTx(tx, {
+        posRow: existingRow,
+        market,
+        closeSizeCents: existing.sizeCents,
+        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+        viaClientName,
+        now
+      })
+      try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, true)
+      const postCloseMarket: PerpMarketSnapshot = {
+        ...market,
+        longOiCents: closedOld.nextLongOi,
+        shortOiCents: closedOld.nextShortOi,
+        markPriceCents: closedOld.postCloseMark
+      }
+      return try insertFreshPerpPositionTx(tx, {
+        ownerId: input.ownerId,
+        ownerKind: input.ownerKind,
+        market: postCloseMarket,
+        side: input.side,
+        collateralCents: input.collateralCents,
+        sizeCents,
+        leverage: input.leverage,
+        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+        viaClientName,
+        currentPeriod,
+        action: "flip",
+        realizedPnlCents: closedOld.receipt.realizedPnlCents,
+        closedPositionId: closedOld.receipt.positionId,
+        priorFeeCents: closedOld.receipt.feeCents,
+        now
+      })
+    }
     if (sizeCents <= existing.sizeCents) {
       const settled = try settlePerpCloseSliceTx(tx, {
         posRow: existingRow,
@@ -1336,6 +1431,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       action: "flip",
       realizedPnlCents: closedOld.receipt.realizedPnlCents,
       closedPositionId: closedOld.receipt.positionId,
+      priorFeeCents: closedOld.receipt.feeCents,
       now
     })
   })

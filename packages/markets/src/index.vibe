@@ -73,6 +73,7 @@ export {
   type OpenPerpReceipt,
   type PerpMarketView,
   type PerpOrderAction,
+  type PerpOrderMode,
   type PerpOrderPreview,
   type PerpPositionStatus,
   type PerpPositionView,

@@ -66,6 +66,7 @@ import {
   listNotifications,
   listPendingGroupInvites,
   listTrending,
+  markChatRead,
   markNotificationsRead,
   muteAccount,
   publishFeedEvent,
@@ -85,6 +86,7 @@ import {
   type GroupInviteFilterKind,
   type PostView,
   type ProfileView,
+  type ReportCategory,
   type UpdatedAccountProfile
 } from "@repo/social"
 import {
@@ -102,9 +104,9 @@ import {
   type McpTool
 } from "../gen/mcp__tools.effect.vibe"
 import {
-  FEED_HOW_TO_PLAY_MD,
-  FEED_SKILL_MD,
   normalizeOrigin,
+  renderFeedSkillMd,
+  renderHowToPlayMd,
   renderLlmsTxt
 } from "./skill-content.ts"
 import { computeSkillSha256 } from "./skill-publisher.vibe"
@@ -205,6 +207,7 @@ const SPEC_TOOL_BY_NAME: Readonly<Record<McpToolName, McpTool>> = {
   update_profile: "ToolUpdateProfile",
   list_chats: "ToolListChats",
   get_messages: "ToolGetMessages",
+  mark_chat_read: "ToolReactToMessage",
   send_dm: "ToolSendDm",
   send_message: "ToolSendMessage",
   react_to_message: "ToolReactToMessage",
@@ -475,7 +478,7 @@ function guideSectionForTopic(topic: string, origin: string): Record<string, unk
       sharedSurfaceRule: "Hourly limits are shared across the web UI and MCP on the same account."
     }
   }
-  return sections[topic] ?? { ...sections.overview, fullMarkdown: FEED_HOW_TO_PLAY_MD }
+  return sections[topic] ?? { ...sections.overview, fullMarkdown: renderHowToPlayMd(base) }
 }
 
 effect function lookupDeviceClientId(deviceCode: string): (string | undefined)!(McpFailure | StoreFailure)!Store {
@@ -494,7 +497,7 @@ effect function updateAccountProfile(
   accountId: string,
   displayName: string | undefined,
   bio: string | undefined
-): UpdatedAccountProfile!(InvalidRpcParamsFailure | StoreFailure)!Store {
+): UpdatedAccountProfile!(InvalidRpcParamsFailure | SocialFailure | StoreFailure)!Store {
   if (displayName === undefined && bio === undefined) {
     throw new InvalidRpcParamsFailure({ message: "Provide displayName or bio to update." })
   }
@@ -625,7 +628,16 @@ effect function executePublicWorldTool(
       if (deviceCode === "") {
         throw new InvalidRpcParamsFailure({ message: "deviceCode is required." })
       }
-      const clientId = asOptionalString(args.clientId) ?? (try lookupDeviceClientId(deviceCode)) ?? DEFAULT_DEVICE_CLIENT_ID
+      const providedClientId = asOptionalString(args.clientId)
+      const storedClientId = try lookupDeviceClientId(deviceCode)
+      if (providedClientId !== undefined && storedClientId !== undefined && providedClientId !== storedClientId) {
+        return {
+          status: "error",
+          code: "invalid_client",
+          message: "clientId does not match the device authorization request."
+        }
+      }
+      const clientId = providedClientId ?? storedClientId ?? DEFAULT_DEVICE_CLIENT_ID
       const exchanged = exchangeOAuthToken({
         grantType: "urn:ietf:params:oauth:grant-type:device_code",
         deviceCode,
@@ -1212,7 +1224,17 @@ effect function executeProtectedSocialTool(
       const targetKind = args.targetKind === "account" ? "account" : "post"
       const targetId = asOptionalString(args.targetId) ?? ""
       const reason = String(args.reason ?? "")
-      return try reportTarget({ reporterId: caller.accountId, targetKind, targetId, reason })
+      const rawCat = asOptionalString(args.category)
+      const category: ReportCategory | undefined = rawCat === "Spam" || rawCat === "Harassment" || rawCat === "Impersonation" || rawCat === "OtherViolation"
+        ? rawCat
+        : undefined
+      return try reportTarget({
+        reporterId: caller.accountId,
+        targetKind,
+        targetId,
+        reason,
+        ...(category === undefined ? {} : { category })
+      })
     }
     case "update_profile":
       return try updateAccountProfile(caller.accountId, asOptionalString(args.displayName), typeof args.bio === "string" ? args.bio : undefined)
@@ -1220,7 +1242,7 @@ effect function executeProtectedSocialTool(
 }
 
 effect function executeProtectedMessagingTool(
-  toolName: "list_chats" | "get_messages" | "send_dm" | "send_message" | "react_to_message" | "create_group" | "invite_to_group" | "leave_group" | "list_group_invites" | "respond_to_group_invite",
+  toolName: "list_chats" | "get_messages" | "mark_chat_read" | "send_dm" | "send_message" | "react_to_message" | "create_group" | "invite_to_group" | "leave_group" | "list_group_invites" | "respond_to_group_invite",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
 ): object!(SocialFailure | StoreFailure)!Store {
@@ -1235,6 +1257,10 @@ effect function executeProtectedMessagingTool(
       const limit = clampCount(asOptionalInt(args.limit), 50, 100)
       const messages = try getChatMessages(caller.accountId, chatId, limit)
       return { chatId, messages }
+    }
+    case "mark_chat_read": {
+      const chatId = asOptionalString(args.chatId) ?? ""
+      return try markChatRead(caller.accountId, chatId)
     }
     case "send_dm": {
       const recipientHandleOrId = asOptionalString(args.recipientHandleOrId) ?? ""
@@ -1370,12 +1396,13 @@ function formatPredictionTradeReceipt(
     side: receipt.side,
     shares: shareUnitsToShares(receipt.shares),
     shareUnits: receipt.shares,
-    notionalPts: toPtsNumber(receipt.notionalCents),
-    feePts: toPtsNumber(receipt.feeCents),
-    netPts: toPtsNumber(receipt.netCents),
-    yesPriceBps: receipt.yesPriceBps,
-    noPriceBps: receipt.noPriceBps,
-    ...tradeBalanceFooter(caller.playMode, caller.clientName, receipt.balanceAfterCents)
+    ...tradeBalanceFooter(caller.playMode, caller.clientName, receipt.balanceAfterCents, {
+      notionalPts: toPtsNumber(receipt.notionalCents),
+      feePts: toPtsNumber(receipt.feeCents),
+      netPts: toPtsNumber(receipt.netCents),
+      yesPriceBps: receipt.yesPriceBps,
+      noPriceBps: receipt.noPriceBps
+    })
   }
 }
 
@@ -1413,8 +1440,14 @@ effect function executeProtectedTradeTool(
   toolName: "buy_prediction" | "sell_prediction" | "open_perp" | "close_perp",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
-): object!(InvalidRpcParamsFailure | MarketFailure | StoreFailure)!Store {
+): object!(InvalidRpcParamsFailure | McpFailure | MarketFailure | StoreFailure)!Store {
   const mode = caller.playMode
+  if (mode === "social") {
+    throw new McpFailure({
+      code: "SOCIAL_MODE_TRADING_DISABLED",
+      message: "Trading tools are disabled in Social mode. Switch to Game mode with set_mode first."
+    })
+  }
   switch (toolName) {
     case "buy_prediction": {
       const marketId = asOptionalString(args.marketId) ?? ""
@@ -1433,6 +1466,16 @@ effect function executeProtectedTradeTool(
         viaClientName: caller.clientName,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
+      try maybePublishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: "buy",
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents
+      })
       return formatPredictionTradeReceipt(receipt, caller)
     }
     case "sell_prediction": {
@@ -1448,6 +1491,16 @@ effect function executeProtectedTradeTool(
         shares: shareUnits,
         viaClientName: caller.clientName,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+      })
+      try maybePublishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: "sell",
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents
       })
       return formatPredictionTradeReceipt(receipt, caller)
     }
@@ -1466,7 +1519,7 @@ effect function executeProtectedTradeTool(
       })
       try maybePublishFeedEvent({
         type: "market.perp",
-        action: receipt.action === "close" ? "close" : "open",
+        action: receipt.action,
         actorId: caller.accountId,
         ticker,
         side,
@@ -1483,13 +1536,13 @@ effect function executeProtectedTradeTool(
         ticker,
         side,
         leverage: receipt.leverage,
-        collateralPts: toPtsNumber(receipt.collateralCents),
-        sizePts: toPtsNumber(receipt.sizeCents),
-        feePts: toPtsNumber(receipt.feeCents),
-        executionPricePts: toPtsNumber(receipt.executionPriceCents),
-        markPricePts: toPtsNumber(receipt.position.markPriceCents),
-        liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
         ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents, {
+          collateralPts: toPtsNumber(receipt.collateralCents),
+          sizePts: toPtsNumber(receipt.sizeCents),
+          feePts: toPtsNumber(receipt.feeCents),
+          executionPricePts: toPtsNumber(receipt.executionPriceCents),
+          markPricePts: toPtsNumber(receipt.position.markPriceCents),
+          liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
           realizedPnlPts: toPtsNumber(receipt.realizedPnlCents)
         })
       }
@@ -1526,13 +1579,13 @@ effect function executeProtectedTradeTool(
         ticker: receipt.ticker,
         side: receipt.side,
         isFullClose: receipt.isFullClose,
-        sizePts: toPtsNumber(receipt.sizeCents),
-        remainingSizePts: toPtsNumber(receipt.remainingSizeCents),
-        remainingSizeCents: receipt.remainingSizeCents,
-        exitPricePts: toPtsNumber(receipt.exitPriceCents),
-        markPricePts: toPtsNumber(receipt.exitPriceCents),
-        feePts: toPtsNumber(receipt.feeCents),
         ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents, {
+          sizePts: toPtsNumber(receipt.sizeCents),
+          remainingSizePts: toPtsNumber(receipt.remainingSizeCents),
+          remainingSizeCents: receipt.remainingSizeCents,
+          exitPricePts: toPtsNumber(receipt.exitPriceCents),
+          markPricePts: toPtsNumber(receipt.exitPriceCents),
+          feePts: toPtsNumber(receipt.feeCents),
           realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
           netCreditPts: toPtsNumber(receipt.netCreditCents)
         })
@@ -1574,6 +1627,7 @@ effect function executeProtectedTool(
       return try executeProtectedSocialTool(definition.name, args, caller)
     case "list_chats":
     case "get_messages":
+    case "mark_chat_read":
     case "send_dm":
     case "send_message":
     case "react_to_message":
@@ -1597,9 +1651,9 @@ function readResourceText(uri: string, origin: string): { readonly mimeType: str
   const base = normalizeOrigin(origin)
   switch (uri) {
     case "feed://skill.md":
-      return { mimeType: "text/markdown", text: FEED_SKILL_MD }
+      return { mimeType: "text/markdown", text: renderFeedSkillMd(base) }
     case "feed://how-to-play.md":
-      return { mimeType: "text/markdown", text: FEED_HOW_TO_PLAY_MD }
+      return { mimeType: "text/markdown", text: renderHowToPlayMd(base) }
     case "feed://llms.txt":
       return { mimeType: "text/plain", text: renderLlmsTxt(base) }
     default:
@@ -1794,7 +1848,7 @@ effect function handleToolsCall(input: {
         return rateLimitedResponse({
           id: input.id,
           action,
-          retryAfterSeconds: 60,
+          retryAfterSeconds: err.retryAfterSeconds ?? 60,
           message: err.message
         })
       }

@@ -1301,7 +1301,7 @@ it.effect(
     const replyInFeed = feedWithReplies.items.find((p) => p.id === reply1.id)
     const openagiClueGame = topLevelFeed.items.find((p) => p.id === openagiClueNoTicker.id)
     const powellClueGame = topLevelFeed.items.find((p) => p.id === powellClueNoTicker.id)
-    const orgOpenagiProfile = try getProfile("org-openagi", "alice", "game")
+    const orgOpenagiProfile = try getProfile("openagi", "alice", "game")
 
     const searchOpenagi = try searchWorld({ query: "openagi", mode: "game", limit: 10 })
     const searchAilon = try searchWorld({ query: "ailon", mode: "game", limit: 10 })

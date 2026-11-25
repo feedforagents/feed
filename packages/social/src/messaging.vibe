@@ -125,6 +125,7 @@ export interface SendChatMessageInput {
 
 export interface ReactToMessageInput {
   readonly accountId: string
+  readonly chatId?: string
   readonly messageId: string
   readonly emoji: string
 }
@@ -401,6 +402,25 @@ export effect function listChats(accountId: string): ReadonlyArray<ChatSummaryVi
   })
 }
 
+export effect function getChat(accountId: string, chatId: string): ChatSummaryView!(SocialFailure | StoreFailure)!Store {
+  if (chatId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Chat ID is required" })
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const account = try resolveUserOrNpcTx(tx, accountId)
+    try loadChatHeaderTx(tx, chatId)
+    const memberRows = try tx.query(
+      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      [chatId, account.id]
+    )
+    if (memberRows.length === 0) {
+      throw new SocialFailure({ code: "Forbidden", message: "Not a member of this chat" })
+    }
+    return try reloadHydratedChatTx(tx, chatId, account.id)
+  })
+}
+
 export effect function getChatMessages(
   accountId: string,
   chatId: string,
@@ -629,8 +649,11 @@ export effect function createUserGroupChat(
       if (handle.trim() === "") continue
       const member = try resolveUserOrNpcTx(tx, handle)
       if (member.id === owner.id) continue
+      if (member.kind === "npc") {
+        throw new SocialFailure({ code: "NpcDmDisallowed", message: "NPCs cannot be invited to user groups" })
+      }
       if (try isBlockedBetweenTx(tx, owner.id, member.id)) continue
-      membersToInvite.set(member.id, { id: member.id, kind: member.kind === "npc" ? "npc" : "user" })
+      membersToInvite.set(member.id, { id: member.id, kind: "user" })
     }
     const chatId = freshId()
     try tx.query(
@@ -665,6 +688,8 @@ export effect function createUserGroupChat(
           actorId: owner.id,
           postId: null,
           marketId: null,
+          chatId,
+          inviteId,
           title: "Group chat invite",
           body: `@${owner.handle} invited you to ${cleanTitle}`,
           isGameOnly: false,
@@ -795,6 +820,7 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
         actorId: sender.id,
         postId: null,
         marketId: null,
+        chatId: input.chatId,
         title: kind === "direct" ? "New direct message" : "New chat message",
         body: input.content.slice(0, 120),
         isGameOnly: false,
@@ -852,6 +878,10 @@ export effect function markChatRead(accountId: string, chatId: string): MarkChat
       "UPDATE feed_chat_members SET last_read_at = $3 WHERE chat_id = $1 AND member_id = $2",
       [chatId, account.id, nextReadAt]
     )
+    try tx.query(
+      "UPDATE feed_notifications SET read_at = $3 WHERE account_id = $1 AND kind = 'chat_message' AND chat_id = $2 AND read_at IS NULL",
+      [account.id, chatId, now]
+    )
     return { chatId, accountId: account.id, lastReadAt: nextReadAt, unreadCount: 0 }
   })
 }
@@ -880,6 +910,9 @@ effect function mutateMessageReaction(
       throw new SocialFailure({ code: "NotFound", message: "Message not found" })
     }
     const chatId = toText(msgRow.chat_id) ?? ""
+    if (input.chatId !== undefined && input.chatId.trim() !== "" && chatId !== input.chatId.trim()) {
+      throw new SocialFailure({ code: "NotFound", message: "Message not found in this chat" })
+    }
     const kind = dbKindToChatKind(msgRow.kind)
     if (kind === undefined) {
       throw new SocialFailure({ code: "TeamChatRetired", message: "Unsupported or retired chat kind" })
@@ -1181,6 +1214,17 @@ export effect function respondGroupInvite(input: RespondGroupInviteInput): Group
         recipientIds: [account.id]
       }
     ]
+    if (input.accept) {
+      const currentMembers = try loadChatMembersTx(tx, chatId)
+      const recipientIds = [...new Set([...currentMembers.map((m) => toText(m.member_id) ?? "").filter(Boolean), account.id])]
+      events.push({
+        type: "chat.updated",
+        chatId,
+        action: "member_joined",
+        actorId: account.id,
+        recipientIds
+      })
+    }
     return { invite: updatedView, events }
   })
   try emitAfterCommit(committed.events)
@@ -1320,6 +1364,8 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
       actorId,
       postId: null,
       marketId: null,
+      chatId,
+      inviteId,
       title: "Alpha group invite",
       body: `${actorName} invited you to ${chatTitle}`,
       isGameOnly: false,
@@ -1340,12 +1386,19 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
   const now = try Clock.currentTimeMillis
   const committed = try store.transaction(effect (tx: Tx) => {
     const inviter = try resolveUserOrNpcTx(tx, input.accountId)
-    const target = try resolveUserOrNpcTx(tx, input.targetHandleOrId)
     const chat = try loadChatHeaderTx(tx, input.chatId)
     if (chat.kind !== "user_group") {
       throw new SocialFailure({ code: "Forbidden", message: "Direct invitations only apply to user groups" })
     }
     const memberRows = try loadChatMembersTx(tx, input.chatId)
+    const inviterMember = memberRows.find((m) => toText(m.member_id) === inviter.id)
+    if (inviterMember === undefined) {
+      throw new SocialFailure({ code: "Forbidden", message: "Only group members can invite others" })
+    }
+    const target = try resolveUserOrNpcTx(tx, input.targetHandleOrId)
+    if (target.kind === "npc") {
+      throw new SocialFailure({ code: "NpcDmDisallowed", message: "NPCs cannot be invited to user groups" })
+    }
     if (try isBlockedBetweenTx(tx, inviter.id, target.id)) {
       throw new SocialFailure({ code: "Blocked", message: "Cannot invite a blocked account" })
     }
@@ -1383,7 +1436,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
     }
     const targetAccount: SpecAccount = {
       id: target.id,
-      role: target.kind === "npc" ? "NpcActor" : "HumanUser"
+      role: "HumanUser"
     }
     const specAccounts: SpecAccount[] = [
       { id: inviter.id, role: inviter.kind === "npc" ? "NpcActor" : "HumanUser" },
@@ -1421,6 +1474,8 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
         actorId: inviter.id,
         postId: null,
         marketId: null,
+        chatId: input.chatId,
+        inviteId,
         title: "Group chat invite",
         body: `@${inviter.handle} invited you to ${chatTitle}`,
         isGameOnly: false,
@@ -1447,7 +1502,7 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
 export effect function leaveGroupChat(accountId: string, chatId: string): LeaveGroupResult!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyChatId(chatId)
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
+  const committed = try store.transaction(effect (tx: Tx) => {
     const account = try resolveUserOrNpcTx(tx, accountId)
     const chat = try loadChatHeaderTx(tx, chatId)
     const memberRows = try loadChatMembersTx(tx, chatId)
@@ -1464,8 +1519,18 @@ export effect function leaveGroupChat(accountId: string, chatId: string): LeaveG
       throw new SocialFailure({ code: "Forbidden", message: "Cannot leave this chat" })
     }
     try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, account.id])
-    return { chatId, accountId: account.id, left: true }
+    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+    const events: FeedRealtimeEvent[] = [{
+      type: "chat.updated",
+      chatId,
+      action: "member_left",
+      actorId: account.id,
+      recipientIds
+    }]
+    return { result: { chatId, accountId: account.id, left: true }, events }
   })
+  try emitAfterCommit(committed.events)
+  return committed.result
 }
 
 export effect function renameGroupChat(
@@ -1476,15 +1541,26 @@ export effect function renameGroupChat(
   try requireNonEmptyChatId(chatId)
   const cleanTitle = try normalizeGroupTitle(title)
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const { actor, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Only user group chats can be renamed")
+  const committed = try store.transaction(effect (tx: Tx) => {
+    const { actor, memberRows, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Only user group chats can be renamed")
     const actorRole = actorMember === undefined ? undefined : toMemberRole(actorMember.role)
     if (actorRole !== "owner" && actorRole !== "admin") {
       throw new SocialFailure({ code: "Forbidden", message: "Only group owners and admins can rename the group" })
     }
     try tx.query("UPDATE feed_chats SET name = $2 WHERE id = $1", [chatId, cleanTitle])
-    return try reloadHydratedChatTx(tx, chatId, actor.id)
+    const updated = try reloadHydratedChatTx(tx, chatId, actor.id)
+    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+    const events: FeedRealtimeEvent[] = [{
+      type: "chat.updated",
+      chatId,
+      action: "renamed",
+      actorId: actor.id,
+      recipientIds
+    }]
+    return { chat: updated, events }
   })
+  try emitAfterCommit(committed.events)
+  return committed.chat
 }
 
 export effect function removeGroupMember(
@@ -1494,7 +1570,7 @@ export effect function removeGroupMember(
 ): RemoveGroupMemberResult!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyChatId(chatId)
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
+  const committed = try store.transaction(effect (tx: Tx) => {
     const { actor, memberRows, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Member removal only applies to user group chats")
     const target = try resolveUserOrNpcTx(tx, targetHandleOrId)
     if (actor.id === target.id) {
@@ -1513,8 +1589,18 @@ export effect function removeGroupMember(
       throw new SocialFailure({ code: "Forbidden", message: "Insufficient permissions to remove this member" })
     }
     try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, target.id])
-    return { chatId, memberId: target.id, removed: true }
+    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+    const events: FeedRealtimeEvent[] = [{
+      type: "chat.updated",
+      chatId,
+      action: "member_removed",
+      actorId: actor.id,
+      recipientIds
+    }]
+    return { result: { chatId, memberId: target.id, removed: true }, events }
   })
+  try emitAfterCommit(committed.events)
+  return committed.result
 }
 
 export effect function transferGroupOwnership(
@@ -1524,7 +1610,7 @@ export effect function transferGroupOwnership(
 ): ChatSummaryView!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyChatId(chatId)
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
+  const committed = try store.transaction(effect (tx: Tx) => {
     const { actor, chat, memberRows, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Ownership transfer only applies to user group chats")
     const nextOwner = try resolveUserOrNpcTx(tx, newOwnerHandleOrId)
     if (actor.id === nextOwner.id) {
@@ -1540,8 +1626,19 @@ export effect function transferGroupOwnership(
     try tx.query("UPDATE feed_chat_members SET role = 'member' WHERE chat_id = $1 AND member_id = $2", [chatId, actor.id])
     try tx.query("UPDATE feed_chat_members SET role = 'owner' WHERE chat_id = $1 AND member_id = $2", [chatId, nextOwner.id])
     try tx.query("UPDATE feed_chats SET created_by = $2 WHERE id = $1", [chatId, nextOwner.id])
-    return try reloadHydratedChatTx(tx, chatId, actor.id)
+    const updated = try reloadHydratedChatTx(tx, chatId, actor.id)
+    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+    const events: FeedRealtimeEvent[] = [{
+      type: "chat.updated",
+      chatId,
+      action: "ownership_transferred",
+      actorId: actor.id,
+      recipientIds
+    }]
+    return { chat: updated, events }
   })
+  try emitAfterCommit(committed.events)
+  return committed.chat
 }
 
 export effect function deleteGroupChat(
@@ -1550,12 +1647,22 @@ export effect function deleteGroupChat(
 ): DeleteGroupChatResult!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyChatId(chatId)
   const store = try Store
-  return try store.transaction(effect (tx: Tx) => {
-    const { actor, chat, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Only user group chats can be deleted")
+  const committed = try store.transaction(effect (tx: Tx) => {
+    const { actor, chat, memberRows, actorMember } = try loadUserGroupActionContextTx(tx, accountId, chatId, "Only user group chats can be deleted")
     if (actorMember === undefined || (toMemberRole(actorMember.role) !== "owner" && chat.createdBy !== actor.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Only the group owner can delete the group" })
     }
+    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
     try tx.query("DELETE FROM feed_chats WHERE id = $1", [chatId])
-    return { chatId, deleted: true }
+    const events: FeedRealtimeEvent[] = [{
+      type: "chat.updated",
+      chatId,
+      action: "deleted",
+      actorId: actor.id,
+      recipientIds
+    }]
+    return { result: { chatId, deleted: true }, events }
   })
+  try emitAfterCommit(committed.events)
+  return committed.result
 }

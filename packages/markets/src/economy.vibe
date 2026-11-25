@@ -16,7 +16,7 @@ import {
   netProfitCents,
   type PlayerLedger
 } from "../gen/markets__economy.effect.vibe"
-import { positionEquityAtMark, unrealizedPnlAtMark } from "../gen/markets__spotPerp.effect.vibe"
+import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
 import { markToMarketPredictionCents } from "./prediction.vibe"
 import {
   type MarketFailure,
@@ -78,6 +78,7 @@ export interface LeaderboardEntry {
   readonly settledCount: number
   readonly winRate: number
   readonly winRatePct: number
+  readonly isFollowing: boolean
 }
 
 export interface GetLeaderboardInput {
@@ -114,8 +115,10 @@ export interface LeaderboardPagination {
 }
 
 export interface FilteredLeaderboardPage {
+  readonly metric: LeaderboardMetric
   readonly entries: ReadonlyArray<LeaderboardEntry>
   readonly pagination: LeaderboardPagination
+  readonly currentUser: LeaderboardEntry | null
   readonly generatedAt: number
 }
 
@@ -128,8 +131,10 @@ export interface LeaderboardViewerRank {
 export interface LeaderboardQueryOptions {
   readonly filter?: LeaderboardFilter
   readonly timeframe?: LeaderboardTimeframe
+  readonly metric?: LeaderboardMetric
   readonly page?: number
   readonly pageSize?: number
+  readonly viewerAccountId?: string
 }
 
 export function parseLeaderboardFilter(raw: string | null | undefined): LeaderboardFilter {
@@ -190,7 +195,7 @@ effect function loadOpenPerpRows(tx: Tx, holderKind: "user" | "npc", accountId?:
 
 export effect function getAccountEconomyIn(tx: Tx, accountId: string): AccountEconomyView!(MarketFailure | StoreFailure) {
   const accountRows = try tx.query(
-    `SELECT account_id, handle, display_name, phone_verified_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents
+    `SELECT account_id, handle, display_name, phone_verified_at, email_verified_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents
      FROM feed_accounts
      WHERE account_id = $1`,
     [accountId]
@@ -219,7 +224,7 @@ export effect function getAccountEconomyIn(tx: Tx, accountId: string): AccountEc
   const positionValueCents = predValueCents + perpValueCents
   const balanceCents = toInt(acct.balance_cents)
   const startingGrantCents = toInt(acct.starting_grant_cents)
-  const verified = acct.phone_verified_at !== null
+  const verified = acct.phone_verified_at !== null || acct.email_verified_at !== null
   const ledger = buildLedger(accountId, verified, balanceCents, positionValueCents, startingGrantCents)
   return {
     accountId,
@@ -339,8 +344,9 @@ effect function loadTradingAggregatesTx(
     const specPos = toSpecPerpPosition(row)
     const mark = toInt(row.mark_price_cents)
     const equity = Math.max(0, positionEquityAtMark(specPos, mark))
+    const clampedUnrealized = equity - specPos.marginCents
     perpValueMap.set(holderId, (perpValueMap.get(holderId) ?? 0) + equity)
-    openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + unrealizedPnlAtMark(specPos, mark))
+    openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + clampedUnrealized)
   }
   const volumeRows = cutoffMs === null
     ? try tx.query(
@@ -448,17 +454,43 @@ function buildUnrankedLeaderboardRow(params: {
     wins: params.stat.wins,
     settledCount: params.stat.settledCount,
     winRate,
-    winRatePct: Math.round(winRate * 100)
+    winRatePct: Math.round(winRate * 100),
+    isFollowing: false
   }
+}
+
+effect function hydrateLeaderboardFollowStateTx(
+  tx: Tx,
+  entries: ReadonlyArray<LeaderboardEntry>,
+  viewerAccountId: string | undefined
+): ReadonlyArray<LeaderboardEntry>!StoreFailure {
+  if (viewerAccountId === undefined || viewerAccountId.trim() === "" || entries.length === 0) {
+    return entries
+  }
+  const targetIds = [...new Set(entries.map((entry) => entry.accountId).filter((id) => id !== "" && id !== viewerAccountId))]
+  if (targetIds.length === 0) return entries
+  const followRows = try tx.query(
+    "SELECT target_id FROM feed_follows WHERE follower_id = $1 AND target_id = ANY($2)",
+    [viewerAccountId, targetIds]
+  )
+  const followedSet = new Set<string>()
+  for (const row of followRows) {
+    const tid = optionalText(row.target_id)
+    if (tid !== null) followedSet.add(tid)
+  }
+  return entries.map((entry) => ({
+    ...entry,
+    isFollowing: followedSet.has(entry.accountId)
+  }))
 }
 
 effect function scorePlayerLeaderboardTx(tx: Tx, cutoffMs: number | null = null): ReadonlyArray<UnrankedLeaderboardRow>!StoreFailure {
   const accounts = try tx.query(
-    `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.balance_cents, fa.starting_grant_cents
+    `SELECT fa.account_id, fa.handle, fa.display_name, fa.avatar_url, fa.phone_verified_at, fa.email_verified_at, fa.balance_cents, fa.starting_grant_cents
      FROM feed_accounts fa
      INNER JOIN accounts a ON a.key = fa.account_id
      WHERE fa.is_reviewer = false
-       AND fa.phone_verified_at IS NOT NULL
+       AND (fa.phone_verified_at IS NOT NULL OR fa.email_verified_at IS NOT NULL)
        AND a.status = 'active'`
   )
   const { predValueMap, perpValueMap, openUnrealizedMap, volumeMap, statsMap } = try loadTradingAggregatesTx(tx, "user", cutoffMs)
@@ -490,7 +522,7 @@ effect function scoreCharacterLeaderboardTx(tx: Tx, cutoffMs: number | null = nu
   const actors = try tx.query(
     `SELECT id, username, name, tier, profile_image_url, balance_cents
      FROM feed_actors
-     WHERE id NOT LIKE 'test-%'
+     WHERE id NOT LIKE 'test-%' AND id NOT LIKE 'org-%'
      ORDER BY id ASC`
   )
   const { predValueMap, perpValueMap, openUnrealizedMap, volumeMap, statsMap } = try loadTradingAggregatesTx(tx, "npc", cutoffMs)
@@ -567,7 +599,7 @@ export effect function getLeaderboard(input: GetLeaderboardInput = {}): Leaderbo
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
     const page = Math.min(requestedPage, totalPages)
     const offset = (page - 1) * pageSize
-    const entries = ranked.slice(offset, offset + pageSize)
+    const entries = try hydrateLeaderboardFollowStateTx(tx, ranked.slice(offset, offset + pageSize), input.viewerAccountId)
     const currentUser = input.viewerAccountId !== undefined
       ? (ranked.find((entry) => entry.accountId === input.viewerAccountId) ?? null)
       : null
@@ -610,6 +642,7 @@ effect function computeFilteredRankedLeaderboardTx(
   tx: Tx,
   filter: LeaderboardFilter,
   timeframe: LeaderboardTimeframe,
+  metric: LeaderboardMetric,
   nowMs: number
 ): ReadonlyArray<LeaderboardEntry>!StoreFailure {
   const cutoffMs = timeframeCutoffMs(timeframe, nowMs)
@@ -619,7 +652,7 @@ effect function computeFilteredRankedLeaderboardTx(
   const characters = filter === "all" || filter === "npcs"
     ? try scoreCharacterLeaderboardTx(tx, cutoffMs)
     : []
-  return rankScoredEntries([...players, ...characters], "net_profit")
+  return rankScoredEntries([...players, ...characters], metric)
 }
 
 export effect function getFilteredLeaderboardPage(
@@ -627,24 +660,33 @@ export effect function getFilteredLeaderboardPage(
 ): FilteredLeaderboardPage!StoreFailure!Store {
   const filter = options.filter ?? "all"
   const timeframe = options.timeframe ?? "all"
+  const metric: LeaderboardMetric = options.metric === "return_pct" || options.metric === "win_rate" || options.metric === "volume"
+    ? options.metric
+    : "net_profit"
   const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
   const requestedPage = Math.max(1, Math.floor(options.page ?? 1))
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const ranked = try computeFilteredRankedLeaderboardTx(tx, filter, timeframe, now)
+    const ranked = try computeFilteredRankedLeaderboardTx(tx, filter, timeframe, metric, now)
     const totalCount = ranked.length
     const totalPages = Math.max(1, Math.ceil(totalCount / safePageSize))
     const safePage = Math.min(requestedPage, totalPages)
     const offset = (safePage - 1) * safePageSize
+    const entries = try hydrateLeaderboardFollowStateTx(tx, ranked.slice(offset, offset + safePageSize), options.viewerAccountId)
+    const currentUser = options.viewerAccountId !== undefined
+      ? (ranked.find((entry) => !entry.isNpc && entry.accountId === options.viewerAccountId) ?? null)
+      : null
     return {
-      entries: ranked.slice(offset, offset + safePageSize),
+      metric,
+      entries,
       pagination: {
         page: safePage,
         pageSize: safePageSize,
         totalCount,
         totalPages
       },
+      currentUser,
       generatedAt: now
     }
   })
@@ -656,11 +698,14 @@ export effect function getFilteredLeaderboardViewerRank(
 ): LeaderboardViewerRank!StoreFailure!Store {
   const filter = options.filter ?? "all"
   const timeframe = options.timeframe ?? "all"
+  const metric: LeaderboardMetric = options.metric === "return_pct" || options.metric === "win_rate" || options.metric === "volume"
+    ? options.metric
+    : "net_profit"
   const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const ranked = try computeFilteredRankedLeaderboardTx(tx, filter, timeframe, now)
+    const ranked = try computeFilteredRankedLeaderboardTx(tx, filter, timeframe, metric, now)
     const idx = ranked.findIndex((entry) => !entry.isNpc && entry.accountId === accountId)
     if (idx === -1) return { rank: null, page: null, entry: null }
     const entry = ranked[idx]!
