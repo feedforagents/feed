@@ -12,7 +12,7 @@ import {
 } from "./shared.vibe"
 
 export type HistoryRange = "1H" | "4H" | "1D" | "1W" | "ALL"
-export type ClosedOutcomeFilter = "all" | "won" | "lost"
+export type ClosedOutcomeFilter = "all" | "won" | "lost" | "cancelled"
 
 export interface PriceHistoryPoint {
   readonly timestamp: number
@@ -60,7 +60,7 @@ export interface ClosedPositionView {
   readonly costBasisCents: number
   readonly payoutCents: number
   readonly realizedPnlCents: number
-  readonly outcome: "won" | "lost"
+  readonly outcome: "won" | "lost" | "cancelled"
   readonly status: string
   readonly closedAt: number
 }
@@ -105,6 +105,7 @@ export function parseClosedOutcomeFilter(raw: string | null | undefined): Closed
   const norm = raw?.trim().toLowerCase()
   if (norm === "won") return "won"
   if (norm === "lost") return "lost"
+if (norm === "cancelled") return "cancelled"
   return "all"
 }
 
@@ -575,9 +576,11 @@ export effect function listClosedPositions(input: {
       const realizedPnlCents = payoutCents - costBasisCents
       const resolvedOutcome = toText(row.resolved_outcome)?.toLowerCase() ?? null
       const marketStatus = requiredText(row.market_status, "resolved")
-      const outcome: "won" | "lost" = realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
-        ? "won"
-        : "lost"
+        const outcome: "won" | "lost" | "cancelled" = marketStatus === "cancelled"
+            ? "cancelled"
+    : realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
+            ? "won"
+: "lost"
       combined.push({
         id: `pred:${marketId}:${sideRaw}`,
         kind: "prediction",
