@@ -578,9 +578,9 @@ export effect function listClosedPositions(input: {
       const marketStatus = requiredText(row.market_status, "resolved")
         const outcome: "won" | "lost" | "cancelled" = marketStatus === "cancelled"
             ? "cancelled"
-    : realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
-            ? "won"
-: "lost"
+                : realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
+                  ? "won"
+              : "lost"
       combined.push({
         id: `pred:${marketId}:${sideRaw}`,
         kind: "prediction",
