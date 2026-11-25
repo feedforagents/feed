@@ -145,7 +145,7 @@ function buildExploreOrgItems(
     });
   }
 
-  const qLower = s.exploreQuery.trim().toLowerCase();
+  const qLower = s.exploreQuery.trim().toLowerCase().replace(/^\$(?=.)/, "");
   for (const perp of s.perps) {
     const orgId = perp.organizationId ?? perp.ticker;
     if (seenIds.has(orgId.toLowerCase()) || seenTickers.has(perp.ticker.toUpperCase())) continue;

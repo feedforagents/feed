@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { setStoreState } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -149,7 +150,7 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
   ],
 };
 
-function installMockNetwork() {
+function installMockNetwork(options?: { readonly perps?: ReadonlyArray<Record<string, unknown>> }) {
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   const json = (body: unknown) => Promise.resolve(Response.json(body));
@@ -196,7 +197,7 @@ function installMockNetwork() {
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
     if (path === "/api/articles") return json({ articles: [] });
-    if (path === "/api/markets") return json(signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] });
+    if (path === "/api/markets") return json(signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: options?.perps ?? [] });
     if (path === "/api/world/status") {
       return json({
         currentDay: 3,
@@ -380,4 +381,33 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
+});
+
+it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork({ perps: [{ ticker: "PRED", name: "Prediction" }] });
+  setStoreState({
+    viewer: null,
+    localUiMode: "game",
+    route: "Home",
+    exploreQuery: "",
+    activeTrendingTag: null,
+    activeArticleId: null,
+    perps: [],
+    predictions: [],
+  });
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore" }).first()));
+  const search = page.getByPlaceholder("Search posts, @people, #tags, or $tickers");
+  await expect.element(search).toBeInTheDocument();
+  await act(() => userEvent.fill(search, "$PRED"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await expect.element(page.getByText("No matching organizations")).not.toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByText("Prediction")).toBeInTheDocument();
+  await expect.element(page.getByText("Organization")).toBeInTheDocument();
 });
