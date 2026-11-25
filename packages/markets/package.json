@@ -22,7 +22,6 @@
   "dependencies": {
     "@repo/db": "workspace:*",
     "effect": "4.1.1",
-    "stripe": "catalog:",
     "vibelang-runtime": "0.0.13"
   },
   "devDependencies": {

@@ -17,7 +17,8 @@ import {
   type ModerationReport,
   type ModerationState,
   type MuteRecord,
-  type Notification as SpecNotification
+  type Notification as SpecNotification,
+  type ReportCategory
 } from "../gen/social__moderation.effect.vibe"
 import { type FeedRealtimeEvent } from "./realtime.vibe"
 import {
@@ -26,6 +27,7 @@ import {
   freshId,
   insertNotificationTx,
   isBlockedBetweenTx,
+  loadProfilesByIdsTx,
   normalizeOptionalText,
   readViewerUiModeTx,
   resolveSubjectTx,
@@ -36,10 +38,23 @@ import {
   toSpecNotificationKind,
   type ResolvedSubject,
   type SocialPresentationMode,
-  type SubjectKind
+  type SubjectKind,
+  type SubjectProfile
 } from "./shared.vibe"
 
+export type { ReportCategory } from "../gen/social__moderation.effect.vibe"
+
 export type ProfileKind = SubjectKind
+
+export interface ProfileActorMeta {
+  readonly tier: string
+  readonly affiliations: ReadonlyArray<string>
+}
+
+export interface ProfileOrgMeta {
+  readonly ticker: string | null
+  readonly orgType: string
+}
 
 export interface ProfileView {
   readonly id: string
@@ -48,6 +63,10 @@ export interface ProfileView {
   readonly displayName: string
   readonly bio: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
+  readonly createdAt: number
+  readonly actorMeta: ProfileActorMeta | null
+  readonly orgMeta: ProfileOrgMeta | null
   readonly isParody: boolean
   readonly parodyLabel: string | null
   readonly followersCount: number
@@ -70,6 +89,8 @@ export interface UpdatedAccountProfile {
   readonly handle: string
   readonly displayName: string
   readonly bio: string
+  readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
 }
 
 export interface FollowResult {
@@ -93,11 +114,14 @@ export interface MuteResult {
 
 export type ReportTargetKindInput = "account" | "post"
 
+export type ReportStatusFilter = "open" | "reviewed" | "dismissed" | "all"
+
 export interface ReportTargetInput {
   readonly reporterId: string
   readonly targetKind: ReportTargetKindInput
   readonly targetId: string
   readonly reason: string
+  readonly category?: ReportCategory
 }
 
 export interface ReportView {
@@ -105,9 +129,20 @@ export interface ReportView {
   readonly reporterId: string
   readonly targetKind: ReportTargetKindInput
   readonly targetId: string
+  readonly category: ReportCategory
   readonly reason: string
   readonly status: string
   readonly createdAt: number
+}
+
+export interface ListModerationReportsInput {
+  readonly status?: ReportStatusFilter
+  readonly limit?: number
+}
+
+export interface ResolveModerationReportInput {
+  readonly reportId: string
+  readonly status: "reviewed" | "dismissed"
 }
 
 export interface NotificationView {
@@ -116,8 +151,14 @@ export interface NotificationView {
   readonly title: string
   readonly body: string
   readonly actorId: string | null
+  readonly actorName: string | null
+  readonly actorHandle: string | null
+  readonly actorAvatarUrl: string | null
   readonly postId: string | null
   readonly marketId: string | null
+  readonly chatId: string | null
+  readonly inviteId: string | null
+  readonly invitePending: boolean
   readonly isRead: boolean
   readonly readAt: number | null
   readonly isGameOnly: boolean
@@ -129,13 +170,24 @@ export interface MarkNotificationsReadResult {
   readonly unreadCount: number
 }
 
+export interface ClearNotificationsResult {
+  readonly clearedCount: number
+  readonly unreadCount: number
+}
+
 export interface FollowListEntry {
   readonly id: string
   readonly kind: ProfileKind
   readonly handle: string
   readonly displayName: string
+  readonly bio: string
   readonly avatarUrl: string | null
+  readonly viewerFollows: boolean
   readonly isParody: boolean
+}
+
+export interface ModerationListEntry extends FollowListEntry {
+  readonly createdAt: number
 }
 
 interface ModerationPairSnapshot {
@@ -234,6 +286,19 @@ effect function loadPairSnapshotTx(
   }
 }
 
+function parseAffiliations(personalityJson: string | undefined): ReadonlyArray<string> {
+  if (personalityJson === undefined || personalityJson.trim() === "") return []
+  try {
+    const parsed = JSON.parse(personalityJson) as { readonly affiliations?: unknown } | null
+    if (parsed !== null && typeof parsed === "object" && Array.isArray(parsed.affiliations)) {
+      return parsed.affiliations.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    }
+    return []
+  } catch {
+    return []
+  }
+}
+
 export effect function getProfile(
   handleOrId: string,
   viewerId?: string,
@@ -246,15 +311,19 @@ export effect function getProfile(
     const isSelf = viewer !== undefined && target.kind === "user" && viewer === target.id
     const effectiveMode = mode ?? (isSelf ? target.uiMode : try readViewerUiModeTx(tx, viewer))
     let bio: string
+    let createdAt: number
+    let actorMeta: ProfileActorMeta | null = null
+    let orgMeta: ProfileOrgMeta | null = null
     let balanceCents: number | null = null
     let activeAgentClientName: string | null = null
     if (target.kind === "user") {
       const accountRows = try tx.query(
-        "SELECT bio, balance_cents FROM feed_accounts WHERE account_id = $1 LIMIT 1",
+        "SELECT bio, balance_cents, created_at FROM feed_accounts WHERE account_id = $1 LIMIT 1",
         [target.id]
       )
       const accountRow = accountRows[0]
       bio = toText(accountRow?.bio) ?? ""
+      createdAt = safeInt(accountRow?.created_at, 0)
       if (isSelf && effectiveMode === "game") {
         balanceCents = safeInt(accountRow?.balance_cents, 0)
       }
@@ -264,15 +333,35 @@ export effect function getProfile(
       )
       activeAgentClientName = toText(grantRows[0]?.client_name) ?? null
     } else if (target.kind === "npc") {
-      const actorRows = try tx.query("SELECT description FROM feed_actors WHERE id = $1 LIMIT 1", [target.id])
-      bio = toText(actorRows[0]?.description) ?? ""
+      const actorRows = try tx.query(
+        "SELECT description, tier, personality_json, created_at FROM feed_actors WHERE id = $1 LIMIT 1",
+        [target.id]
+      )
+      const actorRow = actorRows[0]
+      bio = toText(actorRow?.description) ?? ""
+      createdAt = safeInt(actorRow?.created_at, 0)
+      actorMeta = {
+        tier: toText(actorRow?.tier) ?? "",
+        affiliations: parseAffiliations(toText(actorRow?.personality_json))
+      }
     } else {
-      const orgRows = try tx.query("SELECT description FROM feed_organizations WHERE id = $1 LIMIT 1", [target.id])
-      bio = toText(orgRows[0]?.description) ?? ""
+      const orgRows = try tx.query(
+        "SELECT description, ticker, org_type, created_at FROM feed_organizations WHERE id = $1 LIMIT 1",
+        [target.id]
+      )
+      const orgRow = orgRows[0]
+      bio = toText(orgRow?.description) ?? ""
+      createdAt = safeInt(orgRow?.created_at, 0)
+      orgMeta = {
+        ticker: effectiveMode === "social" ? null : (toText(orgRow?.ticker) ?? null),
+        orgType: toText(orgRow?.org_type) ?? ""
+      }
     }
     const followersCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_follows WHERE target_id = $1", [target.id]))[0]?.count, 0)
     const followingCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_follows WHERE follower_id = $1", [target.id]))[0]?.count, 0)
-    const postsCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE author_id = $1 AND deleted_at IS NULL", [target.id]))[0]?.count, 0)
+    const postsCount = target.kind === "org"
+      ? safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE (author_id = $1 OR author_id = $2) AND deleted_at IS NULL", [target.id, `org-${target.id}`]))[0]?.count, 0)
+      : safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE author_id = $1 AND deleted_at IS NULL", [target.id]))[0]?.count, 0)
     let viewerFollows = false
     let viewerFollowedBy = false
     let viewerBlocks = false
@@ -306,8 +395,12 @@ export effect function getProfile(
       displayName: target.displayName,
       bio,
       avatarUrl: target.avatarUrl,
+      bannerUrl: target.bannerUrl,
+      createdAt,
+      actorMeta,
+      orgMeta,
       isParody,
-      parodyLabel: isParody ? "AI parody" : null,
+      parodyLabel: null,
       followersCount,
       followingCount,
       postsCount,
@@ -327,26 +420,49 @@ export effect function getProfile(
 
 export effect function updateProfile(
   accountId: string,
-  patch: { readonly displayName?: string; readonly bio?: string }
+  patch: {
+    readonly displayName?: string
+    readonly bio?: string
+    readonly avatarUrl?: string | null
+    readonly bannerUrl?: string | null
+  }
 ): (UpdatedAccountProfile | undefined)!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
+  const hasAvatarUrl = patch.avatarUrl !== undefined
+  const hasBannerUrl = patch.bannerUrl !== undefined
   const rows = try store.transaction((tx: Tx) => tx.query(
     `UPDATE feed_accounts
      SET display_name = COALESCE($2, display_name),
          bio = COALESCE($3, bio),
-         updated_at = $4
+         avatar_url = CASE WHEN $4::boolean THEN $5 ELSE avatar_url END,
+         banner_url = CASE WHEN $6::boolean THEN $7 ELSE banner_url END,
+         updated_at = $8
      WHERE account_id = $1
-     RETURNING account_id, handle, display_name, bio`,
-    [accountId, patch.displayName ?? null, patch.bio ?? null, now]
+     RETURNING account_id, handle, display_name, bio, avatar_url, banner_url`,
+    [
+      accountId,
+      patch.displayName ?? null,
+      patch.bio ?? null,
+      hasAvatarUrl,
+      patch.avatarUrl ?? null,
+      hasBannerUrl,
+      patch.bannerUrl ?? null,
+      now
+    ]
   ))
   const row = rows[0]
   if (row === undefined) return undefined
+  const resolvedId = toText(row.account_id) ?? accountId
+  const avatarUrl = toText(row.avatar_url) ?? null
+  const bannerUrl = toText(row.banner_url) ?? null
   return {
-    accountId: toText(row.account_id) ?? accountId,
+    accountId: resolvedId,
     handle: toText(row.handle) ?? "",
     displayName: toText(row.display_name) ?? "",
-    bio: toText(row.bio) ?? ""
+    bio: toText(row.bio) ?? "",
+    avatarUrl,
+    bannerUrl
   }
 }
 
@@ -514,11 +630,49 @@ export effect function unmuteAccount(muterId: string, targetHandleOrId: string):
   })
 }
 
+function normalizeReportCategory(raw: string | undefined): ReportCategory {
+  if (raw === "Spam" || raw === "Harassment" || raw === "Impersonation" || raw === "OtherViolation") {
+    return raw
+  }
+  return "OtherViolation"
+}
+
+function encodeStoredReportReason(category: ReportCategory, reason: string): string {
+  return `[${category}] ${reason}`
+}
+
+function decodeStoredReportReason(raw: string): { readonly category: ReportCategory; readonly reason: string } {
+  const match = /^\[(Spam|Harassment|Impersonation|OtherViolation)\]\s+([\s\S]*)$/.exec(raw)
+  if (match === null) {
+    return { category: "OtherViolation", reason: raw }
+  }
+  return {
+    category: normalizeReportCategory(match[1]),
+    reason: match[2] ?? ""
+  }
+}
+
+function rowToReportView(row: Row): ReportView {
+  const decoded = decodeStoredReportReason(toText(row.reason) ?? "")
+  const rawKind = toText(row.target_kind)
+  return {
+    id: toText(row.id) ?? "",
+    reporterId: toText(row.reporter_id) ?? "",
+    targetKind: rawKind === "account" ? "account" : "post",
+    targetId: toText(row.target_id) ?? "",
+    category: decoded.category,
+    reason: decoded.reason,
+    status: toText(row.status) ?? "open",
+    createdAt: safeInt(row.created_at, 0)
+  }
+}
+
 export effect function reportTarget(input: ReportTargetInput): ReportView!(SocialFailure | StoreFailure)!Store {
   const reason = input.reason.trim()
   if (reason === "" || reason.length > 1000) {
     throw new SocialFailure({ code: "InvalidInput", message: "Report reason must be between 1 and 1000 characters" })
   }
+  const category = normalizeReportCategory(input.category)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
@@ -561,7 +715,7 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
           targetKind: specTargetKind,
           targetUserId: targetOwnerId,
           targetPostId: specPostId,
-          category: "OtherViolation",
+          category,
           status: "PendingReview"
         }]
       : []
@@ -583,9 +737,10 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
       throw new SocialFailure({ code: "Conflict", message: "An open report already exists for this target" })
     }
     const id = freshId()
+    const storedReason = encodeStoredReportReason(category, reason)
     tx.query(
       "INSERT INTO feed_reports (id, reporter_id, target_id, target_kind, reason, status, created_at) VALUES ($1, $2, $3, $4, $5, 'open', $6)",
-      [id, reporter.id, resolvedTargetId, input.targetKind, reason, now]
+      [id, reporter.id, resolvedTargetId, input.targetKind, storedReason, now]
     ) catch effect (err) => {
       if (isUniqueViolationFailure(err)) {
         throw new SocialFailure({ code: "Conflict", message: "An open report already exists for this target" })
@@ -597,6 +752,7 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
       reporterId: reporter.id,
       targetKind: input.targetKind,
       targetId: resolvedTargetId,
+      category,
       reason,
       status: "open",
       createdAt: now
@@ -604,16 +760,64 @@ export effect function reportTarget(input: ReportTargetInput): ReportView!(Socia
   })
 }
 
-function rowToNotification(row: Row): NotificationView {
+export effect function listModerationReports(
+  input: ListModerationReportsInput = {}
+): ReadonlyArray<ReportView>!StoreFailure!Store {
+  const effectiveLimit = clampLimit(input.limit, 50, 200)
+  const statusFilter = input.status ?? "open"
+  const store = try Store
+  const rows = try store.transaction((tx: Tx) =>
+    statusFilter === "all"
+      ? tx.query("SELECT * FROM feed_reports ORDER BY created_at DESC, id DESC LIMIT $1", [effectiveLimit])
+      : tx.query("SELECT * FROM feed_reports WHERE status = $1 ORDER BY created_at DESC, id DESC LIMIT $2", [statusFilter, effectiveLimit])
+  )
+  return rows.map(rowToReportView)
+}
+
+export effect function resolveModerationReport(
+  input: ResolveModerationReportInput
+): ReportView!(SocialFailure | StoreFailure)!Store {
+  if (input.reportId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Report ID is required" })
+  }
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "UPDATE feed_reports SET status = $2 WHERE id = $1 RETURNING *",
+      [input.reportId, input.status]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new SocialFailure({ code: "NotFound", message: "Report not found" })
+    }
+    return rowToReportView(row)
+  })
+}
+
+interface HydratedNotificationMeta {
+  readonly actor: SubjectProfile | undefined
+  readonly chatId: string | null
+  readonly inviteId: string | null
+  readonly invitePending: boolean
+}
+
+function rowToNotification(row: Row, meta: HydratedNotificationMeta): NotificationView {
   const readAt = row.read_at === null || row.read_at === undefined ? null : safeInt(row.read_at, 0)
+  const kind = toText(row.kind) ?? ""
   return {
     id: toText(row.id) ?? "",
-    kind: toText(row.kind) ?? "",
+    kind,
     title: toText(row.title) ?? "",
     body: toText(row.body) ?? "",
     actorId: toText(row.actor_id) ?? null,
+    actorName: meta.actor?.displayName ?? null,
+    actorHandle: meta.actor?.handle ?? null,
+    actorAvatarUrl: meta.actor?.avatarUrl ?? null,
     postId: toText(row.post_id) ?? null,
     marketId: toText(row.market_id) ?? null,
+    chatId: meta.chatId,
+    inviteId: meta.inviteId,
+    invitePending: meta.invitePending,
     isRead: readAt !== null,
     readAt,
     isGameOnly: Boolean(row.is_game_only),
@@ -636,7 +840,7 @@ function notificationVisibilityWhereSql(mode: SocialPresentationMode): string {
   const modeFilter = mode === "social"
     ? " AND n.is_game_only = false AND n.kind NOT IN ('market_resolved', 'pnl_digest')"
     : ""
-  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.actor_id IS NULL OR NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)))`
+  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.actor_id IS NULL OR (NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = n.actor_id)))`
 }
 
 export effect function listNotifications(
@@ -659,10 +863,163 @@ export effect function listNotifications(
       `SELECT n.* FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE ${notificationVisibilityWhereSql(effectiveMode)}${unreadFilter} ORDER BY n.created_at DESC, n.id DESC LIMIT $2`,
       [accountId, effectiveLimit]
     )
+    if (rows.length === 0) return []
+    const actorIds = rows.map((r) => toText(r.actor_id) ?? "").filter(Boolean)
+    const actorProfiles = try loadProfilesByIdsTx(tx, actorIds)
+    const hasInviteRows = rows.some((r) => toText(r.kind) === "group_invite")
+    const inviteExact = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
+    const inviteLatestByInviter = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
+    if (hasInviteRows) {
+      const inviteRows = try tx.query(
+        "SELECT id, chat_id, invited_by_id, status, created_at FROM feed_group_invites WHERE invited_account_id = $1 ORDER BY created_at DESC, id DESC",
+        [accountId]
+      )
+      for (const inv of inviteRows) {
+        const inviter = toText(inv.invited_by_id) ?? ""
+        const createdAt = safeInt(inv.created_at, 0)
+        const entry = {
+          id: toText(inv.id) ?? "",
+          chatId: toText(inv.chat_id) ?? "",
+          pending: toText(inv.status) === "pending"
+        }
+        const exactKey = `${inviter}:${createdAt}`
+        if (!inviteExact.has(exactKey)) inviteExact.set(exactKey, entry)
+        if (!inviteLatestByInviter.has(inviter)) inviteLatestByInviter.set(inviter, entry)
+      }
+    }
+    const chatSenderIds = [...new Set(
+      rows
+        .filter((r) => toText(r.kind) === "chat_message")
+        .map((r) => toText(r.actor_id) ?? "")
+        .filter(Boolean)
+    )]
+    const chatExact = new Map<string, string>()
+    const chatLatestBySender = new Map<string, string>()
+    if (chatSenderIds.length > 0) {
+      const msgRows = try tx.query(
+        `SELECT m.chat_id, m.sender_id, m.created_at
+         FROM feed_messages m
+         INNER JOIN feed_chat_members cm ON cm.chat_id = m.chat_id AND cm.member_id = $1
+         WHERE m.sender_id = ANY($2)
+         ORDER BY m.created_at DESC, m.id DESC`,
+        [accountId, chatSenderIds]
+      )
+      for (const msg of msgRows) {
+        const sender = toText(msg.sender_id) ?? ""
+        const cid = toText(msg.chat_id) ?? ""
+        const createdAt = safeInt(msg.created_at, 0)
+        const exactKey = `${sender}:${createdAt}`
+        if (!chatExact.has(exactKey)) chatExact.set(exactKey, cid)
+        if (!chatLatestBySender.has(sender)) chatLatestBySender.set(sender, cid)
+      }
+    }
     return rows
-      .map(rowToNotification)
+      .map((row) => {
+        const kind = toText(row.kind) ?? ""
+        const actorId = toText(row.actor_id) ?? null
+        const createdAt = safeInt(row.created_at, 0)
+        const actor = actorId === null ? undefined : actorProfiles.get(actorId)
+        let chatId: string | null = null
+        let inviteId: string | null = null
+        let invitePending = false
+        if (kind === "group_invite" && actorId !== null) {
+          const matched = inviteExact.get(`${actorId}:${createdAt}`) ?? inviteLatestByInviter.get(actorId)
+          if (matched !== undefined) {
+            chatId = matched.chatId === "" ? null : matched.chatId
+            inviteId = matched.id === "" ? null : matched.id
+            invitePending = matched.pending
+          }
+        } else if (kind === "chat_message" && actorId !== null) {
+          chatId = chatExact.get(`${actorId}:${createdAt}`) ?? chatLatestBySender.get(actorId) ?? null
+        }
+        return rowToNotification(row, { actor, chatId, inviteId, invitePending })
+      })
       .filter((notif) => isVisibleInMode(toSpecNotificationKind(notif.kind, notif.isGameOnly), specMode))
   })
+}
+
+effect function requireNonEmptyAccountId(accountId: string): void!SocialFailure {
+  if (accountId.trim() === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
+  }
+}
+
+export effect function clearNotifications(
+  accountId: string,
+  notificationIds?: ReadonlyArray<string>
+): ClearNotificationsResult!(SocialFailure | StoreFailure)!Store {
+  try requireNonEmptyAccountId(accountId)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const mode = try requireAccountUiModeTx(tx, accountId)
+    if (notificationIds !== undefined && notificationIds.length === 0) {
+      return { clearedCount: 0, unreadCount: try countUnreadNotificationsTx(tx, accountId, mode) }
+    }
+    const deleted = notificationIds !== undefined
+      ? try tx.query(
+          "DELETE FROM feed_notifications WHERE account_id = $1 AND id = ANY($2) RETURNING id",
+          [accountId, [...notificationIds]]
+        )
+      : try tx.query(
+          "DELETE FROM feed_notifications WHERE account_id = $1 RETURNING id",
+          [accountId]
+        )
+    return {
+      clearedCount: deleted.length,
+      unreadCount: try countUnreadNotificationsTx(tx, accountId, mode)
+    }
+  })
+}
+
+effect function listModerationEdges(
+  kind: "blocks" | "mutes",
+  accountId: string,
+  limit?: number
+): ReadonlyArray<ModerationListEntry>!(SocialFailure | StoreFailure)!Store {
+  const effectiveLimit = clampLimit(limit, 50, 200)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const owner = try resolveUserOrNpcTx(tx, accountId)
+    const rows = kind === "blocks"
+      ? try tx.query(
+          "SELECT blocked_id AS target_id, created_at FROM feed_blocks WHERE blocker_id = $1 ORDER BY created_at DESC, blocked_id DESC LIMIT $2",
+          [owner.id, effectiveLimit]
+        )
+      : try tx.query(
+          "SELECT muted_id AS target_id, created_at FROM feed_mutes WHERE muter_id = $1 ORDER BY created_at DESC, muted_id DESC LIMIT $2",
+          [owner.id, effectiveLimit]
+        )
+    if (rows.length === 0) return []
+    const createdAtById = new Map<string, number>()
+    const targetIds: string[] = []
+    for (const row of rows) {
+      const targetId = toText(row.target_id) ?? ""
+      if (targetId === "") continue
+      targetIds.push(targetId)
+      if (!createdAtById.has(targetId)) {
+        createdAtById.set(targetId, safeInt(row.created_at, 0))
+      }
+    }
+    const hydrated = try hydratePeerEntriesTx(tx, targetIds, owner.id, false)
+    return hydrated.map((entry) => ({
+      ...entry,
+      createdAt: createdAtById.get(entry.id) ?? 0
+    }))
+  })
+}
+
+export effect function listBlockedAccounts(
+  accountId: string,
+  limit?: number
+): ReadonlyArray<ModerationListEntry>!(SocialFailure | StoreFailure)!Store {
+  return try listModerationEdges("blocks", accountId, limit)
+}
+
+export effect function listMutedAccounts(
+  accountId: string,
+  limit?: number
+): ReadonlyArray<ModerationListEntry>!(SocialFailure | StoreFailure)!Store {
+  return try listModerationEdges("mutes", accountId, limit)
 }
 
 effect function countUnreadNotificationsTx(
@@ -681,9 +1038,7 @@ export effect function getUnreadNotificationCount(
   accountId: string,
   mode?: SocialPresentationMode
 ): number!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
-  }
+  try requireNonEmptyAccountId(accountId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const effectiveMode = mode ?? (try readViewerUiModeTx(tx, accountId))
@@ -695,9 +1050,7 @@ export effect function markNotificationsRead(
   accountId: string,
   notificationIds?: ReadonlyArray<string>
 ): MarkNotificationsReadResult!(SocialFailure | StoreFailure)!Store {
-  if (accountId.trim() === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account ID is required" })
-  }
+  try requireNonEmptyAccountId(accountId)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
@@ -740,6 +1093,69 @@ export effect function markNotificationsRead(
   })
 }
 
+effect function hydratePeerEntriesTx(
+  tx: Tx,
+  peerIds: ReadonlyArray<string>,
+  viewerId: string | undefined,
+  skipBlocked: boolean
+): ReadonlyArray<FollowListEntry>!StoreFailure {
+  const resolvedPeers: ResolvedSubject[] = []
+  for (const peerId of peerIds) {
+    if (peerId === "") continue
+    if (skipBlocked && viewerId !== undefined && (try isBlockedBetweenTx(tx, viewerId, peerId))) continue
+    const resolved = resolveSubjectTx(tx, peerId) catch () => undefined
+    if (resolved !== undefined) resolvedPeers.push(resolved)
+  }
+  if (resolvedPeers.length === 0) return []
+  const userIds = resolvedPeers.filter((p) => p.kind === "user").map((p) => p.id)
+  const npcIds = resolvedPeers.filter((p) => p.kind === "npc").map((p) => p.id)
+  const orgIds = resolvedPeers.filter((p) => p.kind === "org").map((p) => p.id)
+  const bioMap = new Map<string, string>()
+  if (userIds.length > 0) {
+    const rows = try tx.query("SELECT account_id, bio FROM feed_accounts WHERE account_id = ANY($1)", [userIds])
+    for (const r of rows) {
+      const id = toText(r.account_id)
+      if (id !== undefined) bioMap.set(`user:${id}`, toText(r.bio) ?? "")
+    }
+  }
+  if (npcIds.length > 0) {
+    const rows = try tx.query("SELECT id, description FROM feed_actors WHERE id = ANY($1)", [npcIds])
+    for (const r of rows) {
+      const id = toText(r.id)
+      if (id !== undefined) bioMap.set(`npc:${id}`, toText(r.description) ?? "")
+    }
+  }
+  if (orgIds.length > 0) {
+    const rows = try tx.query("SELECT id, description FROM feed_organizations WHERE id = ANY($1)", [orgIds])
+    for (const r of rows) {
+      const id = toText(r.id)
+      if (id !== undefined) bioMap.set(`org:${id}`, toText(r.description) ?? "")
+    }
+  }
+  const viewerFollowedSet = new Set<string>()
+  if (viewerId !== undefined) {
+    const allIds = resolvedPeers.map((p) => p.id)
+    const followRows = try tx.query(
+      "SELECT target_id FROM feed_follows WHERE follower_id = $1 AND target_id = ANY($2)",
+      [viewerId, allIds]
+    )
+    for (const r of followRows) {
+      const targetId = toText(r.target_id)
+      if (targetId !== undefined) viewerFollowedSet.add(targetId)
+    }
+  }
+  return resolvedPeers.map((resolved) => ({
+    id: resolved.id,
+    kind: resolved.kind,
+    handle: resolved.handle,
+    displayName: resolved.displayName,
+    bio: bioMap.get(`${resolved.kind}:${resolved.id}`) ?? "",
+    avatarUrl: resolved.avatarUrl,
+    viewerFollows: viewerFollowedSet.has(resolved.id),
+    isParody: resolved.kind !== "user"
+  }))
+}
+
 effect function listFollowEdges(
   direction: "followers" | "following",
   handleOrId: string,
@@ -763,23 +1179,8 @@ effect function listFollowEdges(
           "SELECT f.target_id AS peer_id FROM feed_follows f WHERE f.follower_id = $1 ORDER BY f.created_at DESC LIMIT $2",
           [subject.id, effectiveLimit]
         )
-    const results: FollowListEntry[] = []
-    for (const row of rows) {
-      const peerId = toText(row.peer_id) ?? ""
-      if (peerId === "") continue
-      if (viewer !== undefined && (try isBlockedBetweenTx(tx, viewer, peerId))) continue
-      const resolved = resolveSubjectTx(tx, peerId) catch () => undefined
-      if (resolved === undefined) continue
-      results.push({
-        id: resolved.id,
-        kind: resolved.kind,
-        handle: resolved.handle,
-        displayName: resolved.displayName,
-        avatarUrl: resolved.avatarUrl,
-        isParody: resolved.kind !== "user"
-      })
-    }
-    return results
+    const peerIds = rows.map((r) => toText(r.peer_id) ?? "").filter(Boolean)
+    return try hydratePeerEntriesTx(tx, peerIds, viewer, true)
   })
 }
 

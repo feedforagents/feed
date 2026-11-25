@@ -6,9 +6,9 @@ Feed exposes one stateless remote MCP server at `https://feed.fun/mcp` on the of
 
 > As a player using ChatGPT, Claude, Hermes, or OpenClaw, I want public discovery tools to work immediately before login, personal/mutating tools to trigger OAuth sign-in cleanly, my scope and Social-mode choices respected, and zero purchase upsells or phone leaks.
 
-### All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30
+### All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30
 
-Every tool has a `<= 64` character `[a-zA-Z0-9_-]+` name, a title, MCP annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`), `additionalProperties: false`, zero phone/code fields (`SecretPhone`/`SecretCode` never enter MCP schemas or responses), `"virtual points with no cash value"` descriptions on financial/game tools, and **zero** purchase or checkout tools (D-30).
+Every tool has a `<= 64` character `[a-zA-Z0-9_-]+` name, a title, MCP annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`), `additionalProperties: false`, zero phone/code fields (`SecretPhone`/`SecretCode` never enter MCP schemas or responses), `"virtual points with no cash value"` descriptions on financial/game tools, and **zero** purchase, refill, or checkout tools globally across web and MCP (D-15, D-30).
 
 ```quint
 import agentGrant as AG from "../auth/agentGrant"
@@ -48,14 +48,17 @@ type McpTool =
   | ToolUnfollow
   | ToolBlock
   | ToolUnblock
+  | ToolGetBlocks
   | ToolMute
   | ToolUnmute
+  | ToolGetMutes
   | ToolReport
   | ToolUpdateProfile
   | ToolListChats
   | ToolGetMessages
   | ToolSendDm
   | ToolSendMessage
+  | ToolReactToMessage
   | ToolCreateGroup
   | ToolInviteToGroup
   | ToolLeaveGroup
@@ -177,6 +180,7 @@ pure def isMessageMcpTool(t: McpTool): bool =
     or t == ToolGetMessages
     or t == ToolSendDm
     or t == ToolSendMessage
+    or t == ToolReactToMessage
     or t == ToolCreateGroup
     or t == ToolInviteToGroup
     or t == ToolLeaveGroup
@@ -190,11 +194,11 @@ pure def isTradeExecutionTool(t: McpTool): bool =
     or t == ToolClosePerp
 
 pure def requiredScopeOf(t: McpTool): AG::Scope =
-  if (isPublicMcpTool(t) or t == ToolWhoami or t == ToolGetHomeFeed or t == ToolGetNotifications or t == ToolGetPortfolio)
+  if (isPublicMcpTool(t) or t == ToolWhoami or t == ToolGetHomeFeed or t == ToolGetNotifications or t == ToolGetPortfolio or t == ToolPreviewPerp or t == ToolGetBlocks or t == ToolGetMutes)
     AG::ScopeRead
   else if (isMessageMcpTool(t))
     AG::ScopeMessages
-  else if (isTradeExecutionTool(t) or t == ToolPreviewPerp)
+  else if (isTradeExecutionTool(t))
     AG::ScopeTrade
   else
     AG::ScopeSocialWrite
@@ -206,6 +210,8 @@ pure def isMutatingMcpTool(t: McpTool): bool =
     and t != ToolGetNotifications
     and t != ToolGetPortfolio
     and t != ToolPreviewPerp
+    and t != ToolGetBlocks
+    and t != ToolGetMutes
     and t != ToolListChats
     and t != ToolGetMessages
     and t != ToolListGroupInvites

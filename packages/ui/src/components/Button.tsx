@@ -5,20 +5,24 @@ import { cn, focusRing } from "../lib/cn.ts";
 import { Spinner } from "./Spinner.tsx";
 
 export const buttonVariants = cva(
-  [focusRing, "inline-flex items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors duration-fast disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50"],
+  [focusRing, "inline-flex items-center justify-center gap-2 text-sm font-semibold whitespace-nowrap transition-colors duration-fast disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50"],
   {
     variants: {
       variant: {
-        primary: "bg-primary text-primary-foreground hover:bg-primary/90",
+        primary: "bg-feed-brand text-feed-brand-foreground hover:bg-feed-brand/90",
         secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-        outline: "border border-input bg-background hover:bg-accent hover:text-accent-foreground",
+        outline: "border border-border bg-background hover:bg-accent hover:text-accent-foreground",
         ghost: "hover:bg-accent hover:text-accent-foreground",
-        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
+        destructive: "bg-danger-solid text-danger-solid-foreground hover:bg-danger-solid/90",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: { sm: "h-8 px-3", md: "h-9 px-4", lg: "h-10 px-6", icon: "size-9" },
+      shape: {
+        default: "rounded-md",
+        pill: "rounded-full",
+      },
     },
-    defaultVariants: { variant: "primary", size: "md" },
+    defaultVariants: { variant: "primary", size: "md", shape: "default" },
   },
 );
 
@@ -31,7 +35,7 @@ export type ButtonProps = ComponentProps<"button"> &
   };
 
 /** An action a person can take. Give one without text, such as an icon, an `aria-label`. */
-export function Button({ variant, size, loading = false, asChild = false, type = "button", disabled, className, children, ...props }: ButtonProps) {
+export function Button({ variant, size, shape, loading = false, asChild = false, type = "button", disabled, className, children, ...props }: ButtonProps) {
   const Comp = asChild ? Slot : "button";
   const off = disabled || loading;
   const state = asChild
@@ -45,7 +49,7 @@ export function Button({ variant, size, loading = false, asChild = false, type =
       }
     : { type, disabled: off };
   return (
-    <Comp aria-busy={loading || undefined} className={cn(buttonVariants({ variant, size }), className)} {...props} {...state}>
+    <Comp aria-busy={loading || undefined} className={cn(buttonVariants({ variant, size, shape }), className)} {...props} {...state}>
       {loading && <Spinner size="sm" aria-hidden />}
       <Slottable>{children}</Slottable>
     </Comp>
