@@ -499,6 +499,7 @@ it.effect(
     try followAccount("alice", "ailon-musk")
 
     const searchAfter = try searchWorld({ query: "ailon", mode: "game", viewerId: "alice", limit: 10 })
+    const searchOtherViewer = try searchWorld({ query: "ailon", mode: "game", viewerId: "bob", limit: 10 })
     const feedAfter = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
 
     try unfollowAccount("alice", "bob")
@@ -511,6 +512,7 @@ it.effect(
       actorBefore: searchBefore.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
       postBefore: feedBefore.items.find((p) => p.id === bobPost.id)?.followingAuthorByViewer,
       actorAfter: searchAfter.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
+      actorOtherViewer: searchOtherViewer.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
       postAfter: feedAfter.items.find((p) => p.id === bobPost.id)?.followingAuthorByViewer,
       actorUnfollowed: searchUnfollowed.actors.find((a) => a.id === "ailon-musk")?.isFollowing,
       postUnfollowed: feedUnfollowed.items.find((p) => p.id === bobPost.id)?.followingAuthorByViewer
@@ -518,6 +520,7 @@ it.effect(
       actorBefore: false,
       postBefore: false,
       actorAfter: true,
+      actorOtherViewer: false,
       postAfter: true,
       actorUnfollowed: false,
       postUnfollowed: false
