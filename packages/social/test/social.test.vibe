@@ -1472,3 +1472,30 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'listArticles returns matching articles older than the 50 newest (spec/social/posts.md)',
+  () => withSocialWorld(effect {
+    const now = try Clock.currentTimeMillis
+    try queryStore(
+      "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+      ["buried-article-1", "Buried Quibberton scoop", "Quibberton summary", "Quibberton body", "the-new-york-taimes", null, now - 1_000_000]
+    )
+    for (let i = 1; i <= 60; i += 1) {
+      try queryStore(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+        [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
+      )
+    }
+    const unfiltered = try listArticles(50, "game")
+    const filtered = try listArticles(50, "game", "quibberton")
+    try check(() => assert.deepStrictEqual(
+      {
+        buriedInUnfiltered: unfiltered.some((a) => a.id === "buried-article-1"),
+        buriedInFiltered: filtered.some((a) => a.id === "buried-article-1"),
+        filteredCount: filtered.length
+      },
+      { buriedInUnfiltered: false, buriedInFiltered: true, filteredCount: 1 }
+    ))
+  })
+)
