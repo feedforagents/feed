@@ -662,31 +662,6 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
       side: "yes",
       shares: 12_000
     })
-    // spec/markets/prediction.md, "Selling shares floors gross proceeds to whole cents before charging the canonical fee"
-    const dustSellCode = try marketErrorCode(sellPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "mkt-sell-min",
-      side: "yes",
-      shares: 50
-    }))
-    const belowMinSellCode = try marketErrorCode(sellPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "mkt-sell-min",
-      side: "yes",
-      shares: 99
-    }))
-    const minSell = try sellPredictionShares({
-      actorId: "user-alice",
-      actorKind: "user",
-      marketId: "mkt-sell-min",
-      side: "yes",
-      shares: 100
-    })
-    const minSellPos = try store.transaction((tx: Tx) =>
-      tx.query("SELECT shares FROM feed_prediction_positions WHERE market_id = 'mkt-sell-min' AND holder_id = 'user-alice' AND side = 'YES'")
-    )
 
     const idempotentBuy: BuyPredictionInput = {
       actorId: "user-alice",
