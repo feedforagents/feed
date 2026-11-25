@@ -298,6 +298,13 @@ function installMockNetwork(options?: { readonly perps?: ReadonlyArray<Record<st
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
+async function renderApp() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+}
+
 beforeAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -316,10 +323,7 @@ afterAll(() => {
 
 it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await renderApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -395,10 +399,7 @@ it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigati
     perps: [],
     predictions: [],
   });
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await renderApp();
 
   await act(() => userEvent.click(page.getByRole("button", { name: "Explore" }).first()));
   const search = page.getByPlaceholder("Search posts, @people, #tags, or $tickers");
@@ -410,4 +411,11 @@ it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigati
   await expect.element(page.getByText("No matching organizations")).not.toBeInTheDocument();
   await expect.element(page.getByRole("main").getByText("Prediction")).toBeInTheDocument();
   await expect.element(page.getByText("Organization")).toBeInTheDocument();
+
+  await act(() => userEvent.fill(search, "$"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await expect.element(page.getByText("No matching organizations")).toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByText("Prediction")).not.toBeInTheDocument();
 });
