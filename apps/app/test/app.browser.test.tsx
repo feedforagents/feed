@@ -4,6 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -380,4 +382,120 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
+});
+
+function r38ProfilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+function r38ReplyItem(id: string, authorId: string, authorHandle: string, authorDisplayName: string, content: string) {
+  return {
+    id,
+    authorId,
+    authorKind: "user",
+    authorHandle,
+    authorDisplayName,
+    avatarUrl: null,
+    content,
+    replyToPostId: "parent-post-1",
+    quotePostId: null,
+    viaClientName: null,
+    marketId: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: [],
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  };
+}
+
+it('Late replies never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  let aliceRepliesRequested = false;
+  let bobRepliesRequested = false;
+  const aliceReleases: Array<(res: Response) => void> = [];
+  const bobReleases: Array<(res: Response) => void> = [];
+  const releaseAliceReplies = () => {
+    for (const release of aliceReleases.splice(0)) {
+      release(Response.json({ items: [r38ReplyItem("alice-reply-1", "acc-alice", "alice", "Alice Aardvark", "Alice reply that must not land on Bob")], nextCursor: null }));
+    }
+  };
+  const releaseBobReplies = () => {
+    for (const release of bobReleases.splice(0)) {
+      release(Response.json({ items: [r38ReplyItem("bob-reply-1", "acc-bob", "bob", "Bob Badger", "Bob reply on Bob profile")], nextCursor: null }));
+    }
+  };
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw, window.location.origin);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({ authenticated: false, viewer: null, acceptedCountries: ["+1", "+44"], publicAppUrl: window.location.origin });
+    }
+    if (path === "/api/users/alice") return json(r38ProfilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob") return json(r38ProfilePayload("acc-bob", "bob", "Bob Badger"));
+    if (path === "/api/posts" && url.searchParams.get("filter") === "replies") {
+      if (url.searchParams.get("authorHandle") === "alice") {
+        aliceRepliesRequested = true;
+        return new Promise<Response>((resolve) => {
+          aliceReleases.push(resolve);
+        });
+      }
+      bobRepliesRequested = true;
+      return new Promise<Response>((resolve) => {
+        bobReleases.push(resolve);
+      });
+    }
+    if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
+    if (path === "/api/markets") return json({ predictions: SAMPLE_MARKETS.predictions, perps: [] });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+    if (path === "/api/leaderboard") return json(SAMPLE_LEADERBOARD_PLAYERS);
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
+  await act(() => Promise.resolve());
+  expect(aliceRepliesRequested).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
+  await act(() => Promise.resolve());
+  expect(bobRepliesRequested).toBe(true);
+
+  releaseBobReplies();
+  await expect.element(page.getByText("Bob reply on Bob profile")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.authorHandle)).toEqual(["bob"]);
+
+  releaseAliceReplies();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.authorHandle)).toEqual(["bob"]);
+  await expect.element(page.getByText("Alice reply that must not land on Bob")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Bob reply on Bob profile")).toBeInTheDocument();
 });

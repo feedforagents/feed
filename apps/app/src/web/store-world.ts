@@ -1288,10 +1288,13 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   setErrorNotice(res.ok ? "Profile not found" : res.message);
 }
 
+let profileRepliesLoadCount = 0;
+
 export async function loadProfileReplies(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileRepliesLoadCount;
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -1301,6 +1304,21 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   const res = await requestJson(url, {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
+  if (loadId !== profileRepliesLoadCount) return;
+  const cur = getStoreSnapshot();
+  const lower = handle.toLowerCase();
+  const bundle = cur.profileBundle;
+  const bundleMatches = (key: string | null) =>
+    bundle !== null &&
+    key !== null &&
+    (bundle.summary.handle.toLowerCase() === key || bundle.id.toLowerCase() === key || bundle.orgMeta?.ticker?.toLowerCase() === key);
+  const stillCurrent =
+    cur.route === "Profile" &&
+    (cur.profileHandle?.toLowerCase() === lower || (bundleMatches(lower) && (cur.profileHandle === null || bundleMatches(cur.profileHandle.toLowerCase()))));
+  if (!stillCurrent) {
+    setStoreState({ profileRepliesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileReplies: res.data.items, profileRepliesLoading: false });
     return;
