@@ -140,6 +140,7 @@ it.effect('Minute ticks advance time without LLM reservations and simulated fast
     const sameDayJump = try fastForwardSimulatedHours(4)
     const nextDayJump = try fastForwardSimulatedHours(12)
     const realtimeBlocked = try withEnvOverrides({ FEED_CLOCK_MODE: "realtime" }, Effect.flip(fastForwardSimulatedHours(1)))
+    const overCapBlocked = try Effect.flip(fastForwardSimulatedHours(25))
     const tickAfterJump = try runMinuteTick()
     const worldRow = (try queryRows("SELECT current_day, current_hour, last_tick_at FROM feed_world_state WHERE singleton = true"))[0] ?? {}
     const reservationsAfterAll = try queryRows("SELECT COUNT(*) AS cnt FROM feed_llm_spend_reservations")
@@ -207,6 +208,7 @@ it.effect('Minute ticks advance time without LLM reservations and simulated fast
         },
       )
       assert.strictEqual(failureCode(realtimeBlocked), "CLOCK_MODE_INVALID")
+      assert.strictEqual(failureCode(overCapBlocked), "INVALID_ARGUMENT")
       assert.strictEqual(tickAfterJump.nowMs, nextDayJump.currentMs)
       assert.isTrue(tickAfterJump.newlyExpired > 0)
       assert.strictEqual(toInt(worldRow.current_day), 2)
@@ -579,6 +581,7 @@ it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pause
     const pausedRss = try runRssRefreshTick(startMs)
     const pausedHealthRows = try queryRows("SELECT job_name, last_status FROM feed_tick_health ORDER BY job_name ASC")
     const pausedStatusByJob = new Map(pausedHealthRows.map((r) => [toText(r.job_name) ?? "", toText(r.last_status) ?? ""]))
+    const pausedFastForwardErr = try Effect.flip(fastForwardSimulatedHours(1))
 
     try queryRows("UPDATE feed_world_state SET game_running = true WHERE singleton = true")
     const firstFunding = try runPerpFundingTick(startMs)
@@ -617,6 +620,7 @@ it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pause
     try check(() => {
       assert.strictEqual(prodMode, "ClockRealtime")
       assert.strictEqual(failureCode(prodFastForwardErr), "CLOCK_MODE_INVALID")
+      assert.strictEqual(failureCode(pausedFastForwardErr), "CLOCK_MODE_INVALID")
       assert.strictEqual(pausedMinute.skipped, true)
       assert.strictEqual(pausedGame.minute.skipped, true)
       assert.strictEqual(pausedMarkets.skipped, true)
