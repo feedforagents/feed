@@ -58,7 +58,7 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
       void storeActions.navigate(`/post/${encodeURIComponent(notif.postId)}`);
       return;
     }
-    if (notif.isChatMessage) {
+    if (notif.isChatMessage && !notif.chatId) {
       void storeActions.navigate("/chats");
       return;
     }
