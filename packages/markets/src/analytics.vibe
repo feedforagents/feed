@@ -105,7 +105,7 @@ export function parseClosedOutcomeFilter(raw: string | null | undefined): Closed
   const norm = raw?.trim().toLowerCase()
   if (norm === "won") return "won"
   if (norm === "lost") return "lost"
-if (norm === "cancelled") return "cancelled"
+  if (norm === "cancelled") return "cancelled"
   return "all"
 }
 
@@ -577,10 +577,10 @@ export effect function listClosedPositions(input: {
       const resolvedOutcome = toText(row.resolved_outcome)?.toLowerCase() ?? null
       const marketStatus = requiredText(row.market_status, "resolved")
         const outcome: "won" | "lost" | "cancelled" = marketStatus === "cancelled"
-            ? "cancelled"
-                : realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
-                  ? "won"
-              : "lost"
+        ? "cancelled"
+    : realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
+      ? "won"
+          : "lost"
       combined.push({
         id: `pred:${marketId}:${sideRaw}`,
         kind: "prediction",
