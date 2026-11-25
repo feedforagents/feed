@@ -27,6 +27,7 @@ import {
   likePost,
   listAlphaInvites,
   listArticles,
+  listArticlesForMarket,
   listBlockedAccounts,
   listChats,
   listFeedPosts,
@@ -1468,7 +1469,35 @@ it.effect(
         muskProfile.handle,
         "/images/actors/ailon-musk.jpg",
         invite.id
-      ]
+    ]
     }))
+  })
+)
+
+it.effect(
+  "listArticlesForMarket returns articles linked to a market even when they are older than the 50 newest articles (spec/social/posts.md, \"Story: Feed surface, articles, and Social mode rules\")",
+  () => withSocialWorld(effect {
+    const store = try Store
+    const now = Date.now()
+    try store.transaction((tx) => tx.query(
+      "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      ["buried-market-article", "Buried market scoop", "Buried summary", "Buried body", "the-new-york-taimes", "seed-market-1", false, now - 1_000_000]
+    ))
+    for (let i = 0; i < 60; i++) {
+      try store.transaction((tx) => tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        [`filler-${i}`, "Filler", "Filler", "Filler", "the-new-york-taimes", null, false, now + i]
+      ))
+    }
+    const unfiltered = try listArticles(50, "game")
+    const forMarket = try listArticlesForMarket("seed-market-1", "game")
+    try check(() => assert.deepStrictEqual(
+      {
+        buriedInUnfiltered: unfiltered.some((a) => a.id === "buried-market-article"),
+        buriedForMarket: forMarket.some((a) => a.id === "buried-market-article"),
+        allForMarket: forMarket.every((a) => a.relatedMarketId === "seed-market-1")
+      },
+      { buriedInUnfiltered: false, buriedForMarket: true, allForMarket: true }
+    ))
   })
 )
