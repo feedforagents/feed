@@ -243,7 +243,7 @@ function ExploreOrgsList({ hasSearch, isGame }: { readonly hasSearch: boolean; r
 
 function ExploreMarketsList() {
   const s = useAppStore();
-  const qLower = s.exploreQuery.trim().toLowerCase();
+  const qLower = s.exploreQuery.trim().toLowerCase().replace(/^\$(?=.)/, "");
   const matchedPreds = qLower
     ? s.predictions.filter((m) => m.card.question.toLowerCase().includes(qLower) || m.category.toLowerCase().includes(qLower))
     : s.predictions;
