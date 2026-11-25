@@ -996,7 +996,7 @@ export async function loadChatMessages(chatId: string): Promise<void> {
   if (res.ok) {
     setStoreState({ selectedChatId: chatId, chatMessages: res.data });
     if (res.data.length > 0) {
-      void markChatRead(chatId);
+      await markChatRead(chatId);
     }
   }
 }

@@ -410,8 +410,8 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     const chatId = data ? optStr(data.chatId) : null;
     void runDomainRefresh("chats", async () => {
       if (s.route === "Chats" && chatId && chatId === s.selectedChatId) {
-        await loadChats(false);
         await loadChatMessages(chatId);
+        await loadChats(false);
       } else {
         await loadChats(s.route === "Chats");
       }
