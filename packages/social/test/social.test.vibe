@@ -1469,7 +1469,7 @@ it.effect(
         muskProfile.handle,
         "/images/actors/ailon-musk.jpg",
         invite.id
-    ]
+      ]
     }))
   })
 )
