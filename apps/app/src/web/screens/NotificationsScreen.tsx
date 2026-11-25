@@ -12,6 +12,7 @@ import {
 } from "@repo/ui";
 import { SettingsIcon } from "../icons.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+import { isNotificationVisibleInMode } from "../types.ts";
 import type { AppNotification } from "../types.ts";
 
 type NotifFilter = "all" | "mentions" | "verified" | "markets";
@@ -22,9 +23,7 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
   const isSocial = mode === "SocialMode";
   const activeFilter: NotifFilter = isSocial && filter === "markets" ? "all" : filter;
 
-  const modeFiltered = s.notifications.filter(
-    (n) => !isSocial || (!n.isGameOnly && n.item.kind !== "MarketResolved" && n.item.kind !== "PnLDigest"),
-  );
+  const modeFiltered = s.notifications.filter((n) => isNotificationVisibleInMode(n, mode));
 
   const visible = modeFiltered.filter((n) => {
     if (activeFilter === "mentions") {

@@ -62,6 +62,7 @@ import { ProfileScreen } from "./screens/ProfileScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
 import { currentUiMode, hasAtRiskOpenPositions, toSpecTab } from "./store-core.ts";
 import { navRuntime, storeActions, useAppStore } from "./store.ts";
+import { visibleUnreadNotificationCount } from "./types.ts";
 import type { ThemePreference } from "./types.ts";
 
 function ThemeIcon({ theme, className }: { readonly theme: ThemePreference; readonly className?: string }) {
@@ -510,7 +511,7 @@ export function App() {
         layout={isWideRoute ? "wide" : "social"}
         hideDesktopHeader
         signedIn={s.viewer !== null}
-        unreadNotifications={s.unreadNotifications}
+        unreadNotifications={visibleUnreadNotificationCount(s.notifications, mode)}
         unreadChats={unreadChats}
         balancePts={balancePts}
         onNavigate={storeActions.navigateRoute}
