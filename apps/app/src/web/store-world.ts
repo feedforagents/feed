@@ -172,6 +172,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
   if (res.ok) {
+    if (getStoreSnapshot().feedTab !== tab) return;
     setStoreState({
       feedPosts: res.data.items,
       feedNextCursor: res.data.nextCursor,
@@ -195,6 +196,7 @@ export async function flushPendingNewPosts(): Promise<void> {
 export async function loadMoreFeed(): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.feedNextCursor || s.feedLoading || s.feedLoadingMore) return;
+  const tab = s.feedTab;
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ feedLoadingMore: true });
   const url = appendAnonymousModeParam(
@@ -204,6 +206,10 @@ export async function loadMoreFeed(): Promise<void> {
   const res = await requestJson(url, { parse: (raw) => decodeFeedPage(raw, viewerId) });
   if (res.ok) {
     const latest = getStoreSnapshot();
+    if (latest.feedTab !== tab) {
+      setStoreState({ feedLoadingMore: false });
+      return;
+    }
     setStoreState({
       feedPosts: appendUniquePosts(latest.feedPosts, res.data.items),
       feedNextCursor: res.data.nextCursor,
