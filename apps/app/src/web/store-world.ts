@@ -14,6 +14,7 @@ import {
   setStatusNotice,
   setStoreState,
   toSpecTab,
+  type StoreState,
   type ThreadReplySort,
   type UiFeedTab,
 } from "./store-core.ts";
@@ -104,6 +105,20 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
   });
 }
 
+function cleanedPostLists(
+  cur: StoreState,
+  cleanList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost>,
+): Pick<StoreState, "feedPosts" | "explore" | "profileBundle" | "profileReplies"> {
+  return {
+    feedPosts: cleanList(cur.feedPosts),
+    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
+    profileBundle: cur.profileBundle
+      ? { ...cur.profileBundle, posts: cleanList(cur.profileBundle.posts) }
+      : null,
+    profileReplies: cleanList(cur.profileReplies),
+  };
+}
+
 export function removePostAcrossStore(
   postId: string,
   parentInfo?: { readonly replyToPostId?: string | null; readonly parentReplyCount?: number | null },
@@ -121,12 +136,7 @@ export function removePostAcrossStore(
   };
   const cleanList = (list: ReadonlyArray<AppPost>) => list.filter((p) => p.card.id !== postId).map(adjustParent);
   setStoreState({
-    feedPosts: cleanList(cur.feedPosts),
-    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
-    profileBundle: cur.profileBundle
-      ? { ...cur.profileBundle, posts: cleanList(cur.profileBundle.posts) }
-      : null,
-    profileReplies: cleanList(cur.profileReplies),
+    ...cleanedPostLists(cur, cleanList),
     activeThread: thread
       ? thread.post.card.id === postId
         ? null
@@ -142,24 +152,39 @@ export function removePostAcrossStore(
 
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
+  const isBlockedHandle = (value: string): boolean => value.toLowerCase() === normalized;
+  const cleanPost = (p: AppPost): AppPost => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    const stripRepost = reposter !== undefined && isBlockedHandle(reposter);
+    const stripQuote = p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle);
+    if (!stripRepost && !stripQuote) return p;
+    return {
+      ...p,
+      card: {
+        ...p.card,
+        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
+        ...(stripQuote ? { quotePost: undefined } : {}),
+      },
+    };
+  };
   const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
-    list
-      .filter((p) =>
-        p.card.authorHandle.toLowerCase() !== normalized
-        && (p.card.repostedBy?.handle ?? p.card.repostedByHandle ?? "").toLowerCase() !== normalized)
-      .map((p) =>
-        p.card.quotePost && p.card.quotePost.authorHandle.toLowerCase() === normalized
-          ? { ...p, card: { ...p.card, quotePost: undefined } }
-          : p);
+    list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);
   const cur = getStoreSnapshot();
+  const thread = cur.activeThread;
   setStoreState({
-    feedPosts: cleanList(cur.feedPosts),
-    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
-    activeThread: cur.activeThread
-      ? {
-          ...cur.activeThread,
-          replies: cleanList(cur.activeThread.replies),
-        }
+    ...cleanedPostLists(cur, cleanList),
+    marketSocialPosts: cleanList(cur.marketSocialPosts),
+    activeThread: thread
+      ? isBlockedHandle(thread.post.card.authorHandle)
+        ? null
+        : {
+            post: cleanPost(thread.post),
+            parentPost: thread.parentPost && !isBlockedHandle(thread.parentPost.card.authorHandle)
+              ? cleanPost(thread.parentPost)
+              : null,
+            ancestors: cleanList(thread.ancestors),
+            replies: cleanList(thread.replies),
+          }
       : null,
   });
 }
@@ -1504,6 +1529,9 @@ async function toggleModeration(
   }
   if (!active) {
     filterAuthorOutOfFeeds(handle);
+    if (getStoreSnapshot().feedTab === "following") {
+      void loadFeed();
+    }
   }
   const cur = getStoreSnapshot();
   if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {

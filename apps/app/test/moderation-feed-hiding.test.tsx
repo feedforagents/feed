@@ -31,10 +31,20 @@ function rawPost(overrides: Record<string, unknown>): AppPost {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  setStoreState({ viewer: null, feedPosts: [], blockedAccounts: [] });
+  setStoreState({
+    viewer: null,
+    feedTab: "latest",
+    feedPosts: [],
+    explore: { ...getStoreSnapshot().explore, posts: [] },
+    profileBundle: null,
+    profileReplies: [],
+    marketSocialPosts: [],
+    activeThread: null,
+    blockedAccounts: [],
+  });
 });
 
-it('Blocking an author hides their posts, reposts, and quoted content from the loaded Home feed (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+it('Blocking an author hides their posts, reposts, and quoted content from loaded feeds, profile, thread, and market lists (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
   const bobPost = rawPost({
     id: "bob-post",
     authorId: "bob",
@@ -85,17 +95,83 @@ it('Blocking an author hides their posts, reposts, and quoted content from the l
       isReviewer: false,
       agentGrant: null,
     },
+    feedTab: "following",
     feedPosts: [bobPost, carolRepostedByBob, daveQuotingBob, unrelated],
+    explore: { ...getStoreSnapshot().explore, posts: [bobPost, carolRepostedByBob, daveQuotingBob, unrelated] },
+    profileBundle: {
+      summary: { displayName: "Carol Analyst", handle: "carol", followersCount: 1, followingCount: 1 },
+      id: "carol",
+      kind: "user",
+      postsCount: 3,
+      createdAtMs: 0,
+      actorMeta: null,
+      orgMeta: null,
+      viewerFollowedBy: false,
+      viewerBlockedBy: false,
+      tradeCount: null,
+      openPositionCount: null,
+      posts: [bobPost, carolRepostedByBob, daveQuotingBob],
+      postsNextCursor: null,
+      positions: [],
+    },
+    profileReplies: [bobPost, daveQuotingBob],
+    marketSocialPosts: [bobPost, carolRepostedByBob, unrelated],
+    activeThread: {
+      post: daveQuotingBob,
+      parentPost: bobPost,
+      ancestors: [bobPost, unrelated],
+      replies: [bobPost, daveQuotingBob, unrelated],
+    },
     blockedAccounts: [],
   });
 
-  vi.stubGlobal("fetch", () => Promise.resolve(Response.json({ blocked: true })));
+  vi.stubGlobal("fetch", (url: string) =>
+    Promise.resolve(url.includes("/api/feed")
+      ? Response.json({
+          items: [
+            { id: "carol-post", authorId: "carol", authorHandle: "carol", authorDisplayName: "Carol Analyst", content: "Carol market note", createdAt: Date.now() - 60_000 },
+            { id: "erin-post", authorId: "erin", authorHandle: "erin", authorDisplayName: "Erin Fox", content: "Erin unrelated note", createdAt: Date.now() - 60_000 },
+          ],
+          nextCursor: null,
+        })
+      : Response.json({ blocked: true })));
 
   await toggleBlock("bob", false);
+  await vi.waitFor(() => expect(getStoreSnapshot().feedLoading).toBe(false));
 
-  const after = getStoreSnapshot().feedPosts;
+  const s = getStoreSnapshot();
+  const ids = (list: ReadonlyArray<AppPost>) => list.map((p) => p.card.id);
+  const reposterOf = (list: ReadonlyArray<AppPost>, id: string) =>
+    list.find((p) => p.card.id === id)?.card.repostedByHandle ?? null;
+  const quoteAuthorOf = (list: ReadonlyArray<AppPost>, id: string) =>
+    list.find((p) => p.card.id === id)?.card.quotePost?.authorHandle ?? null;
   expect({
-    ids: after.map((p) => p.card.id),
-    daveQuoteAuthor: after.find((p) => p.card.id === "dave-post")?.card.quotePost?.authorHandle ?? null,
-  }).toEqual({ ids: ["dave-post", "erin-post"], daveQuoteAuthor: null });
+    feed: ids(s.feedPosts),
+    explore: ids(s.explore.posts),
+    exploreCarolReposter: reposterOf(s.explore.posts, "carol-post"),
+    exploreDaveQuoteAuthor: quoteAuthorOf(s.explore.posts, "dave-post"),
+    profile: ids(s.profileBundle?.posts ?? []),
+    profileReplies: ids(s.profileReplies),
+    market: ids(s.marketSocialPosts),
+    marketCarolReposter: reposterOf(s.marketSocialPosts, "carol-post"),
+    threadRootQuoteAuthor: s.activeThread?.post.card.quotePost?.authorHandle ?? null,
+    threadParent: s.activeThread?.parentPost?.card.id ?? null,
+    ancestors: ids(s.activeThread?.ancestors ?? []),
+    replies: ids(s.activeThread?.replies ?? []),
+    repliesDaveQuoteAuthor: quoteAuthorOf(s.activeThread?.replies ?? [], "dave-post"),
+  }).toEqual({
+    feed: ["carol-post", "erin-post"],
+    explore: ["carol-post", "dave-post", "erin-post"],
+    exploreCarolReposter: null,
+    exploreDaveQuoteAuthor: null,
+    profile: ["carol-post", "dave-post"],
+    profileReplies: ["dave-post"],
+    market: ["carol-post", "erin-post"],
+    marketCarolReposter: null,
+    threadRootQuoteAuthor: null,
+    threadParent: null,
+    ancestors: ["erin-post"],
+    replies: ["dave-post", "erin-post"],
+    repliesDaveQuoteAuthor: null,
+  });
 });
