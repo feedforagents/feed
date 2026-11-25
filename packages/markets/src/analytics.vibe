@@ -393,8 +393,9 @@ function mapTradeRow(row: Row): AssetTradeView {
   const traderKind = requiredText(row.trader_kind)
   const isNpc = traderKind === "npc"
   const traderId = requiredText(row.trader_id)
-  const rawAvatar = isNpc ? optionalText(row.actor_avatar_url) : optionalText(row.account_avatar_url)
-  const traderAvatarUrl = rawAvatar ?? (isNpc && traderId !== "" ? resolveActorAvatarUrl(traderId) : null)
+  const traderAvatarUrl = isNpc
+    ? (traderId !== "" ? resolveActorAvatarUrl(traderId, optionalText(row.actor_avatar_url)) : null)
+    : optionalText(row.account_avatar_url)
   const rawMarketKind = requiredText(row.market_kind)
   const marketKind: "prediction" | "spot" | "perp" = rawMarketKind === "prediction"
     ? "prediction"
@@ -408,7 +409,7 @@ function mapTradeRow(row: Row): AssetTradeView {
       ? requiredText(row.actor_name, traderId)
       : requiredText(row.account_display_name, traderId),
     traderHandle: isNpc
-      ? requiredText(row.actor_username, traderId)
+      ? requiredText(row.actor_username, traderId).toLowerCase()
       : requiredText(row.account_handle, traderId),
     traderAvatarUrl,
     isNpc,

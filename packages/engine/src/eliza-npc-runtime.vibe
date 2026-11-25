@@ -49,13 +49,16 @@ import {
 } from "./prompts.vibe"
 import {
   EngineFailure,
+  displayNameForEntity,
   hashString,
   isRuntimeNpcActor,
   maybePublishFeedEvent,
   newEngineId,
   parseLlmJsonRecord,
   resolveClockNow,
+  sanitizeNarrativeText,
   sanitizeText,
+  stripLeadingSelfPrefix,
 } from "./shared.vibe"
 import { getDailySpendStatus } from "./spend-budget.vibe"
 
@@ -81,6 +84,7 @@ type StoreEffectRunner = <A, E>(eff: A!E!Store) => Promise<A>
 
 const packActorById: ReadonlyMap<string, PackActor> = new Map(actors.map((a) => [a.id, a]))
 const orgById = new Map(organizations.map((o) => [o.id, o]))
+const ACTOR_POST_COOLDOWN_MS = 10 * 60_000
 
 function asParamRecord(options: unknown, message: Memory): Record<string, unknown> {
   const opt = options as { readonly parameters?: unknown } | undefined
@@ -265,12 +269,17 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
     }
   }).filter((p) => p.ticker.length > 0)
   const perps = prioritizePerpMarkets(rawPerps, Math.max(16, rawPerps.length))
-  const recentPosts = feedItems.map((p) => ({
-    id: toText(p.id) ?? "",
-    authorId: toText(p.authorId ?? p.author_id) ?? "",
-    authorKind: toText(p.authorKind ?? p.author_kind) ?? "npc",
-    content: toText(p.content) ?? "",
-  })).filter((p) => p.id.length > 0)
+  const recentPosts = feedItems.map((p) => {
+    const authorId = toText(p.authorId ?? p.author_id) ?? ""
+    const authorName = displayNameForEntity(authorId, toText(p.authorDisplayName ?? p.author_display_name))
+    return {
+      id: toText(p.id) ?? "",
+      authorId,
+      authorName,
+      authorKind: toText(p.authorKind ?? p.author_kind) ?? "npc",
+      content: toText(p.content) ?? "",
+    }
+  }).filter((p) => p.id.length > 0)
   const openPerps = (Array.isArray(perpPositionsRaw) ? perpPositionsRaw : []).filter((p) => p.status === "open")
   const openPerpPositionIds = openPerps.map((p) => p.id)
   const openPerpEntries = openPerps.map((p) => {
@@ -315,7 +324,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
   const chatNameById = new Map(dbSnap.chatRows.map((c) => [toText(c.id) ?? "", toText(c.name) ?? "Alpha Desk"]))
   const chatLines = dbSnap.chatRows.map((c) => `${toText(c.id) ?? ""} (${toText(c.name) ?? "Alpha Desk"})`)
   const recentChatLines = dbSnap.chatMessages.map(
-    (m) => `[${chatNameById.get(toText(m.chat_id) ?? "") ?? toText(m.chat_id) ?? "alpha"}] @${toText(m.sender_id) ?? ""}: ${sanitizeText(toText(m.body) ?? "", 80)}`,
+    (m) => `[${chatNameById.get(toText(m.chat_id) ?? "") ?? toText(m.chat_id) ?? "alpha"}] ${displayNameForEntity(toText(m.sender_id) ?? "")}: ${sanitizeNarrativeText(toText(m.body) ?? "", 80)}`,
   )
   const alphaChatsText = chatLines.length > 0
     ? `Groups: ${chatLines.join(", ")}${recentChatLines.length > 0 ? ` | Recent: ${recentChatLines.join(" ; ")}` : ""}`
@@ -339,7 +348,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
   return {
     worldFactsText: [...factsLines, ...headlineLines].join(" | ") || "No breaking world facts.",
     marketsText,
-    postsText: recentPosts.slice(0, 6).map((p) => `[${p.id}] @${p.authorId}: ${sanitizeText(p.content, 80)}`).join(" | ") || "Feed empty.",
+    postsText: recentPosts.slice(0, 6).map((p) => `[${p.id}] ${p.authorName}: ${sanitizeNarrativeText(p.content, 80)}`).join(" | ") || "Feed empty.",
     portfolioText,
     alphaChatsText,
     worldContext,
@@ -597,7 +606,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       }
     }),
     wrap("CREATE_POST", "Publish a Feed social post as the NPC", effect (p) => {
-      const content = sanitizeText(String(p.content ?? ""), 275)
+      const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 260)
       if (content.length === 0) return { success: false, text: "Empty post" }
       const marketId = typeof p.marketId === "string" ? p.marketId : undefined
       const ticker = typeof p.ticker === "string" ? p.ticker : undefined
@@ -606,7 +615,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
     }),
     wrap("CREATE_REPLY", "Reply to an existing Feed post", effect (p) => {
       const replyToPostId = String(p.replyToPostId ?? "")
-      const content = sanitizeText(String(p.content ?? ""), 260)
+      const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 250)
       if (!replyToPostId || !content) return { success: false, text: "Invalid reply" }
       try createPost({ authorId: actor.id, authorKind: "npc", content, replyToPostId })
       return { success: true, text: content, data: { replyToPostId } }
@@ -631,7 +640,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
     }),
     wrap("SEND_GROUP_MESSAGE", "Send a message in an NPC alpha group chat", effect (p) => {
       const chatId = String(p.chatId ?? "")
-      const content = sanitizeText(String(p.content ?? ""), 275)
+      const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 260)
       if (!chatId || !content) return { success: false, text: "Invalid chat message" }
       try sendChatMessage({ senderId: actor.id, senderKind: "npc", chatId, content })
       return { success: true, text: content, data: { chatId } }
@@ -814,6 +823,7 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
   const composedState = try composeFeedProviders(runtime, plugin.providers ?? [], triggerMemory)
   const rendered = renderPrompt("npcTradingDecision", {
     actorId: actor.id,
+    actorHandle: actor.username.toLowerCase(),
     actorName: actor.name,
     actorPersona: sanitizeText(packActor?.personality ?? actor.description, 200),
     tradingStyle: packActor?.feed.tradingStyle ?? "balanced catalyst trader",
@@ -851,15 +861,31 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     snap.heldPredictionKeys,
     snap.followTargetIds,
   ).filter((decision) => isActionAllowedByAutonomy(decision, packActor))
+  const store = try Store
+  const hasRecentPost = try store.transaction(effect (tx: Tx) => {
+    const recentRows = try tx.query(
+      `SELECT 1 FROM feed_posts
+       WHERE author_id = $1 AND author_kind = 'npc' AND deleted_at IS NULL AND reply_to_post_id IS NULL AND created_at >= $2
+       LIMIT 1`,
+      [actor.id, nowMs - ACTOR_POST_COOLDOWN_MS],
+    )
+    return recentRows.length > 0
+  })
+  let postedInTurn = hasRecentPost
+  let repliedInTurn = false
   let actionsExecuted = 0
   const actionMap = new Map((plugin.actions ?? []).map((act) => [act.name, act]))
   for (const decision of decisions) {
     if (actionsExecuted >= maxSteps) break
+    if (decision.kind === "CREATE_POST" && postedInTurn) continue
+    if (decision.kind === "CREATE_REPLY" && repliedInTurn) continue
     const action = actionMap.get(decision.kind)
     if (!action) continue
     const result = try executeNpcAction(runtime, agentUuid, action, decision, composedState)
     if (result?.success) {
       actionsExecuted += 1
+      if (decision.kind === "CREATE_POST") postedInTurn = true
+      if (decision.kind === "CREATE_REPLY") repliedInTurn = true
     }
   }
   return actionsExecuted
@@ -921,15 +947,18 @@ function selectSmartNpcBatch(
   allActors: ReadonlyArray<DbActorRow>,
   mentionedActorIds: ReadonlySet<string>,
   postedTodayIds: ReadonlySet<string>,
+  recentlyPostedIds: ReadonlySet<string>,
   batchLimit: number,
   bucketKey: string,
 ): ReadonlyArray<DbActorRow> {
   const targetCount = Math.min(batchLimit, allActors.length)
   if (targetCount <= 0) return []
+  const eligibleActors = allActors.filter((a) => !recentlyPostedIds.has(a.id))
+  const primaryActors = eligibleActors.length >= targetCount ? eligibleActors : allActors
   const selected: DbActorRow[] = []
   const selectedIds = new Set<string>()
   const mentionCap = Math.max(1, Math.floor(targetCount / 2))
-  const mentionedPool = allActors.filter((a) => mentionedActorIds.has(a.id))
+  const mentionedPool = primaryActors.filter((a) => mentionedActorIds.has(a.id))
   for (const actor of pickWeightedFromPool([...mentionedPool], Math.min(mentionCap, mentionedPool.length), bucketKey, "mention")) {
     selected.push(actor)
     selectedIds.add(actor.id)
@@ -937,7 +966,7 @@ function selectSmartNpcBatch(
   const remainingAfterMentions = targetCount - selected.length
   if (remainingAfterMentions > 0) {
     const diversityQuota = Math.max(1, Math.floor(remainingAfterMentions * 0.3))
-    const unpostedPool = allActors.filter((a) => !selectedIds.has(a.id) && !postedTodayIds.has(a.id))
+    const unpostedPool = primaryActors.filter((a) => !selectedIds.has(a.id) && !postedTodayIds.has(a.id))
     for (const actor of pickWeightedFromPool([...unpostedPool], Math.min(diversityQuota, unpostedPool.length), bucketKey, "diversity")) {
       selected.push(actor)
       selectedIds.add(actor.id)
@@ -945,7 +974,7 @@ function selectSmartNpcBatch(
   }
   const remainingSlots = targetCount - selected.length
   if (remainingSlots > 0) {
-    const restPool = allActors.filter((a) => !selectedIds.has(a.id))
+    const restPool = primaryActors.filter((a) => !selectedIds.has(a.id))
     for (const actor of pickWeightedFromPool([...restPool], remainingSlots, bucketKey, "tier")) {
       selected.push(actor)
       selectedIds.add(actor.id)
@@ -961,6 +990,7 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
   const maxSteps = resolveConfiguredMaxSteps(spendStatus.maxStepsAllowed)
   const utcDayStartMs = Math.floor(resolvedNow / 86_400_000) * 86_400_000
   const mentionWindowMs = resolvedNow - 30 * 60_000
+  const postCooldownSinceMs = resolvedNow - ACTOR_POST_COOLDOWN_MS
   const store = try Store
   const batchContext = try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
@@ -996,6 +1026,12 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
        WHERE author_kind = 'npc' AND deleted_at IS NULL AND created_at >= $1`,
       [utcDayStartMs],
     )
+    const recentlyPostedRows = try tx.query(
+      `SELECT DISTINCT author_id
+       FROM feed_posts
+       WHERE author_kind = 'npc' AND deleted_at IS NULL AND reply_to_post_id IS NULL AND created_at >= $1`,
+      [postCooldownSinceMs],
+    )
     const actorByUsername = new Map(allActors.map((a) => [a.username.toLowerCase(), a.id]))
     const mentionedActorIds = new Set<string>()
     for (const row of repliedRows) {
@@ -1012,7 +1048,8 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
       }
     }
     const postedTodayIds = new Set(postedTodayRows.map((r) => toText(r.author_id) ?? "").filter((id) => id.length > 0))
-    return { allActors, mentionedActorIds, postedTodayIds }
+    const recentlyPostedIds = new Set(recentlyPostedRows.map((r) => toText(r.author_id) ?? "").filter((id) => id.length > 0))
+    return { allActors, mentionedActorIds, postedTodayIds, recentlyPostedIds }
   })
   if (batchContext.allActors.length === 0) {
     return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: maxSteps, throttledBatchSize: batchLimit }
@@ -1021,6 +1058,7 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
     batchContext.allActors,
     batchContext.mentionedActorIds,
     batchContext.postedTodayIds,
+    batchContext.recentlyPostedIds,
     batchLimit,
     `npc-batch:${Math.floor(resolvedNow / 120_000)}`,
   )

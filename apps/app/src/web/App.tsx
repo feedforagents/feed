@@ -478,13 +478,12 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
 
 export function App() {
   const s = useAppStore();
-  const navMachine = useNavMachine(navRuntime);
+  useNavMachine(navRuntime);
 
   const mode = currentUiMode(s);
   const atRisk = hasAtRiskOpenPositions(s);
-  const baseNav = navMachine.state ?? navInitial;
   const effectiveNavState: NavState = {
-    ...baseNav,
+    ...navInitial,
     route: s.route,
     feedTab: toSpecTab(s.feedTab),
     uiMode: mode,
@@ -505,6 +504,8 @@ export function App() {
     <>
       <AppShell
         route={toAppNavRoute(s.route)}
+        activeRoute={s.activeArticleId ? null : undefined}
+        headerTitle={s.activeArticleId ? "Article" : undefined}
         mode={mode}
         layout={isWideRoute ? "wide" : "social"}
         hideDesktopHeader

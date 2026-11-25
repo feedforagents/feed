@@ -77,13 +77,16 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
               <span>{formatFullTimestamp(thread.post.createdAtMs)}</span>
             ) : null}
             <span>
-              <strong className="font-semibold text-foreground tabular-nums">{thread.post.card.repostCount}</strong> Reposts
+              <strong className="font-semibold text-foreground tabular-nums">{thread.post.card.repostCount}</strong>{" "}
+              {thread.post.card.repostCount === 1 ? "Repost" : "Reposts"}
             </span>
             <span>
-              <strong className="font-semibold text-foreground tabular-nums">{thread.post.card.likeCount}</strong> Likes
+              <strong className="font-semibold text-foreground tabular-nums">{thread.post.card.likeCount}</strong>{" "}
+              {thread.post.card.likeCount === 1 ? "Like" : "Likes"}
             </span>
             <span>
-              <strong className="font-semibold text-foreground tabular-nums">{thread.post.card.replyCount}</strong> Replies
+              <strong className="font-semibold text-foreground tabular-nums">{thread.post.card.replyCount}</strong>{" "}
+              {thread.post.card.replyCount === 1 ? "Reply" : "Replies"}
             </span>
           </div>
 

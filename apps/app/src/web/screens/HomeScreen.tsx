@@ -3,8 +3,8 @@ import { useState } from "react";
 import {
   Button,
   EmptyState,
+  PostCardSkeleton,
   PostComposer,
-  Skeleton,
   Tabs,
   TabsList,
   TabsTrigger,
@@ -77,10 +77,10 @@ export function HomeScreen({ mode }: HomeScreenProps) {
       ) : null}
 
       {s.feedLoading && s.feedPosts.length === 0 ? (
-        <div className="flex flex-col divide-y divide-border">
-          <div className="p-4"><Skeleton className="h-24" /></div>
-          <div className="p-4"><Skeleton className="h-24" /></div>
-          <div className="p-4"><Skeleton className="h-24" /></div>
+        <div className="flex flex-col">
+          <PostCardSkeleton />
+          <PostCardSkeleton />
+          <PostCardSkeleton />
         </div>
       ) : s.feedPosts.length === 0 ? (
         <EmptyState title="No posts in this feed yet">

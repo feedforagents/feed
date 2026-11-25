@@ -217,12 +217,14 @@ export async function loadMoreFeed(): Promise<void> {
 
 export async function loadTrending(): Promise<void> {
   const s = getStoreSnapshot();
+  setStoreState({ trendingLoading: true });
   const [trendRes, articlesRes] = await Promise.all([
     requestJson(appendAnonymousModeParam("/api/trending", s), { parse: decodeTrendingList }),
     requestJson(appendAnonymousModeParam("/api/articles?limit=10", s), { parse: decodeArticles }),
   ]);
   const cur = getStoreSnapshot();
   setStoreState({
+    trendingLoading: false,
     explore: {
       ...cur.explore,
       ...(trendRes.ok ? { trending: trendRes.data } : {}),
@@ -469,10 +471,10 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     }
   }
   if (res.ok) {
-    setStoreState({ explore: res.data, exploreLoading: false, ...marketPatch });
+    setStoreState({ explore: res.data, exploreLoading: false, trendingLoading: false, ...marketPatch });
     return;
   }
-  setStoreState({ exploreLoading: false, ...marketPatch });
+  setStoreState({ exploreLoading: false, trendingLoading: false, ...marketPatch });
   setErrorNotice(res.message);
 }
 

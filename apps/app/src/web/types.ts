@@ -780,15 +780,18 @@ export function decodePredictionMarket(raw: unknown): AppPredictionMarket | null
   if (!isRecord(raw)) return null;
   const id = optStr(raw.id);
   if (!id) return null;
-  const status = str(raw.status, "open");
+  const rawStatus = str(raw.status, "open");
+  const status = bool(raw.resolved, false) && rawStatus !== "cancelled" && rawStatus !== "Cancelled" ? "resolved" : rawStatus;
   const yesPriceBps = num(raw.yesPriceBps ?? raw.yesProbabilityBps, Math.round(num(raw.yesPrice, 0.5) * 10000));
   const noPriceBps = num(raw.noPriceBps ?? raw.noProbabilityBps, 10000 - yesPriceBps);
   const yesShares = num(raw.yesShares ?? raw.yes_shares, 0);
   const noShares = num(raw.noShares ?? raw.no_shares, 0);
   const liquidityCents = num(raw.liquidityCents ?? raw.liquidity_cents, 0);
   const volumeCents = num(raw.volumeCents ?? raw.volume_cents, 0);
-  const outcomeRaw = str(raw.resolvedOutcome ?? raw.resolved_outcome).toUpperCase();
-  const resolvedOutcome = outcomeRaw === "YES" || outcomeRaw === "NO" ? outcomeRaw : undefined;
+  const outcomeRaw = typeof raw.resolvedOutcome === "boolean"
+    ? (raw.resolvedOutcome ? "YES" : "NO")
+    : str(raw.resolvedOutcome ?? raw.resolved_outcome).toUpperCase();
+  const resolvedOutcome = outcomeRaw === "YES" || outcomeRaw === "NO" || outcomeRaw === "CANCELLED" ? outcomeRaw : undefined;
   const expiresAt = num(raw.expiresAt ?? raw.expires_at, 0);
   return {
     description: str(raw.description, ""),
@@ -1261,10 +1264,11 @@ export function decodeTrendingList(raw: unknown): ReadonlyArray<TrendingItem> {
       if (!tag) return null;
       const kind = str(t.kind, "hashtag");
       const count = num(t.postCount, 0);
+      const rawSubtitle = optStr(t.subtitle)?.replace(/\b1 posts\b/giu, "1 post");
       return {
         id: optStr(t.id) ?? `${kind}:${tag}:${idx}`,
         title: tag,
-        subtitle: count > 0 ? `${count} posts` : optStr(t.subtitle) ?? undefined,
+        subtitle: count > 0 ? `${count} ${count === 1 ? "post" : "posts"}` : rawSubtitle ?? undefined,
         ...(optStr(t.metric) ? { metric: optStr(t.metric) ?? undefined } : {}),
         financial: kind === "ticker" || bool(t.financial, false),
       };

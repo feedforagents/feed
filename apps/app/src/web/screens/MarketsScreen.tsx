@@ -1,12 +1,7 @@
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
 import { useMemo, useState } from "react";
 import {
-  Badge,
   Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
   EmptyState,
   MarketsDashboard,
   MarketsTradingTerminal,
@@ -18,6 +13,7 @@ import {
   type MarketsDashboardSelection,
   type PerpMarketRow,
   type PerpPricePoint,
+  type PerpServerQuote,
   type PredictionMarketRow,
   type PredictionProbabilityPoint,
   type TerminalPerpMarket,
@@ -109,60 +105,6 @@ function TerminalSocialFeed({
 type ActiveTerminalMarket =
   | { readonly kind: "perp"; readonly data: TerminalPerpMarket }
   | { readonly kind: "prediction"; readonly data: TerminalPredictionMarket };
-
-function ServerPerpQuoteCard() {
-  const s = useAppStore();
-  const preview = s.perpPreview;
-  if (!preview) return null;
-  const heading = `Server Execution Quote ($${preview.ticker})`;
-  return (
-    <Card className="gap-2 rounded-xl p-4">
-      <CardHeader className="flex-row items-center justify-between gap-2">
-        <CardTitle className="text-xs font-semibold text-muted-foreground">{heading}</CardTitle>
-        <div className="flex items-center gap-1.5">
-          <Badge variant="outline" className="font-mono uppercase">
-            {preview.side} {preview.leverage}x
-          </Badge>
-          <Button
-            size="sm"
-            variant="ghost"
-            shape="pill"
-            onClick={() => {
-              void storeActions.previewPerpOrder(
-                preview.ticker,
-                preview.side === "short" ? "long" : "short",
-                10,
-                5,
-              );
-            }}
-          >
-            Quote {preview.side === "short" ? "Long" : "Short"}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <dl className="grid grid-cols-2 gap-3 font-mono text-xs tabular-nums sm:grid-cols-4">
-          <div>
-            <dt className="text-muted-foreground">Est. fill</dt>
-            <dd className="font-semibold text-foreground">{formatPts(preview.entryPriceCents / 100)}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Liq. price</dt>
-            <dd className="font-semibold text-foreground">{formatPts(preview.liquidationPriceCents / 100)}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Fee</dt>
-            <dd className="font-semibold text-foreground">{formatPts(preview.feeCents / 100)}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Impact</dt>
-            <dd className="font-semibold text-foreground">{(preview.priceImpactBps / 100).toFixed(2)}%</dd>
-          </div>
-        </dl>
-      </CardContent>
-    </Card>
-  );
-}
 
 function buildTerminalMarket(
   s: ReturnType<typeof useAppStore>,
@@ -311,19 +253,34 @@ export function MarketsScreen() {
   }));
 
   const terminalMarket = buildTerminalMarket(s, s.marketTimeRange);
+  const perpServerQuote: PerpServerQuote | null =
+    terminalMarket?.kind === "perp" &&
+    s.perpPreview &&
+    s.perpPreview.ticker.toUpperCase() === terminalMarket.data.ticker.toUpperCase()
+      ? {
+          fillPricePts: s.perpPreview.entryPriceCents / 100,
+          impactPct: s.perpPreview.priceImpactBps / 100,
+          liquidationPricePts: s.perpPreview.liquidationPriceCents / 100,
+          feePts: s.perpPreview.feeCents / 100,
+          totalRequiredPts: s.perpPreview.totalDebitCents / 100,
+          side: s.perpPreview.side,
+          marginPts: s.perpPreview.collateralCents / 100,
+          leverage: s.perpPreview.leverage,
+        }
+      : null;
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-background/85 px-4 py-2.5 backdrop-blur-md md:top-0">
-        <div className="flex min-w-0 flex-wrap items-center gap-3">
-          <h1 className="text-base font-bold text-foreground">Markets</h1>
+      <header className="sticky top-[53px] z-20 flex flex-wrap items-center justify-between gap-2 border-b border-border bg-background/85 px-4 py-2 backdrop-blur-md md:top-0 md:py-2.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2.5 md:gap-3">
+          {!terminalMarket ? <h1 className="hidden text-base font-bold text-foreground md:block">Markets</h1> : null}
           <WorldClockHud status={s.worldStatus} />
           {s.viewer ? (
             <span className="font-mono text-xs font-semibold text-muted-foreground tabular-nums">
               {balancePts}
             </span>
           ) : (
-            <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+            <span className="hidden truncate text-xs text-muted-foreground lg:inline">
               Starting capital: 100 pts — trade to climb the leaderboard
             </span>
           )}
@@ -356,56 +313,57 @@ export function MarketsScreen() {
 
       <div className="flex flex-col gap-4 p-4">
         {terminalMarket ? (
-          <>
-            <MarketsTradingTerminal
-              key={`${terminalMarket.kind}:${terminalMarket.kind === "perp" ? terminalMarket.data.ticker : terminalMarket.data.id}`}
-              market={terminalMarket}
-              balancePts={balancePtsNum}
-              timeRange={s.marketTimeRange}
-              onTimeRangeChange={(range) => { void storeActions.setMarketTimeRange(range); }}
-              onBack={storeActions.openMarketsDashboard}
-              trades={s.marketTrades}
-              tradesLoading={s.marketTradesLoading}
-              chartLoading={s.marketHistoryLoading}
-              socialFeed={
-                <TerminalSocialFeed
-                  kind={terminalMarket.kind}
-                  marketRef={terminalMarket.kind === "perp" ? terminalMarket.data.ticker : terminalMarket.data.id}
-                />
+          <MarketsTradingTerminal
+            key={`${terminalMarket.kind}:${terminalMarket.kind === "perp" ? terminalMarket.data.ticker : terminalMarket.data.id}`}
+            market={terminalMarket}
+            balancePts={balancePtsNum}
+            timeRange={s.marketTimeRange}
+            onTimeRangeChange={(range) => { void storeActions.setMarketTimeRange(range); }}
+            onBack={storeActions.openMarketsDashboard}
+            trades={s.marketTrades}
+            tradesLoading={s.marketTradesLoading}
+            chartLoading={s.marketHistoryLoading}
+            socialFeed={
+              <TerminalSocialFeed
+                kind={terminalMarket.kind}
+                marketRef={terminalMarket.kind === "perp" ? terminalMarket.data.ticker : terminalMarket.data.id}
+              />
+            }
+            perpPositions={perpPositions}
+            predictionPositions={predictionPositions}
+            serverQuote={perpServerQuote}
+            onPreviewPerpOrder={(order) => {
+              void storeActions.previewPerpOrder(order.ticker, order.side, order.marginPts, order.leverage);
+            }}
+            submitting={s.tradeLoading}
+            orderError={s.tradeError ?? undefined}
+            onOpenPerp={(order) => {
+              void storeActions.submitPerpOrder(order.ticker, order.side, order.marginPts, order.leverage);
+            }}
+            onRebalancePerp={(order) => {
+              void storeActions.rebalancePerpPosition(order);
+            }}
+            onClosePerp={(positionId) => {
+              void storeActions.closePerpPosition(positionId);
+            }}
+            onSubmitPrediction={(order) => {
+              const rawSide = order.side === "NO" ? "no" : "yes";
+              if (order.action === "sell") {
+                void storeActions.submitPredictionOrder(
+                  order.marketId,
+                  "Sell",
+                  rawSide,
+                  order.amountOrShares,
+                  Math.max(1, Math.round(order.amountOrShares * 100)),
+                );
+                return;
               }
-              perpPositions={perpPositions}
-              predictionPositions={predictionPositions}
-              submitting={s.tradeLoading}
-              orderError={s.tradeError ?? undefined}
-              onOpenPerp={(order) => {
-                void storeActions.submitPerpOrder(order.ticker, order.side, order.marginPts, order.leverage);
-              }}
-              onRebalancePerp={(order) => {
-                void storeActions.rebalancePerpPosition(order);
-              }}
-              onClosePerp={(positionId) => {
-                void storeActions.closePerpPosition(positionId);
-              }}
-              onSubmitPrediction={(order) => {
-                const rawSide = order.side === "NO" ? "no" : "yes";
-                if (order.action === "sell") {
-                  void storeActions.submitPredictionOrder(
-                    order.marketId,
-                    "Sell",
-                    rawSide,
-                    order.amountOrShares,
-                    Math.max(1, Math.round(order.amountOrShares * 100)),
-                  );
-                  return;
-                }
-                void storeActions.submitPredictionOrder(order.marketId, "Buy", rawSide, order.amountOrShares);
-              }}
-              onOpenResolutionArticle={(articleId) => {
-                void storeActions.navigate(`/article/${encodeURIComponent(articleId)}`);
-              }}
-            />
-            {terminalMarket.kind === "perp" ? <ServerPerpQuoteCard /> : null}
-          </>
+              void storeActions.submitPredictionOrder(order.marketId, "Buy", rawSide, order.amountOrShares);
+            }}
+            onOpenResolutionArticle={(articleId) => {
+              void storeActions.navigate(`/article/${encodeURIComponent(articleId)}`);
+            }}
+          />
         ) : (
           <MarketsDashboard
             key={s.perps.length > 0 ? "perps-ready" : "preds-default"}

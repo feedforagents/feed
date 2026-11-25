@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import { type ComponentProps, useState } from "react";
 import { Calendar, Flag, Link2, MessageSquare, MoreHorizontal, ShieldBan, VolumeX } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import type { AgentLogoKey } from "../lib/hosts.ts";
@@ -104,6 +104,9 @@ export function ProfileHeader({
   const hasMenu = Boolean(onCopyLink || (!profile.isOwnProfile && (onMuteToggle || onBlockToggle || onReport)));
   const handleFollowing = onOpenFollowing ?? onFollowingClick;
   const handleFollowers = onOpenFollowers ?? onFollowersClick;
+  const [expandedHandle, setExpandedHandle] = useState<string | null>(null);
+  const bioExpanded = expandedHandle === profile.handle;
+  const isLongBio = Boolean(profile.bio && profile.bio.length > 180);
 
   return (
     <section aria-label={`${profile.displayName} profile`} className={cn("border-b border-border bg-background text-foreground", className)} {...props}>
@@ -211,9 +214,22 @@ export function ProfileHeader({
         </div>
 
         {profile.bio ? (
-          <p className="text-sm leading-relaxed text-foreground">
-            <TaggedText text={profile.bio} showCashtags={isGame} />
-          </p>
+          <div className="flex flex-col items-start gap-1">
+            <p className={cn("text-sm leading-relaxed text-foreground", isLongBio && !bioExpanded && "line-clamp-3")}>
+              <TaggedText text={profile.bio} showCashtags={isGame} />
+            </p>
+            {isLongBio ? (
+              <button
+                type="button"
+                disabled={blocked}
+                aria-expanded={bioExpanded}
+                onClick={() => !blocked && setExpandedHandle(bioExpanded ? null : profile.handle)}
+                className={cn(focusRing, inactive, "rounded-sm text-xs font-medium text-primary hover:underline")}
+              >
+                {bioExpanded ? "Show less" : "Show more"}
+              </button>
+            ) : null}
+          </div>
         ) : null}
 
         {profile.joinedLabel ? (

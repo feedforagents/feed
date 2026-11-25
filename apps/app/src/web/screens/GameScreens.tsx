@@ -77,9 +77,11 @@ export function LeaderboardScreen() {
     <div className="flex flex-col">
       <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
         <div className="flex min-w-0 items-center gap-3">
-          <h1 className="text-base font-bold text-foreground">Leaderboard</h1>
-          <span className="hidden truncate text-xs text-muted-foreground sm:inline">
-            Starting capital: 100 pts — trade to climb the leaderboard
+          <h1 className="hidden text-base font-bold text-foreground md:block">Leaderboard</h1>
+          <span className="truncate text-xs text-muted-foreground">
+            {s.leaderboardScope === "characters"
+              ? "Autonomous NPC traders ranked by net profit"
+              : "Starting capital: 100 pts — trade to climb the leaderboard"}
           </span>
         </div>
         <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>

@@ -78,7 +78,9 @@ export function PerpPriceChart({
         kind: "area",
         tone: positive ? "ok" : "destructive",
         data: visible.map((pt) => ({ time: pt.time, value: pt.price })),
-        priceLine: Number.isFinite(currentPrice) ? { price: currentPrice, title: "Mark", tone: "brand" } : undefined,
+        priceLine: Number.isFinite(currentPrice)
+          ? { price: currentPrice, title: "Mark", tone: "brand", axisLabelVisible: false }
+          : undefined,
       },
     ];
   }, [visible, positive, currentPrice]);

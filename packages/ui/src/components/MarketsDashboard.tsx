@@ -443,11 +443,20 @@ export function MarketsDashboard({
         onValueChange={(next) => !blocked && setTab(next === "predictions" ? "predictions" : "perps")}
         className="flex min-h-0 flex-1 flex-col"
       >
-        <div className="flex flex-col border-b border-border px-4 pt-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <h1 className="text-lg font-bold text-foreground">Markets</h1>
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative w-60 sm:w-64">
+        <div className="flex flex-col border-b border-border px-4 pt-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <TabsList variant="underline" className="border-b-0">
+              <TabsTrigger value="perps" disabled={blocked} className="flex-none gap-2">
+                Perps
+                <Badge variant="secondary" className="font-mono tabular-nums">{visiblePerps.length}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="predictions" disabled={blocked} className="flex-none gap-2">
+                Predictions
+                <Badge variant="secondary" className="font-mono tabular-nums">{visiblePredictions.length}</Badge>
+              </TabsTrigger>
+            </TabsList>
+            <div className="flex flex-wrap items-center gap-2 pb-2">
+              <div className="relative w-56 sm:w-64">
                 <Search aria-hidden className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   type="search"
@@ -471,17 +480,6 @@ export function MarketsDashboard({
               </Button>
             </div>
           </div>
-
-          <TabsList variant="underline" className="border-b-0">
-            <TabsTrigger value="perps" disabled={blocked} className="flex-none gap-2">
-              Perps
-              <Badge variant="secondary" className="font-mono tabular-nums">{visiblePerps.length}</Badge>
-            </TabsTrigger>
-            <TabsTrigger value="predictions" disabled={blocked} className="flex-none gap-2">
-              Predictions
-              <Badge variant="secondary" className="font-mono tabular-nums">{visiblePredictions.length}</Badge>
-            </TabsTrigger>
-          </TabsList>
         </div>
 
         <TabsContent value="perps" className="mt-0 min-h-0 flex-1 overflow-auto">

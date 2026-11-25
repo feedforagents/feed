@@ -49,8 +49,11 @@ function toPercent(raw: number): number {
 }
 
 function formatProbability(value: number): string {
+  if (!Number.isFinite(value) || value < -0.05 || value > 100.05) return "";
   return `${Math.min(100, Math.max(0, value)).toFixed(1)}%`;
 }
+
+const PROBABILITY_SCALE_MARGINS = { top: 0.08, bottom: 0.08 };
 
 /** Interactive 0–100% prediction probability chart with dual YES (green below) and NO (red above) shading. */
 export function PredictionProbabilityChart({
@@ -59,7 +62,7 @@ export function PredictionProbabilityChart({
   timeRange,
   onTimeRangeChange,
   showHeader = true,
-  showLegend = true,
+  showLegend = false,
   showPriceScale = true,
   fillHeight = false,
   height = 340,
@@ -121,6 +124,7 @@ export function PredictionProbabilityChart({
       showPriceScale={showPriceScale}
       minValue={0}
       maxValue={100}
+      scaleMargins={PROBABILITY_SCALE_MARGINS}
       formatPrice={formatProbability}
       height={height}
       fillHeight={fillHeight}

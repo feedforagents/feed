@@ -833,7 +833,13 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
       amountCents: 5_000
     })
     try resolvePredictionMarket({ marketId: "seed-market-2" })
-    const npcBoard = try getLeaderboard({ scope: "characters", metric: "net_profit", page: 1, pageSize: 10 })
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query("UPDATE feed_actors SET profile_image_url = NULL WHERE id = 'eric-weinstain'")
+      try tx.query("UPDATE feed_actors SET profile_image_url = '/images/actors/org-politaico.jpg' WHERE id = 'org-politaico'")
+    })
+    const npcBoard = try getLeaderboard({ scope: "characters", metric: "net_profit", page: 1, pageSize: 200 })
+    const ericEntry = npcBoard.entries.find((e) => e.accountId === "eric-weinstain")
+    const politaicoEntry = npcBoard.entries.find((e) => e.accountId === "org-politaico")
 
     try check(() => assert.deepStrictEqual(
       {
@@ -875,7 +881,11 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           npcBoard.totalCount > 0,
           npcBoard.entries[0]?.isNpc,
           npcBoard.entries[0]?.accountId,
-          (npcBoard.entries[0]?.netProfitCents ?? 0) > 0
+          (npcBoard.entries[0]?.netProfitCents ?? 0) > 0,
+          ericEntry?.avatarUrl,
+          ericEntry?.handle,
+          politaicoEntry?.avatarUrl,
+          politaicoEntry?.handle
         ]
       },
       {
@@ -885,7 +895,17 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
         filteredEligiblePlayers: [4, 2, 2, 2, true],
         sharedTiedRankForZeroProfitPlayers: ["user-alice", 1, 2, 2, 2, "user-dave", 2, 2, 2],
         serverSideMetricSorting: ["user-alice", "user-alice", 100, 1, 1],
-        charactersBoard: ["characters", true, true, "ailon-musk", true]
+        charactersBoard: [
+          "characters",
+          true,
+          true,
+          "ailon-musk",
+          true,
+          "/images/actors/eric-weinstain.jpg",
+          "ericrweinstain",
+          "/images/organizations/politaico.jpg",
+          "politaico"
+        ]
       }
     ))
   })

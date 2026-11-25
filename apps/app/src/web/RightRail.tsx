@@ -1,6 +1,6 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"
 import { useState, type FormEvent } from "react";
-import { Avatar, Button, Input, VerifiedBadge, type UiMode } from "@repo/ui";
+import { Avatar, Button, Input, VerifiedBadge, WidgetPanelSkeleton, type TrendingItem, type UiMode } from "@repo/ui";
 import { SearchIcon } from "./icons.tsx";
 import { storeActions, useAppStore } from "./store.ts";
 import type { AppWorldStatus } from "./types.ts";
@@ -31,6 +31,67 @@ function RightRailWorldClock({ status }: { readonly status: AppWorldStatus }) {
         <span className="capitalize">{status.phase}</span>
       </span>
       <span className="text-muted-foreground">{status.activeMarketsCount} mkts</span>
+    </section>
+  );
+}
+
+function RightRailTrendingSection({
+  loading,
+  items,
+  isGame,
+}: {
+  readonly loading: boolean;
+  readonly items: ReadonlyArray<TrendingItem>;
+  readonly isGame: boolean;
+}) {
+  if (loading && items.length === 0) {
+    return <WidgetPanelSkeleton />;
+  }
+  return (
+    <section aria-label="Trending" className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="flex items-center justify-between px-4 py-3">
+        <h2 className="text-base font-bold text-foreground">Trending</h2>
+        <button
+          type="button"
+          onClick={() => { void storeActions.navigate("/explore"); }}
+          className="text-xs font-medium text-primary hover:underline"
+        >
+          Show more
+        </button>
+      </div>
+      {items.length === 0 ? (
+        <p className="px-4 pb-3 text-sm text-muted-foreground">No trending topics right now.</p>
+      ) : (
+        <div className="divide-y divide-border">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                if (item.financial && isGame) {
+                  const ticker = item.title.replace(/^\$/, "");
+                  void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`);
+                  return;
+                }
+                void storeActions.navigate(`/trending/${encodeURIComponent(item.title.replace(/^#/, ""))}`);
+              }}
+              className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors duration-fast hover:bg-accent/60"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-bold text-foreground">{item.title}</span>
+                {item.subtitle ? (
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {item.subtitle.replace(/\b1 posts\b/giu, "1 post")}
+                  </span>
+                ) : null}
+              </span>
+              {item.metric && isGame ? (
+                <span className="shrink-0 font-mono text-xs font-semibold text-primary tabular-nums">{item.metric}</span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -85,19 +146,23 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
     void storeActions.navigate(`/explore?q=${encodeURIComponent(trimmed)}`);
   };
 
+  const hideSearchBar = s.route === "Explore" && !s.activeArticleId;
+
   return (
     <div className="flex flex-col gap-4 pb-6">
-      <form onSubmit={handleSearchSubmit} className="relative">
-        <SearchIcon className="pointer-events-none absolute top-1/2 left-3.5 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          type="search"
-          aria-label="Search Feed"
-          placeholder={isGame ? "Search Feed, @handles, $tickers" : "Search Feed"}
-          value={searchDraft}
-          onChange={(e) => setSearchDraft(e.target.value)}
-          className="h-10 rounded-full bg-muted/60 pr-4 pl-10"
-        />
-      </form>
+      {!hideSearchBar ? (
+        <form onSubmit={handleSearchSubmit} className="relative">
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-3.5 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="search"
+            aria-label="Search Feed"
+            placeholder={isGame ? "Search Feed, @handles, $tickers" : "Search Feed"}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
+            className="h-10 rounded-full bg-muted/60 pr-4 pl-10"
+          />
+        </form>
+      ) : null}
 
       {isGame && s.worldStatus ? <RightRailWorldClock status={s.worldStatus} /> : null}
 
@@ -133,47 +198,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
         </section>
       ) : null}
 
-      <section aria-label="Trending" className="overflow-hidden rounded-xl border border-border bg-card">
-        <div className="flex items-center justify-between px-4 py-3">
-          <h2 className="text-base font-bold text-foreground">Trending</h2>
-          <button
-            type="button"
-            onClick={() => { void storeActions.navigate("/explore"); }}
-            className="text-xs font-medium text-primary hover:underline"
-          >
-            Show more
-          </button>
-        </div>
-        {visibleTrending.length === 0 ? (
-          <p className="px-4 pb-3 text-sm text-muted-foreground">No trending topics right now.</p>
-        ) : (
-          <div className="divide-y divide-border">
-            {visibleTrending.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  if (item.financial && isGame) {
-                    const ticker = item.title.replace(/^\$/, "");
-                    void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`);
-                    return;
-                  }
-                  void storeActions.navigate(`/trending/${encodeURIComponent(item.title.replace(/^#/, ""))}`);
-                }}
-                className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors duration-fast hover:bg-accent/60"
-              >
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-bold text-foreground">{item.title}</span>
-                  {item.subtitle ? <span className="block truncate text-xs text-muted-foreground">{item.subtitle}</span> : null}
-                </span>
-                {item.metric && isGame ? (
-                  <span className="shrink-0 font-mono text-xs font-semibold text-primary tabular-nums">{item.metric}</span>
-                ) : null}
-              </button>
-            ))}
-          </div>
-        )}
-      </section>
+      <RightRailTrendingSection loading={s.trendingLoading} items={visibleTrending} isGame={isGame} />
 
       {isGame && (activePredictions.length > 0 || activePerps.length > 0) ? (
         <section aria-label="Active markets" className="overflow-hidden rounded-xl border border-border bg-card">

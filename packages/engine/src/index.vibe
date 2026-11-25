@@ -3,7 +3,15 @@ export { CRYPTO_PARODY_NAMES, realityGroundingContent } from "./data/reality-gro
 export { questionExamples } from "./data/question-examples.ts"
 export { worldEventExamplesContent } from "./data/world-event-examples.ts"
 export { worldFactsContent } from "./data/world-facts.ts"
-export { EngineFailure, isRuntimeNpcActor, parseLlmJsonRecord, type EngineErrorCode } from "./shared.vibe"
+export {
+  EngineFailure,
+  displayNameForEntity,
+  isRuntimeNpcActor,
+  parseLlmJsonRecord,
+  replaceActorSlugsWithNames,
+  trimToWordBoundary,
+  type EngineErrorCode,
+} from "./shared.vibe"
 export {
   PromptCatalog,
   buildWorldContext,
