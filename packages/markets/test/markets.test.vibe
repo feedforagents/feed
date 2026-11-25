@@ -910,3 +910,102 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     ))
   })
 )
+
+it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded pair before any buy, unseeded sells are refused, buys accrue holdings (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 1, 0, 0))
+  try runWithSeededDb(effect {
+    const store = try Store
+    const holdingsFor = (actorId: string, ticker: string) => store.transaction((tx: Tx) =>
+      tx.query("SELECT base_units FROM feed_npc_spot_holdings WHERE actor_id = $1 AND ticker = $2", [actorId, ticker])
+    )
+    const seededTslaHoldings = try holdingsFor("ailon-musk", "TSLAI")
+    const seededXtrpcHoldings = try holdingsFor("ailon-musk", "XTRPC")
+    // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
+    const freshSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "TSLAI",
+      side: "sell",
+      quoteCents: 100
+    })
+    const holdingsAfterFreshSell = try holdingsFor("ailon-musk", "TSLAI")
+    const sellWithNoHoldingsCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 100
+    }))
+    const spotBuy = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "buy",
+      quoteCents: 3_000_000
+    })
+    const holdingsAfterBuy = try holdingsFor("ailon-musk", "XTRPC")
+    const spotSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 1_000_000
+    })
+    const holdingsAfterSell = try holdingsFor("ailon-musk", "XTRPC")
+    const sellBeyondHoldingsCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 2_500_000
+    }))
+    const exactLimitSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 1_999_920
+    })
+    const holdingsAfterExactSell = try holdingsFor("ailon-musk", "XTRPC")
+    const secondNpcSellCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "dairiio-amodei",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 100
+    }))
+    const secondTickerSellCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "SEQ",
+      side: "sell",
+      quoteCents: 100
+    }))
+    try check(() => assert.deepStrictEqual(
+      {
+        seededTslaHoldings: seededTslaHoldings.map((row) => toInt(row.base_units)),
+        seededXtrpcHoldings: seededXtrpcHoldings.map((row) => toInt(row.base_units)),
+        freshSell: [freshSell.baseDelta, freshSell.baseReserve, freshSell.quoteReserveCents, freshSell.indexPriceCents, freshSell.markPriceCents, freshSell.balanceAfterCents],
+        holdingsAfterFreshSell: holdingsAfterFreshSell.map((row) => toInt(row.base_units)),
+        sellWithNoHoldingsCode,
+        spotBuy: [spotBuy.baseDelta, spotBuy.baseReserve, spotBuy.quoteReserveCents, spotBuy.indexPriceCents, spotBuy.markPriceCents, spotBuy.balanceAfterCents],
+        holdingsAfterBuy: holdingsAfterBuy.map((row) => toInt(row.base_units)),
+        spotSell: [spotSell.baseDelta, spotSell.baseReserve, spotSell.quoteReserveCents, spotSell.indexPriceCents, spotSell.markPriceCents, spotSell.balanceAfterCents],
+        holdingsAfterSell: holdingsAfterSell.map((row) => toInt(row.base_units)),
+        sellBeyondHoldingsCode,
+        exactLimitSell: [exactLimitSell.baseDelta, exactLimitSell.baseReserve, exactLimitSell.quoteReserveCents, exactLimitSell.indexPriceCents, exactLimitSell.markPriceCents, exactLimitSell.balanceAfterCents],
+        holdingsAfterExactSell: holdingsAfterExactSell.map((row) => toInt(row.base_units)),
+        secondNpcSellCode,
+        secondTickerSellCode
+      },
+      {
+        seededTslaHoldings: [8_164],
+        seededXtrpcHoldings: [],
+        freshSell: [1, 50_001, 12_249_900, 24_499, 24_499, 25_000_100],
+        holdingsAfterFreshSell: [8_163],
+        sellWithNoHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
+        spotBuy: [41_666, 8_334, 3_600_000, 43_196, 43_196, 22_000_100],
+        holdingsAfterBuy: [41_666],
+        spotSell: [3_206, 11_540, 2_600_000, 22_530, 22_530, 23_000_100],
+        holdingsAfterSell: [38_460],
+        sellBeyondHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
+        exactLimitSell: [38_460, 50_000, 600_080, 1_200, 1_200, 25_000_020],
+        holdingsAfterExactSell: [0],
+        secondNpcSellCode: "INSUFFICIENT_SPOT_INVENTORY",
+        secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY"
+      }
+    ))
+  })
+})

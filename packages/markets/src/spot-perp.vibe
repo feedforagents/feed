@@ -473,6 +473,7 @@ export effect function listPerpPositions(ownerId: string): ReadonlyArray<PerpPos
   return try store.transaction((tx) => listPerpPositionsIn(tx, ownerId))
 }
 
+// spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
 export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeReceipt!(MarketFailure | StoreFailure)!Store {
   try assertSafePositiveInt(input.quoteCents, "INVALID_AMOUNT", "Spot trade quoteCents must be a positive integer")
   if (input.side !== "buy" && input.side !== "sell") {
