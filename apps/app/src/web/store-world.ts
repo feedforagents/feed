@@ -138,11 +138,20 @@ export function removePostAcrossStore(
     return { ...post, card: { ...post.card, replyCount: nextCount } };
   };
   const cleanList = (list: ReadonlyArray<AppPost>) => list.filter((p) => p.card.id !== postId).map(adjustParent);
+  const bundle = cur.profileBundle;
+  const removedFromProfile = bundle !== null
+    && existing !== undefined
+    && existing.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase()
+    && (bundle.posts.some((p) => p.card.id === postId) || cur.profileReplies.some((p) => p.card.id === postId));
   setStoreState({
     feedPosts: cleanList(cur.feedPosts),
     explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
-    profileBundle: cur.profileBundle
-      ? { ...cur.profileBundle, posts: cleanList(cur.profileBundle.posts) }
+    profileBundle: bundle
+      ? {
+          ...bundle,
+          posts: cleanList(bundle.posts),
+          postsCount: removedFromProfile ? Math.max(0, bundle.postsCount - 1) : bundle.postsCount,
+        }
       : null,
     profileReplies: cleanList(cur.profileReplies),
     profileLikes: cleanList(cur.profileLikes),
