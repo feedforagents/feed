@@ -320,7 +320,7 @@ async function mountApp() {
   await act(() => Promise.resolve(root.render(<App />)));
 }
 
-async function openThreadDialog() {
+async function openThreadDetail() {
   await mountApp();
 
   const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
@@ -328,7 +328,7 @@ async function openThreadDialog() {
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
   await act(() => userEvent.click(replyButton));
-  await expect.element(page.getByText("Post thread")).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
 }
 
 beforeAll(() => {
@@ -348,6 +348,7 @@ afterEach(async () => {
     joinTab: "phone",
     joinPhoneStep: "entry",
     activeThread: null,
+    activePostId: null,
     threadLoading: false,
   });
   vi.unstubAllGlobals();
@@ -437,11 +438,11 @@ it('Thread close during load stays closed (spec/app/navigation.md, "Story: Brows
     threadGate.release = () => resolve(threadBody);
   });
   installMockNetwork((path) => (path.startsWith("/api/posts/") ? threadResponse : null));
-  await openThreadDialog();
+  await openThreadDetail();
 
-  await act(() => userEvent.keyboard("{Escape}"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Back" }).first()));
   await vi.waitFor(() => {
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(getStoreSnapshot().route).toBe("Home");
   });
 
   threadGate.release();
@@ -449,8 +450,9 @@ it('Thread close during load stays closed (spec/app/navigation.md, "Story: Brows
     expect(threadConsumed).toBe(true);
   });
   await act(() => Promise.resolve());
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
   expect(getStoreSnapshot().activeThread).toBeNull();
+  expect(getStoreSnapshot().threadLoading).toBe(false);
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
 });
 
 it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
@@ -473,7 +475,7 @@ it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Br
     const id = path.startsWith("/api/posts/") ? decodeURIComponent(path.slice("/api/posts/".length)) : null;
     return id === null ? null : (threadResponses.get(id) ?? null);
   });
-  await openThreadDialog();
+  await openThreadDetail();
 
   act(() => {
     void storeActions.openThread("browser-post-2");
@@ -483,6 +485,5 @@ it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Br
   await vi.waitFor(() => {
     expect(getStoreSnapshot().activeThread?.post.card.id).toBe("browser-post-2");
   });
-  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-  await expect.element(page.getByRole("dialog").getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
+  await expect.element(page.getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
 });
