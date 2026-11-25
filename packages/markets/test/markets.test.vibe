@@ -19,6 +19,7 @@ import {
   getPerpMarket,
   getPointLedger,
   getPredictionMarket,
+  getPredictionPriceHistory,
   getUserPositions,
   liquidateEligiblePositions,
   listMarketTrades,
@@ -276,6 +277,30 @@ it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHAR
     ))
   })
 )
+
+it.effect('Prediction price history ends at the settlement price after resolution', () => {
+  runWithSeededMarketDay(effect (now) => {
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+    try buyPredictionShares({ actorId: "user-alice", actorKind: "user", marketId: "seed-market-1", side: "yes", amountCents: 2_000 })
+    try buyPredictionShares({ actorId: "user-bob", actorKind: "user", marketId: "seed-market-1", side: "no", amountCents: 1_000 })
+    const resolved = try resolvePredictionMarket({ marketId: "seed-market-1" })
+    const history = try getPredictionPriceHistory({ marketId: "seed-market-1" })
+    const last = history.points[history.points.length - 1]
+    try check(() => assert.deepStrictEqual(
+      {
+        outcome: resolved.outcome,
+        lastYesPriceBps: last?.yesPriceBps,
+        lastPriceCents: last?.priceCents
+      },
+      {
+        outcome: "yes",
+        lastYesPriceBps: 10_000,
+        lastPriceCents: 100
+      }
+    ))
+  })
+})
 
 it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp open/close round-trip (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Zero-time open and close round-trips on an unchanged index price strictly decrease trader cash")', () =>
   runWithSeededMarketDay(effect (now) => {
