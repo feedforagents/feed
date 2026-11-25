@@ -409,11 +409,12 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     if (!s.viewer) return;
     const chatId = data ? optStr(data.chatId) : null;
     void runDomainRefresh("chats", async () => {
-      if (s.route === "Chats" && chatId && chatId === s.selectedChatId) {
+      const live = getStoreSnapshot();
+      if (live.route === "Chats" && chatId && chatId === live.selectedChatId) {
         await loadChatMessages(chatId);
         await loadChats(false);
       } else {
-        await loadChats(s.route === "Chats");
+        await loadChats(live.route === "Chats");
       }
     });
     return;

@@ -115,6 +115,20 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
   const chatsRequested = new Promise<void>((resolve) => {
     gate.requested = resolve;
   });
+  const postGate: { release: (() => void) | null } = { release: null };
+  async function releaseReadPost(readCount: number): Promise<void> {
+    for (
+      let round = 0;
+      round < 50 && readPosts.filter((path) => path === "/api/chats/chat-1/read").length < readCount;
+      round += 1
+    ) {
+      await Promise.resolve();
+    }
+    for (let round = 0; round < 10; round += 1) {
+      await Promise.resolve();
+    }
+    postGate.release?.();
+  }
   const sseTarget = new EventTarget() as EventTarget & { close: () => void };
   sseTarget.close = () => {};
   function StubEventSource() {
@@ -160,11 +174,15 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
         );
       }
       if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
-        serverUnread = 0;
         readPosts.push(url.pathname);
-        return Promise.resolve(
-          Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
-        );
+        return new Promise<Response>((resolve) => {
+          postGate.release = () => {
+            serverUnread = 0;
+            resolve(
+              Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
+            );
+          };
+        });
       }
       if (url.pathname === "/api/chats/chat-2/read" && init?.method === "POST") {
         readPosts.push(url.pathname);
@@ -180,6 +198,7 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
   sseTarget.dispatchEvent(
     new MessageEvent("chat.message", { data: JSON.stringify({ chatId: "chat-1" }) }),
   );
+  await releaseReadPost(1);
   await chatsRequested;
   const response = gate.response;
   expect(response).not.toBeNull();
@@ -201,7 +220,11 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
   sseTarget.dispatchEvent(
     new MessageEvent("chat.message", { data: JSON.stringify({ chatId: "chat-1" }) }),
   );
+  await releaseReadPost(2);
   await secondChatsRequested;
+  sseTarget.dispatchEvent(
+    new MessageEvent("chat.message", { data: JSON.stringify({ chatId: "chat-1" }) }),
+  );
   await loadChatMessages("chat-2");
   expect(getStoreSnapshot().selectedChatId).toBe("chat-2");
   const secondResponse = gate.response;
@@ -210,6 +233,9 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
   gate.release?.(secondResponse);
   for (let round = 0; round < 50; round += 1) {
     await Promise.resolve();
+    const queuedResponse = gate.response;
+    if (queuedResponse) gate.release?.(queuedResponse);
+    postGate.release?.();
   }
   expect(getStoreSnapshot().selectedChatId).toBe("chat-2");
   expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["from B"]);
