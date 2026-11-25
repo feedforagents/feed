@@ -1419,15 +1419,23 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
   const lower = handle.toLowerCase();
   const cur = getStoreSnapshot();
   const profileMatches = cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower;
+  const ownProfile = cur.profileBundle?.summary.isOwnProfile === true;
   const delta = nextFollowing ? 1 : -1;
   setStoreState({
-    profileBundle: profileMatches && cur.profileBundle
+    profileBundle: cur.profileBundle && (profileMatches || ownProfile)
       ? {
           ...cur.profileBundle,
           summary: {
             ...cur.profileBundle.summary,
-            isFollowing: nextFollowing,
-            followersCount: Math.max(0, cur.profileBundle.summary.followersCount + delta),
+            ...(profileMatches
+              ? {
+                  isFollowing: nextFollowing,
+                  followersCount: Math.max(0, cur.profileBundle.summary.followersCount + delta),
+                }
+              : {}),
+            ...(ownProfile && !profileMatches
+              ? { followingCount: Math.max(0, cur.profileBundle.summary.followingCount + delta) }
+              : {}),
           },
         }
       : cur.profileBundle,
