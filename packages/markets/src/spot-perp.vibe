@@ -290,7 +290,7 @@ function toPerpMarketView(row: Row, stats?: Perp24hStats): PerpMarketView {
     ticker,
     organizationId,
     name: requiredText(row.org_name, ticker),
-    orgImageUrl: toText(row.org_image_url) ?? (organizationId !== "" ? resolveOrgLogoUrl(organizationId) : null),
+    orgImageUrl: organizationId !== "" ? resolveOrgLogoUrl(organizationId, toText(row.org_image_url)) : null,
     indexPriceCents: toInt(row.index_price_cents),
     markPriceCents,
     change24hPct,

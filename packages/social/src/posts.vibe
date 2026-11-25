@@ -26,6 +26,7 @@ import {
 import { isAuthorVisibleToViewer, type BlockRecord, type ModerationState, type MuteRecord } from "../gen/social__moderation.effect.vibe"
 import { type FeedRealtimeEvent } from "./realtime.vibe"
 import {
+  canonicalHandle,
   clampLimit,
   consumeHourlyRateLimitTx,
   emitAfterCommit,
@@ -79,6 +80,7 @@ export type PostMarketBadge =
   | {
       readonly kind: "prediction"
       readonly marketId: string
+      readonly ticker: string
       readonly question: string
       readonly yesPriceBps: number
       readonly closesAt: number
@@ -279,6 +281,48 @@ function viewerAuthorVisibilitySql(viewerParam: string, authorColumn: string): s
   return `NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = ${viewerParam} AND b.blocked_id = ${authorColumn}) OR (b.blocker_id = ${authorColumn} AND b.blocked_id = ${viewerParam})) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = ${viewerParam} AND m.muted_id = ${authorColumn})`
 }
 
+function socialModeMarketExclusionSql(alias: string): string {
+  return `NOT ((${alias}.author_kind = 'org' AND (${alias}.market_id IS NOT NULL OR ${alias}.ticker IS NOT NULL)) OR ${alias}.content ILIKE 'NEW MARKET (%' OR ${alias}.content ILIKE '%prediction market resolution%' OR ${alias}.content ILIKE 'Settlement Wire:%' OR ${alias}.content ILIKE 'Admin Resolution:%')`
+}
+
+interface OrgTickerRef {
+  readonly id: string
+  readonly name: string
+  readonly ticker: string
+}
+
+function escapeRegExp(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function matchOrgTickerInText(text: string, orgs: ReadonlyArray<OrgTickerRef>): string | null {
+  if (text.trim() === "" || orgs.length === 0) return null
+  for (const org of orgs) {
+    if (new RegExp(`\\$${escapeRegExp(org.ticker)}(?:$|[^a-zA-Z0-9_])`, "i").test(text)) {
+      return org.ticker
+    }
+  }
+  for (const org of orgs) {
+    if (org.name.length >= 3 && new RegExp(`(?:^|[^a-zA-Z0-9])${escapeRegExp(org.name)}(?:$|[^a-zA-Z0-9])`, "i").test(text)) {
+      return org.ticker
+    }
+  }
+  for (const org of orgs) {
+    if (org.ticker.length >= 3 && new RegExp(`(?:^|[^a-zA-Z0-9])${escapeRegExp(org.ticker)}(?:$|[^a-zA-Z0-9])`, "i").test(text)) {
+      return org.ticker
+    }
+  }
+  return null
+}
+
+function resolvePredictionMarketTicker(
+  question: string,
+  description: string,
+  orgs: ReadonlyArray<OrgTickerRef>
+): string | null {
+  return matchOrgTickerInText(question, orgs) ?? matchOrgTickerInText(description, orgs)
+}
+
 function makeSpecPost(
   id: number,
   authorId: string,
@@ -413,25 +457,44 @@ effect function hydratePostRowsTx(
     quoteMap.set(preview.id, preview)
   }
   const predictionBadgeMap = new Map<string, PostMarketBadge>()
+  const predictionLinkedTickerMap = new Map<string, string>()
   const perpBadgeMap = new Map<string, PostMarketBadge>()
   if (mode === "game") {
     const marketIds = [...new Set(rows.map((r) => toText(r.market_id)).filter((id): id is string => id !== undefined && id !== ""))]
     if (marketIds.length > 0) {
       const marketRows = try tx.query(
-        "SELECT id, question, yes_shares, no_shares, expires_at FROM feed_prediction_markets WHERE id = ANY($1)",
+        "SELECT id, question, description, yes_shares, no_shares, expires_at FROM feed_prediction_markets WHERE id = ANY($1)",
         [marketIds]
       )
+      const orgTickerRows = try tx.query(
+        "SELECT id, name, ticker FROM feed_organizations WHERE ticker IS NOT NULL AND btrim(ticker) <> ''"
+      )
+      const orgTickers: OrgTickerRef[] = orgTickerRows
+        .map((o) => ({
+          id: toText(o.id) ?? "",
+          name: (toText(o.name) ?? "").trim(),
+          ticker: (toText(o.ticker) ?? "").trim().toUpperCase()
+        }))
+        .filter((o) => o.ticker !== "")
+        .sort((a, b) => b.name.length - a.name.length || b.ticker.length - a.ticker.length)
       for (const mRow of marketRows) {
         const mid = toText(mRow.id) ?? ""
         if (mid === "") continue
+        const question = toText(mRow.question) ?? ""
+        const description = toText(mRow.description) ?? ""
         const yesShares = safeInt(mRow.yes_shares, 0)
         const noShares = safeInt(mRow.no_shares, 0)
         const total = yesShares + noShares
         const yesPriceBps = total > 0 ? Math.floor((noShares * 10_000) / total) : 5_000
+        const linkedTicker = resolvePredictionMarketTicker(question, description, orgTickers)
+        if (linkedTicker !== null) {
+          predictionLinkedTickerMap.set(mid, linkedTicker)
+        }
         predictionBadgeMap.set(mid, {
           kind: "prediction",
           marketId: mid,
-          question: toText(mRow.question) ?? "",
+          ticker: linkedTicker ?? "PRED",
+          question,
           yesPriceBps,
           closesAt: safeInt(mRow.expires_at, 0)
         })
@@ -505,13 +568,21 @@ effect function hydratePostRowsTx(
     const reposterId = toText(row.reposter_id) ?? null
     const reposterProfile = reposterId === null ? undefined : reposterProfiles.get(reposterId)
     const rawRepostedAt = row.reposted_at === null || row.reposted_at === undefined ? null : safeInt(row.reposted_at, 0)
+    const resolvedTicker = mode === "game" && base.ticker === null && base.marketId !== null
+      ? (predictionLinkedTickerMap.get(base.marketId) ?? null)
+      : base.ticker
+    const resolvedCashtags = mode === "game" && base.ticker === null && resolvedTicker !== null
+      ? extractCashtags(base.content, resolvedTicker)
+      : base.cashtags
     const marketBadge = mode !== "game"
       ? null
       : (base.marketId !== null ? predictionBadgeMap.get(base.marketId) : undefined)
-        ?? (base.ticker !== null ? perpBadgeMap.get(base.ticker.toUpperCase()) : undefined)
+        ?? (resolvedTicker !== null ? perpBadgeMap.get(resolvedTicker.toUpperCase()) : undefined)
         ?? null
     return {
       ...base,
+      ticker: resolvedTicker,
+      cashtags: resolvedCashtags,
       replyToPostId,
       replyToHandle: parentProfile?.handle ?? parentMeta?.authorId ?? null,
       replyToAuthorId: parentMeta?.authorId ?? null,
@@ -617,6 +688,10 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
       const params: unknown[] = []
       const origConditions: string[] = ["p.deleted_at IS NULL", "p.reply_to_post_id IS NULL"]
       const repostConditions: string[] = ["p.deleted_at IS NULL", "p.reply_to_post_id IS NULL"]
+      if (mode === "social") {
+        origConditions.push(socialModeMarketExclusionSql("p"))
+        repostConditions.push(socialModeMarketExclusionSql("p"))
+      }
       if (viewerId !== undefined) {
         params.push(viewerId)
         const viewerParam = `$${params.length}`
@@ -686,6 +761,9 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
       return try finishFeedPageTx(tx, sql, params, limit, viewerId, mode, input.tab)
     }
     const conditions: string[] = ["p.deleted_at IS NULL"]
+    if (mode === "social") {
+      conditions.push(socialModeMarketExclusionSql("p"))
+    }
     if (effectiveFilter === "posts") {
       conditions.push("p.reply_to_post_id IS NULL")
     } else if (effectiveFilter === "replies") {
@@ -1314,21 +1392,40 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
   }
   const limit = clampLimit(input.limit, 15, 50)
   const viewerId = normalizeOptionalText(input.viewerId) ?? undefined
-  const likePattern = `%${escapeLikePattern(queryText)}%`
+  const strippedQuery = queryText.replace(/^[@#$]+/, "").trim()
+  const entityQuery = (strippedQuery === "" ? queryText : strippedQuery).toLowerCase()
+  const compactEntity = entityQuery.replace(/[\s_-]+/g, "")
+  const rawLikePattern = `%${escapeLikePattern(queryText)}%`
+  const entityLikePattern = `%${escapeLikePattern(entityQuery)}%`
+  const entityPrefixPattern = `${escapeLikePattern(entityQuery)}%`
+  const compactLikePattern = `%${escapeLikePattern(compactEntity === "" ? entityQuery : compactEntity)}%`
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const mode = input.mode ?? (try readViewerUiModeTx(tx, viewerId))
     const postMatch = mode === "social"
-      ? "p.content ILIKE $1 ESCAPE '\\'"
-      : "(p.content ILIKE $1 ESCAPE '\\' OR p.ticker ILIKE $1 ESCAPE '\\')"
+      ? `(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\') AND ${socialModeMarketExclusionSql("p")}`
+      : "(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\' OR p.ticker ILIKE $2 ESCAPE '\\')"
     const postRows = viewerId === undefined
-      ? try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} ORDER BY p.created_at DESC LIMIT $2`, [likePattern, limit])
-      : try tx.query(`SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")} ORDER BY p.created_at DESC LIMIT $3`, [likePattern, viewerId, limit])
+      ? try tx.query(
+          `SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} ORDER BY p.created_at DESC LIMIT $3`,
+          [rawLikePattern, entityLikePattern, limit]
+        )
+      : try tx.query(
+          `SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql("$3", "p.author_id")} ORDER BY p.created_at DESC LIMIT $4`,
+          [rawLikePattern, entityLikePattern, viewerId, limit]
+        )
     const posts = try hydratePostRowsTx(tx, postRows, viewerId, mode)
-    const accountWhere = "is_reviewer = false AND (handle ILIKE $1 ESCAPE '\\' OR display_name ILIKE $1 ESCAPE '\\')"
+    const accountWhere = "is_reviewer = false AND (lower(handle) LIKE $1 ESCAPE '\\' OR lower(display_name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(display_name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\')"
+    const accountOrder = "CASE WHEN lower(handle) = $3 OR lower(display_name) = $3 THEN 0 WHEN lower(handle) LIKE $4 ESCAPE '\\' OR lower(display_name) LIKE $4 ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC"
     const accountRows = viewerId === undefined
-      ? try tx.query(`SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} ORDER BY created_at DESC LIMIT $2`, [likePattern, limit])
-      : try tx.query(`SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} AND ${viewerAuthorVisibilitySql("$2", "account_id")} ORDER BY created_at DESC LIMIT $3`, [likePattern, viewerId, limit])
+      ? try tx.query(
+          `SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} ORDER BY ${accountOrder} LIMIT $5`,
+          [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, limit]
+        )
+      : try tx.query(
+          `SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} AND ${viewerAuthorVisibilitySql("$5", "account_id")} ORDER BY ${accountOrder} LIMIT $6`,
+          [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, viewerId, limit]
+        )
     const accounts: SearchAccountResult[] = accountRows.map((row) => ({
       accountId: textOrEmpty(row.account_id),
       handle: textOrEmpty(row.handle),
@@ -1336,28 +1433,38 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       bio: textOrEmpty(row.bio),
       avatarUrl: toText(row.avatar_url) ?? null
     }))
-    const actorWhere = "id NOT LIKE 'test-%' AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\')"
+    const actorWhere = "id NOT LIKE 'test-%' AND (lower(username) LIKE $1 ESCAPE '\\' OR lower(name) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' OR replace(replace(lower(id), '-', ''), '_', '') LIKE $2 ESCAPE '\\' OR lower(description) LIKE $1 ESCAPE '\\')"
+    const actorOrder = "CASE WHEN lower(username) = $3 OR lower(name) = $3 OR lower(id) = $3 THEN 0 WHEN lower(username) LIKE $4 ESCAPE '\\' OR lower(name) LIKE $4 ESCAPE '\\' OR lower(id) LIKE $4 ESCAPE '\\' THEN 1 WHEN lower(username) LIKE $1 ESCAPE '\\' OR lower(name) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' OR replace(replace(lower(id), '-', ''), '_', '') LIKE $2 ESCAPE '\\' THEN 2 ELSE 3 END ASC, CASE tier WHEN 'S_TIER' THEN 0 WHEN 'A_TIER' THEN 1 WHEN 'B_TIER' THEN 2 WHEN 'C_TIER' THEN 3 ELSE 4 END ASC, name ASC"
     const actorRows = viewerId === undefined
-      ? try tx.query(`SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} ORDER BY name ASC LIMIT $2`, [likePattern, limit])
-      : try tx.query(`SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} AND ${viewerAuthorVisibilitySql("$2", "id")} ORDER BY name ASC LIMIT $3`, [likePattern, viewerId, limit])
+      ? try tx.query(
+          `SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} ORDER BY ${actorOrder} LIMIT $5`,
+          [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, limit]
+        )
+      : try tx.query(
+          `SELECT id, username, name, tier, description, profile_image_url FROM feed_actors WHERE ${actorWhere} AND ${viewerAuthorVisibilitySql("$5", "id")} ORDER BY ${actorOrder} LIMIT $6`,
+          [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, viewerId, limit]
+        )
     const actors: SearchActorResult[] = actorRows.map((row) => {
       const id = toText(row.id) ?? ""
       return {
         id,
-        username: toText(row.username) ?? "",
+        username: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
         name: toText(row.name) ?? "",
         tier: toText(row.tier) ?? "",
         description: toText(row.description) ?? "",
-        avatarUrl: toText(row.profile_image_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
+        avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
         isParody: true
       }
     })
     const orgMatch = mode === "social"
-      ? "name ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\'"
-      : "name ILIKE $1 ESCAPE '\\' OR ticker ILIKE $1 ESCAPE '\\' OR description ILIKE $1 ESCAPE '\\'"
+      ? "lower(name) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' OR lower(description) LIKE $1 ESCAPE '\\'"
+      : "lower(name) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR lower(COALESCE(ticker, '')) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' OR lower(description) LIKE $1 ESCAPE '\\'"
+    const orgOrder = mode === "social"
+      ? "CASE WHEN lower(id) = $3 OR lower(name) = $3 THEN 0 WHEN lower(id) LIKE $4 ESCAPE '\\' OR lower(name) LIKE $4 ESCAPE '\\' THEN 1 WHEN lower(id) LIKE $1 ESCAPE '\\' OR lower(name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' THEN 2 ELSE 3 END ASC, name ASC"
+      : "CASE WHEN lower(COALESCE(ticker, '')) = $3 OR lower(id) = $3 OR lower(name) = $3 THEN 0 WHEN lower(COALESCE(ticker, '')) LIKE $4 ESCAPE '\\' OR lower(id) LIKE $4 ESCAPE '\\' OR lower(name) LIKE $4 ESCAPE '\\' THEN 1 WHEN lower(COALESCE(ticker, '')) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR lower(name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' THEN 2 ELSE 3 END ASC, name ASC"
     const orgRows = try tx.query(
-      `SELECT id, name, ticker, org_type, description, image_url, initial_price_cents FROM feed_organizations WHERE ${orgMatch} ORDER BY name ASC LIMIT $2`,
-      [likePattern, limit]
+      `SELECT id, name, ticker, org_type, description, image_url, initial_price_cents FROM feed_organizations WHERE ${orgMatch} ORDER BY ${orgOrder} LIMIT $5`,
+      [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, limit]
     )
     const organizations: SearchOrganizationResult[] = orgRows.map((row) => {
       const id = toText(row.id) ?? ""
@@ -1367,11 +1474,11 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         ticker: mode === "social" ? null : (toText(row.ticker) ?? null),
         orgType: toText(row.org_type) ?? "",
         description: toText(row.description) ?? "",
-        avatarUrl: toText(row.image_url) ?? (id !== "" ? resolveOrgLogoUrl(id) : null),
+        avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
         initialPriceCents: mode === "social" || row.initial_price_cents === null ? null : safeInt(row.initial_price_cents, 0)
       }
     })
-    const cleanedTag = queryText.replace(/^[#$]/, "").toLowerCase()
+    const cleanedTag = entityQuery
     const tagCounts = new Map<string, SearchTagResult>()
     for (const post of posts) {
       for (const hashtag of post.hashtags) {
@@ -1405,7 +1512,7 @@ function rowToArticle(row: Row, mode: SocialPresentationMode): ArticleView {
     body: toText(row.body) ?? "",
     authorOrgId,
     authorOrgName: toText(row.author_org_name) ?? authorOrgId,
-    authorOrgAvatarUrl: toText(row.author_org_image_url) ?? (authorOrgId !== "" ? resolveOrgLogoUrl(authorOrgId) : null),
+    authorOrgAvatarUrl: authorOrgId !== "" ? resolveOrgLogoUrl(authorOrgId, toText(row.author_org_image_url)) : null,
     imageUrl: toText(row.image_url) ?? null,
     relatedMarketId: mode === "social" ? null : (toText(row.related_market_id) ?? null),
     isResolutionProof: Boolean(row.is_resolution_proof),

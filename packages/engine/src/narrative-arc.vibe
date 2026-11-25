@@ -18,13 +18,17 @@ import { generateCompletion, hasLiveLlmProvider } from "./llm-client.vibe"
 import { buildWorldContext, prioritizePerpMarkets, renderPrompt, type WorldContextMarketItem } from "./prompts.vibe"
 import {
   EngineFailure,
+  displayNameForEntity,
   hashString,
   isRuntimeNpcActor,
   maybePublishFeedEvent,
   newEngineId,
   parseLlmJsonRecord,
+  replaceActorSlugsWithNames,
   resolveClockNow,
+  sanitizeNarrativeText,
   sanitizeText,
+  stripLeadingSelfPrefix,
 } from "./shared.vibe"
 
 export const ROLLING_SLOT_TIMEFRAMES: ReadonlyArray<{ readonly timeframe: string; readonly durationMs: number }> = [
@@ -62,6 +66,7 @@ export interface ManualResolutionResult {
 }
 
 const packActorById: ReadonlyMap<string, PackActor> = new Map(actors.map((a) => [a.id, a]))
+const orgById = new Map(organizations.map((o) => [o.id, o]))
 
 const RESOLUTION_CLAIM_LEASE_MS = 60_000
 
@@ -327,12 +332,16 @@ export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
     parodyHeadlines: rssRows.map((r) => toText(r.headline) ?? "").filter((s) => s.length > 0),
     openMarkets,
     perpMarkets: prioritizedPerps,
-    recentPosts: postRows.map((r) => ({
-      id: toText(r.id) ?? "",
-      authorId: toText(r.author_id) ?? "",
-      authorKind: toText(r.author_kind) ?? "npc",
-      content: toText(r.content) ?? "",
-    })),
+    recentPosts: postRows.map((r) => {
+      const authorId = toText(r.author_id) ?? ""
+      return {
+        id: toText(r.id) ?? "",
+        authorId,
+        authorName: displayNameForEntity(authorId),
+        authorKind: toText(r.author_kind) ?? "npc",
+        content: toText(r.content) ?? "",
+      }
+    }),
   })
   return {
     currentDay,
@@ -391,9 +400,11 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
         (picked.packActor?.feed.deception !== undefined && picked.packActor.feed.deception !== "none") ||
         (clueTarget.spec !== "ClueClimax" && hashString(`deceiver:${marketId}:${actorId}`) % 5 === 0))
     const signal = declassifyClueSignal(secretSpec, clueTarget.spec, picked.isAffiliatedInsider, isDeceiver)
+    const actorName = toText(actor.name) ?? displayNameForEntity(actorId)
+    const actorHandle = (toText(actor.username) ?? actorId).toLowerCase()
     const rendered = renderPrompt("cluePost", {
-      actorName: toText(actor.name) ?? actorId,
-      actorHandle: toText(actor.username) ?? actorId,
+      actorName,
+      actorHandle,
       actorVoice: sanitizeText(toText(actor.system_prompt) ?? "Skeptical market operator", 160),
       question,
       category,
@@ -410,7 +421,10 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       nowMs: resolvedNow,
       actorId,
     })
-    const clueContent = sanitizeText(completion.text, 275)
+    const clueContent = sanitizeNarrativeText(stripLeadingSelfPrefix(completion.text, actorName, actorHandle), 260)
+    const matchedOrgTicker = [...findMatchedOrgIds(`${question} ${description}`)]
+      .map((id) => orgById.get(id)?.ticker?.toUpperCase())
+      .find((t): t is string => t !== undefined && t !== "")
     const claimed = try store.transaction(effect (tx: Tx) => {
       const currentRows = try tx.query(
         `SELECT status, phase, created_at, expires_at FROM feed_prediction_markets WHERE id = $1`,
@@ -445,6 +459,7 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       authorKind: "npc",
       content: clueContent,
       marketId,
+      ...(matchedOrgTicker !== undefined ? { ticker: matchedOrgTicker } : {}),
     })
     const postId = createdPost.id
     try store.transaction(effect (tx: Tx) => {
@@ -487,19 +502,20 @@ effect function settleMarketWithProofArticle(input: {
   const store = try Store
   const articleId = newEngineId("art")
   const authorOrgId = try store.transaction(effect (tx: Tx) => try resolveMediaOrgIdTx(tx, `proof:${input.marketId}`))
-  const cleanTitle = sanitizeText(input.title, 180)
-  const cleanSummary = sanitizeText(input.summary, 360)
+  const cleanTitle = sanitizeNarrativeText(input.title, 180)
+  const cleanSummary = sanitizeNarrativeText(input.summary, 360)
+  const cleanBody = replaceActorSlugsWithNames(input.body)
   try resolvePredictionMarket({
     marketId: input.marketId,
     outcome: input.outcome,
     proofArticleId: articleId,
-    proofSummary: sanitizeText(input.summary, 480),
+    proofSummary: sanitizeNarrativeText(input.summary, 480),
     approveHold: input.approveHold,
     proofArticle: {
       id: articleId,
       title: cleanTitle,
       summary: cleanSummary,
-      body: input.body,
+      body: cleanBody,
       authorOrgId,
       publishedAt: input.nowMs,
     },
@@ -518,7 +534,7 @@ effect function settleMarketWithProofArticle(input: {
   createPost({
     authorId: authorOrgId,
     authorKind: "org",
-    content: sanitizeText(`${cleanTitle} — ${cleanSummary}`, 275),
+    content: sanitizeNarrativeText(`${cleanTitle} — ${cleanSummary}`, 260),
     marketId: input.marketId,
   }) catch effect () => undefined
   try maybePublishFeedEvent({ type: "market.resolved", marketId: input.marketId, outcome: input.outcome, articleId })
@@ -559,13 +575,13 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
     }) catch effect () => null
     const parsed = completion ? parseLlmJsonRecord(completion.text) : null
     const fallbackSeed = hashString(`slot:${slotIndex}:${resolvedNow}`)
-    const question = sanitizeText(
+    const question = sanitizeNarrativeText(
       typeof parsed?.question === "string" && parsed.question.trim().length > 8
         ? parsed.question
         : `Will slot ${slotIndex} (${slotSpec.timeframe}) trigger a major Feed catalyst before expiry?`,
       220,
     )
-    const description = sanitizeText(
+    const description = sanitizeNarrativeText(
       typeof parsed?.description === "string" && parsed.description.trim().length > 8
         ? parsed.description
         : `Rolling ${slotSpec.timeframe} Feed prediction market for slot ${slotIndex}.`,
@@ -611,7 +627,7 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
       createPost({
         authorId: insertedOrgId,
         authorKind: "org",
-        content: sanitizeText(`NEW MARKET (${slotSpec.timeframe}): ${question}`, 275),
+        content: sanitizeNarrativeText(`NEW MARKET (${slotSpec.timeframe}): ${question}`, 260),
         marketId,
       }) catch effect () => undefined
       try maybePublishFeedEvent({ type: "world.tick", kind: "market", refId: marketId, createdAt: resolvedNow })
@@ -820,10 +836,10 @@ effect function resolveHoldCommon(
     }
     const question = toText(market.question) ?? cleanId
     const outcomeUpper = chosenOutcome === "yes" ? "YES" : "NO"
-    const note = reason ? sanitizeText(reason, 280) : "Admin approved manual-hold settlement"
-    const cleanTitle = sanitizeText(`Admin Resolution: ${sanitizeText(question, 96)} (${outcomeUpper})`, 180)
-    const cleanSummary = sanitizeText(note, 360)
-    const body = `Operator resolved held prediction market "${question}" as ${outcomeUpper}. Reason: ${note}.`
+    const note = reason ? sanitizeNarrativeText(reason, 280) : "Admin approved manual-hold settlement"
+    const cleanTitle = sanitizeNarrativeText(`Admin Resolution: ${sanitizeNarrativeText(question, 96)} (${outcomeUpper})`, 180)
+    const cleanSummary = sanitizeNarrativeText(note, 360)
+    const body = replaceActorSlugsWithNames(`Operator resolved held prediction market "${question}" as ${outcomeUpper}. Reason: ${note}.`)
     const authorOrgId = try resolveMediaOrgIdTx(tx, `hold:${cleanId}`)
     try resolvePredictionMarketTx(
       tx,
@@ -858,7 +874,7 @@ effect function resolveHoldCommon(
   createPost({
     authorId: committed.authorOrgId,
     authorKind: "org",
-    content: sanitizeText(`${committed.cleanTitle} — ${committed.cleanSummary}`, 275),
+    content: sanitizeNarrativeText(`${committed.cleanTitle} — ${committed.cleanSummary}`, 260),
     marketId: cleanId,
   }) catch effect () => undefined
   try maybePublishFeedEvent({ type: "market.resolved", marketId: cleanId, outcome: committed.chosenOutcome, articleId })

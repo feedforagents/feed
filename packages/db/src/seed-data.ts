@@ -853,27 +853,51 @@ function stableAssetHash(input: string): number {
 }
 
 /** @throws {never} */
-export function resolveActorAvatarUrl(actorId: string): string {
-  return actorId.startsWith("org-")
-    ? `/images/organizations/${actorId.slice(4)}.jpg`
-    : `/images/actors/${actorId}.jpg`
+export function resolveActorAvatarUrl(actorId: string, storedUrl?: string | null): string {
+  const normalizedId = actorId.trim().toLowerCase()
+  const canonical = normalizedId.startsWith("org-")
+    ? `/images/organizations/${normalizedId.slice(4)}.jpg`
+    : `/images/actors/${normalizedId}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/actors/") || trimmed.startsWith("/images/organizations/")) {
+    return canonical
+  }
+  return trimmed
 }
 
 /** @throws {never} */
-export function resolveActorBannerUrl(actorId: string): string {
-  return actorId.startsWith("org-")
-    ? `/images/org-banners/${actorId.slice(4)}.jpg`
-    : `/images/actor-banners/${actorId}.jpg`
+export function resolveActorBannerUrl(actorId: string, storedUrl?: string | null): string {
+  const normalizedId = actorId.trim().toLowerCase()
+  const canonical = normalizedId.startsWith("org-")
+    ? `/images/org-banners/${normalizedId.slice(4)}.jpg`
+    : `/images/actor-banners/${normalizedId}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/actor-banners/") || trimmed.startsWith("/images/org-banners/")) {
+    return canonical
+  }
+  return trimmed
 }
 
 /** @throws {never} */
-export function resolveOrgLogoUrl(orgId: string): string {
-  return `/images/organizations/${orgId}.jpg`
+export function resolveOrgLogoUrl(orgId: string, storedUrl?: string | null): string {
+  const slug = orgId.trim().toLowerCase().replace(/^org-/, "")
+  const canonical = `/images/organizations/${slug}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/organizations/") || trimmed.startsWith("/images/actors/")) {
+    return canonical
+  }
+  return trimmed
 }
 
 /** @throws {never} */
-export function resolveOrgBannerUrl(orgId: string): string {
-  return `/images/org-banners/${orgId}.jpg`
+export function resolveOrgBannerUrl(orgId: string, storedUrl?: string | null): string {
+  const slug = orgId.trim().toLowerCase().replace(/^org-/, "")
+  const canonical = `/images/org-banners/${slug}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/org-banners/") || trimmed.startsWith("/images/actor-banners/")) {
+    return canonical
+  }
+  return trimmed
 }
 
 /** @throws {never} */

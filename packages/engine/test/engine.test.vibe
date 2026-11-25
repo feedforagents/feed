@@ -7,6 +7,7 @@ import { TestClock } from "effect/testing"
 import {
   DEFAULT_RSS_URLS,
   EngineFailure,
+  PromptCatalog,
   UNCERTAIN_RESERVATION_TTL_MS,
   approveManualHold,
   confirmLlmSpend,
@@ -22,6 +23,7 @@ import {
   overrideManualHold,
   parseLlmJsonRecord,
   reconcileStaleUncertainSpend,
+  replaceActorSlugsWithNames,
   reserveLlmBudget,
   resolveClockMode,
   runArticleTick,
@@ -34,6 +36,8 @@ import {
   runPerpFundingTick,
   runRssRefreshTick,
   runWorldFactsTick,
+  trimToWordBoundary,
+  validateNpcTradingDecision,
 } from "../src/index.vibe"
 
 module nodeEnv {
@@ -746,7 +750,37 @@ it.effect('NPCs execute full trading and social actions, alpha invites honor blo
     const artTick1 = try runArticleTick(liveNow)
     const artTick2 = try runArticleTick(liveNow + 30 * 60_000 * 6)
 
+    const trimmedHashtag = trimToWordBoundary("Stay tuned for more #Bitcoin updates right now", 28)
+    const trimmedSentence = trimToWordBoundary("Cybercab v14 shipped today. Orderbook looks wild! #TeslAI #Autonomous", 54)
+    const cleanedSlugText = replaceActorSlugsWithNames("Sources close to glenn-greenaiwald and org-politaico confirmed the leak.")
+    const multiPostDecisions = validateNpcTradingDecision(
+      {
+        actions: [
+          { kind: "CREATE_POST", content: "First post on $NVDAI" },
+          { kind: "CREATE_POST", content: "Second duplicate spam post" },
+          { kind: "CREATE_POST", content: "Third spam post" },
+        ],
+      },
+      4,
+      ["NVDAI"],
+      ["seed-market-1"],
+    )
+    const postAuthorCountsBefore = try queryRows(
+      `SELECT author_id, COUNT(*)::int AS cnt FROM feed_posts WHERE author_kind = 'npc' AND reply_to_post_id IS NULL AND created_at >= $1 GROUP BY author_id`,
+      [liveNow - 600_000],
+    )
+    const maxPostsPerNpcInWindow = Math.max(0, ...postAuthorCountsBefore.map((r) => toInt(r.cnt)))
+
     try check(() => {
+      assert.strictEqual(trimmedHashtag, "Stay tuned for more...")
+      assert.strictEqual(trimmedSentence, "Cybercab v14 shipped today. Orderbook looks wild!")
+      assert.strictEqual(cleanedSlugText, "Sources close to Glenn GreenAIwald and PolitAIco confirmed the leak.")
+      assert.strictEqual(multiPostDecisions.filter((d) => d.kind === "CREATE_POST").length, 1)
+      assert.isTrue(PromptCatalog.ambientPost.system.includes("FIRST PERSON"))
+      assert.isTrue(PromptCatalog.commentary.system.includes("FIRST PERSON"))
+      assert.isTrue(PromptCatalog.replyPost.system.includes("FIRST PERSON"))
+      assert.isTrue(PromptCatalog.ambientPost.system.includes("NVIDAI"))
+      assert.isTrue(maxPostsPerNpcInWindow <= 2)
       assert.strictEqual(soldPredRes.success, true)
       assert.strictEqual(closedPerpRes.success, true)
       assert.strictEqual(toText(closedPerpRow.status), "closed")

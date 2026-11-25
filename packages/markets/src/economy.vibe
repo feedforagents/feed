@@ -535,9 +535,9 @@ effect function scoreCharacterLeaderboardTx(tx: Tx, cutoffMs: number | null = nu
     const stat = statsMap.get(actorId) ?? { wins: 0, settledCount: 0, realizedPnlCents: 0 }
     return buildUnrankedLeaderboardRow({
       accountId: actorId,
-      handle: requiredText(actor.username),
+      handle: requiredText(actor.username, actorId).toLowerCase(),
       displayName: requiredText(actor.name),
-      avatarUrl: optionalText(actor.profile_image_url) ?? (actorId !== "" ? resolveActorAvatarUrl(actorId) : null),
+      avatarUrl: actorId !== "" ? resolveActorAvatarUrl(actorId, optionalText(actor.profile_image_url)) : null,
       isNpc: true,
       balanceCents,
       positionValueCents,

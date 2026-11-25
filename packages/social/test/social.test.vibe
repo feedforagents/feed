@@ -1261,6 +1261,34 @@ it.effect(
     const reply1 = try createPost({ authorId: "alice", authorKind: "user", content: "First reply", replyToPostId: orgPost.id })
     try TestClock.adjust(Duration.seconds(1))
     const reply2 = try createPost({ authorId: "bob", authorKind: "user", content: "Second nested reply", replyToPostId: reply1.id })
+    try TestClock.adjust(Duration.seconds(1))
+    const newMarketSystemPost = try createPost({
+      authorId: "the-new-york-taimes",
+      authorKind: "org",
+      content: "NEW MARKET (15m): Will OpenAGI ship GPT-Next today?",
+      marketId: "seed-market-1"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const resolutionSystemPost = try createPost({
+      authorId: "the-new-york-taimes",
+      authorKind: "org",
+      content: "Wire dispatch confirming the prediction market resolution of YES for OpenAGI pricing.",
+      marketId: "seed-market-1"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const openagiClueNoTicker = try createPost({
+      authorId: "sam-ailtman",
+      authorKind: "npc",
+      content: "Pricing curve meetings ran late again tonight.",
+      marketId: "seed-market-1"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const powellClueNoTicker = try createPost({
+      authorId: "ailon-musk",
+      authorKind: "npc",
+      content: "Counting how many times data dependent shows up today.",
+      marketId: "seed-market-6"
+    })
 
     const openagiFeed = try listFeedPosts({ tab: "latest", authorId: "openagi", mode: "game", limit: 20 })
     const topLevelFeed = try listFeedPosts({ tab: "latest", mode: "game", limit: 50 })
@@ -1271,8 +1299,15 @@ it.effect(
     const seededPostGame = topLevelFeed.items.find((p) => p.id === "seed-post-1")
     const seededPostSocial = socialFeed.items.find((p) => p.id === "seed-post-1")
     const replyInFeed = feedWithReplies.items.find((p) => p.id === reply1.id)
+    const openagiClueGame = topLevelFeed.items.find((p) => p.id === openagiClueNoTicker.id)
+    const powellClueGame = topLevelFeed.items.find((p) => p.id === powellClueNoTicker.id)
+    const orgOpenagiProfile = try getProfile("org-openagi", "alice", "game")
 
     const searchOpenagi = try searchWorld({ query: "openagi", mode: "game", limit: 10 })
+    const searchAilon = try searchWorld({ query: "ailon", mode: "game", limit: 10 })
+    const searchAtAilon = try searchWorld({ query: "@ailon", mode: "game", limit: 10 })
+    const searchMusk = try searchWorld({ query: "musk", mode: "game", limit: 10 })
+    const searchTslai = try searchWorld({ query: "tslai", mode: "game", limit: 10 })
     const searchTest = try searchWorld({ query: "test_", mode: "game", limit: 10 })
     const articles = try listArticles(10, "game")
 
@@ -1333,7 +1368,24 @@ it.effect(
       searchAndArticles: [
         searchOpenagi.organizations.find((o) => o.id === "openagi")?.avatarUrl,
         searchTest.actors.length,
-        articles[0]?.authorOrgAvatarUrl !== null
+        articles[0]?.authorOrgAvatarUrl !== null,
+        searchAilon.actors[0]?.id,
+        searchAilon.actors[0]?.username,
+        searchAtAilon.actors[0]?.id,
+        searchMusk.actors[0]?.id,
+        searchTslai.organizations[0]?.ticker,
+        orgOpenagiProfile.handle
+      ],
+      socialModeAndBadges: [
+        topLevelFeed.items.some((p) => p.id === newMarketSystemPost.id),
+        topLevelFeed.items.some((p) => p.id === resolutionSystemPost.id),
+        socialFeed.items.some((p) => p.id === newMarketSystemPost.id),
+        socialFeed.items.some((p) => p.id === resolutionSystemPost.id),
+        socialFeed.items.some((p) => p.id === "seed-post-1"),
+        openagiClueGame?.ticker,
+        openagiClueGame?.marketBadge?.kind === "prediction" ? openagiClueGame.marketBadge.ticker : null,
+        powellClueGame?.ticker,
+        powellClueGame?.marketBadge?.kind === "prediction" ? powellClueGame.marketBadge.ticker : null
       ],
       profileAndModeration: [
         updatedAlice?.avatarUrl,
@@ -1382,7 +1434,24 @@ it.effect(
       searchAndArticles: [
         "/images/organizations/openagi.jpg",
         0,
-        true
+        true,
+        "ailon-musk",
+        "ailonmusk",
+        "ailon-musk",
+        "ailon-musk",
+        "TSLAI",
+        "openagi"
+      ],
+      socialModeAndBadges: [
+        true,
+        true,
+        false,
+        false,
+        true,
+        "OPENAGI",
+        "OPENAGI",
+        null,
+        "PRED"
       ],
       profileAndModeration: [
         "/assets/user-pfps/pfp-007.jpg",

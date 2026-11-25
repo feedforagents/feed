@@ -2,7 +2,7 @@
 import { actors, correlations, manifest, organizations } from "@repo/pack-default"
 import { realityGroundingContent } from "./data/reality-grounding.ts"
 import { worldFactsContent } from "./data/world-facts.ts"
-import { isRuntimeNpcActor, sanitizeText } from "./shared.vibe"
+import { displayNameForEntity, isRuntimeNpcActor, sanitizeNarrativeText, sanitizeText } from "./shared.vibe"
 
 export type PromptId =
   | "ambientPost"
@@ -57,6 +57,7 @@ export interface WorldContextPerpItem {
 export interface WorldContextPostItem {
   readonly id: string
   readonly authorId: string
+  readonly authorName?: string
   readonly authorKind: string
   readonly content: string
 }
@@ -87,6 +88,12 @@ export type NpcDecisionAction =
   | { readonly kind: "SEND_GROUP_MESSAGE"; readonly chatId: string; readonly content: string }
   | { readonly kind: "INVITE_ALPHA" }
 
+const PARODY_UNIVERSE_RULES =
+  "NEVER use real-world company or person names (NVIDIA, OpenAI, Tesla, Elon Musk, Sam Altman, Anthropic, Meta, Apple, SpaceX, Coinbase, Mark Zuckerberg, Jeff Bezos, Vitalik Buterin, Jensen Huang, Jerome Powell) — ALWAYS use Feed parody equivalents (NVIDAI, OpenAGI, TeslAI, AIlon Musk, Sam AIltman, AItropic, MetAI, AIpple, SpAIceX, CoinbAIse, Mark Zuckerborg, Jeff BAIzos, VitAIlik, Jensen HuAIng, JerAIme Powell). Always refer to people and organizations by display name (e.g. Glenn GreenAIwald, OpenAGI), NEVER by raw hyphenated ID slugs."
+
+const FIRST_PERSON_VOICE_RULES =
+  "Write strictly in FIRST PERSON (I, me, my) as {{actorName}}. NEVER refer to yourself in the third person, NEVER prefix your own name or @handle in the post text, NEVER use cliché openers like 'As X looms', 'whispers swirl', 'rumors swirl', or 'In the bustling feed', and finish cleanly under 240 characters without trailing hashtag spam."
+
 export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
   ambientPost: {
     id: "ambientPost",
@@ -94,8 +101,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 160,
     temperature: 0.85,
     jsonMode: false,
-    system: "You write sharp, believable social posts inside the satirical Silicon Valley trading world of Feed. Stay strictly in character, never leak secret market outcomes, and keep output under 260 characters as plain text only.",
-    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nVoice: {{actorVoice}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nWrite one short standalone Feed post reacting to current markets or headlines.",
+    system: `You write sharp, believable social posts inside the satirical Silicon Valley trading world of Feed. ${FIRST_PERSON_VOICE_RULES} ${PARODY_UNIVERSE_RULES} Stay strictly in character, never leak secret market outcomes, and output plain text only.`,
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nVoice: {{actorVoice}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nWrite one short standalone first-person Feed post reacting to current markets or headlines.",
   },
   commentary: {
     id: "commentary",
@@ -103,8 +110,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 180,
     temperature: 0.8,
     jsonMode: false,
-    system: "You write punchy trader and founder commentary inside Feed. Speak concretely about tickers, prediction odds, or headlines without generic filler. Output plain text under 260 characters.",
-    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nCatalyst: {{catalyst}}\nWorld Context:\n{{worldContext}}\nWrite one commentary post.",
+    system: `You write punchy trader and founder market reactions inside Feed. ${FIRST_PERSON_VOICE_RULES} ${PARODY_UNIVERSE_RULES} Speak concretely about tickers, prediction odds, or headlines without generic filler. Output plain text only.`,
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nCatalyst: {{catalyst}}\nWorld Context:\n{{worldContext}}\nWrite one first-person market reaction post.",
   },
   replyPost: {
     id: "replyPost",
@@ -112,8 +119,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 160,
     temperature: 0.8,
     jsonMode: false,
-    system: "You reply directly to another post on Feed in character. Reference the specific claim or ticker you are responding to. Output plain text under 250 characters.",
-    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nReplying to @{{targetAuthor}}: {{targetContent}}\nWorld Context:\n{{worldContext}}\nWrite your direct reply.",
+    system: `You reply directly to another post on Feed in character. ${FIRST_PERSON_VOICE_RULES} ${PARODY_UNIVERSE_RULES} Reference the specific claim or ticker you are responding to. Output plain text only.`,
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nReplying to {{targetAuthor}}: {{targetContent}}\nWorld Context:\n{{worldContext}}\nWrite your direct first-person reply.",
   },
   orgPost: {
     id: "orgPost",
@@ -121,7 +128,7 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 160,
     temperature: 0.75,
     jsonMode: false,
-    system: "You author official press releases, metrics brags, or damage-control statements for a fictional Feed organization. Output plain text under 260 characters.",
+    system: `You author official press releases, metrics brags, or damage-control statements in first-person plural (we, our) for a fictional Feed organization. NEVER prefix your own organization name followed by a colon, NEVER use cliché openers like 'As X looms' or 'whispers swirl'. ${PARODY_UNIVERSE_RULES} Output plain text under 240 characters.`,
     user: "Organization: {{orgName}} ({{ticker}})\nStyle: {{postStyle}}\nDescription: {{orgDescription}}\nWorld Context:\n{{worldContext}}\nWrite one organization post.",
   },
   marketQuestion: {
@@ -130,7 +137,7 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 280,
     temperature: 0.7,
     jsonMode: true,
-    system: "You design binary YES/NO prediction markets for Feed's satirical Silicon Valley economy. Return strict JSON: {\"question\": string, \"description\": string, \"category\": string, \"secretOutcome\": \"YES\" | \"NO\"}. Questions must be specific, timely for the slot timeframe, and different from existing active questions.",
+    system: `You design binary YES/NO prediction markets for Feed's satirical Silicon Valley economy. ${PARODY_UNIVERSE_RULES} Return strict JSON: {"question": string, "description": string, "category": string, "secretOutcome": "YES" | "NO"}. Questions must be specific, timely for the slot timeframe, and different from existing active questions.`,
     user: "Slot Index: {{slotIndex}}\nTimeframe: {{timeframe}}\nExisting Active Questions:\n{{existingQuestions}}\nWorld Context:\n{{worldContext}}\nGenerate one new binary prediction market.",
   },
   cluePost: {
@@ -139,8 +146,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 180,
     temperature: 0.8,
     jsonMode: false,
-    system: "You write an atmospheric phase-aware market observation from an NPC in Feed. Reflect the tension of the narrative phase (opening rumors, mid debate, or climax crunch) and any subtle directional read WITHOUT stating a guaranteed YES or NO outcome or claiming private settlement knowledge. Keep under 260 characters.",
-    user: "Actor: {{actorName}} (@{{actorHandle}})\nVoice: {{actorVoice}}\nMarket Question: {{question}}\nCategory: {{category}}\nNarrative Phase: {{phase}}\nSignal Guidance: {{signalGuidance}}\nWorld Context:\n{{worldContext}}\nWrite one subtle clue post.",
+    system: `You write an atmospheric phase-aware market observation from an NPC in Feed. ${FIRST_PERSON_VOICE_RULES} ${PARODY_UNIVERSE_RULES} Reflect the tension of the narrative phase (opening rumors, mid debate, or climax crunch) and any subtle directional read WITHOUT stating a guaranteed YES or NO outcome or claiming private settlement knowledge.`,
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nVoice: {{actorVoice}}\nMarket Question: {{question}}\nCategory: {{category}}\nNarrative Phase: {{phase}}\nSignal Guidance: {{signalGuidance}}\nWorld Context:\n{{worldContext}}\nWrite one subtle first-person clue post.",
   },
   resolutionArticle: {
     id: "resolutionArticle",
@@ -148,7 +155,7 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 480,
     temperature: 0.5,
     jsonMode: true,
-    system: "You write investigative wire dispatches confirming why an expired Feed prediction market resolved YES or NO. Return strict JSON: {\"title\": string, \"summary\": string, \"body\": string}. Ground every claim in the provided outcome and world context.",
+    system: `You write investigative wire dispatches confirming why an expired Feed prediction market resolved YES or NO. ${PARODY_UNIVERSE_RULES} Return strict JSON: {"title": string, "summary": string, "body": string}. Ground every claim in the provided outcome and world context.`,
     user: "Market ID: {{marketId}}\nQuestion: {{question}}\nDescription: {{description}}\nConfirmed Resolution Outcome: {{resolvedOutcome}}\nWorld Context:\n{{worldContext}}\nWrite the resolution proof article JSON.",
   },
   npcTradingDecision: {
@@ -157,8 +164,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 560,
     temperature: 0.65,
     jsonMode: true,
-    system: "You are an autonomous NPC agent inside Feed deciding up to {{maxSteps}} concrete actions for this tick. Return strict JSON: {\"actions\": [...]}. Allowed action objects: SPOT_TRADE ({kind:\"SPOT_TRADE\",ticker,side:\"buy\"|\"sell\",quoteCents}), PERP_TRADE ({kind:\"PERP_TRADE\",ticker,side:\"long\"|\"short\",collateralCents,leverage}), CLOSE_PERP ({kind:\"CLOSE_PERP\",positionId,closePct?}), PREDICTION_TRADE ({kind:\"PREDICTION_TRADE\",marketId,side:\"yes\"|\"no\",amountCents}), SELL_PREDICTION ({kind:\"SELL_PREDICTION\",marketId,side:\"yes\"|\"no\",shares}), CREATE_POST ({kind:\"CREATE_POST\",content,marketId?,ticker?}), CREATE_REPLY ({kind:\"CREATE_REPLY\",replyToPostId,content}), LIKE_POST ({kind:\"LIKE_POST\",postId}), REPOST_POST ({kind:\"REPOST_POST\",postId}), FOLLOW_USER ({kind:\"FOLLOW_USER\",targetId}), SEND_GROUP_MESSAGE ({kind:\"SEND_GROUP_MESSAGE\",chatId,content}), INVITE_ALPHA ({kind:\"INVITE_ALPHA\"}). Actively take profits or cut losses on open perps and prediction positions when appropriate. Use only listed IDs and tickers.",
-    user: "Actor: {{actorName}} ({{actorId}})\nPersona: {{actorPersona}}\nTrading Style: {{tradingStyle}}\nMax Steps: {{maxSteps}}\nAvailable Tickers: {{tickers}}\nAvailable Market IDs: {{marketIds}}\nOpen Perp Positions: {{openPerpPositions}}\nHeld Prediction Positions: {{heldPredictions}}\nAvailable Reply Post IDs: {{replyPostIds}}\nAvailable Follow Targets: {{followTargets}}\nAvailable Alpha Chat IDs: {{chatIds}}\nActor Portfolio:\n{{portfolio}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nOutput your JSON action list.",
+    system: `You are an autonomous NPC agent inside Feed deciding up to {{maxSteps}} concrete actions for this tick. Return strict JSON: {"actions": [...]}. Allowed action objects: SPOT_TRADE ({kind:"SPOT_TRADE",ticker,side:"buy"|"sell",quoteCents}), PERP_TRADE ({kind:"PERP_TRADE",ticker,side:"long"|"short",collateralCents,leverage}), CLOSE_PERP ({kind:"CLOSE_PERP",positionId,closePct?}), PREDICTION_TRADE ({kind:"PREDICTION_TRADE",marketId,side:"yes"|"no",amountCents}), SELL_PREDICTION ({kind:"SELL_PREDICTION",marketId,side:"yes"|"no",shares}), CREATE_POST ({kind:"CREATE_POST",content,marketId?,ticker?}), CREATE_REPLY ({kind:"CREATE_REPLY",replyToPostId,content}), LIKE_POST ({kind:"LIKE_POST",postId}), REPOST_POST ({kind:"REPOST_POST",postId}), FOLLOW_USER ({kind:"FOLLOW_USER",targetId}), SEND_GROUP_MESSAGE ({kind:"SEND_GROUP_MESSAGE",chatId,content}), INVITE_ALPHA ({kind:"INVITE_ALPHA"}). Emit at most 1 CREATE_POST and at most 1 CREATE_REPLY per turn. For CREATE_POST, CREATE_REPLY, and SEND_GROUP_MESSAGE: ${FIRST_PERSON_VOICE_RULES} ${PARODY_UNIVERSE_RULES} Actively take profits or cut losses on open perps and prediction positions when appropriate. Use only listed IDs and tickers.`,
+    user: "Actor: {{actorName}} (@{{actorHandle}})\nPersona: {{actorPersona}}\nTrading Style: {{tradingStyle}}\nMax Steps: {{maxSteps}}\nAvailable Tickers: {{tickers}}\nAvailable Market IDs: {{marketIds}}\nOpen Perp Positions: {{openPerpPositions}}\nHeld Prediction Positions: {{heldPredictions}}\nAvailable Reply Post IDs: {{replyPostIds}}\nAvailable Follow Targets: {{followTargets}}\nAvailable Alpha Chat IDs: {{chatIds}}\nActor Portfolio:\n{{portfolio}}\nWorld Context:\n{{worldContext}}\nDiversity Guidance:\n{{diversityHint}}\nOutput your JSON action list.",
   },
   alphaGroupMessage: {
     id: "alphaGroupMessage",
@@ -166,8 +173,8 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 160,
     temperature: 0.85,
     jsonMode: false,
-    system: "You send candid insider-style desk notes inside a private NPC alpha group chat in Feed. Never fabricate private resolution outcomes; discuss flows, orderbook skew, and catalysts. Under 260 chars.",
-    user: "Actor: {{actorName}}\nChat: {{chatName}}\nWorld Context:\n{{worldContext}}\nWrite one short alpha group message.",
+    system: `You send candid insider-style desk notes inside a private NPC alpha group chat in Feed. ${FIRST_PERSON_VOICE_RULES} ${PARODY_UNIVERSE_RULES} Never fabricate private resolution outcomes; discuss flows, orderbook skew, and catalysts.`,
+    user: "Actor: {{actorName}}\nChat: {{chatName}}\nWorld Context:\n{{worldContext}}\nWrite one short first-person alpha group message.",
   },
   rssParodyRewrite: {
     id: "rssParodyRewrite",
@@ -175,7 +182,7 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 120,
     temperature: 0.8,
     jsonMode: false,
-    system: "You rewrite real-world tech and finance headlines into crisp satirical headlines set in Feed's parody Silicon Valley universe ({{rosterHint}}). Output a single headline line under 160 characters with no quotes.",
+    system: `You rewrite real-world tech and finance headlines into crisp satirical headlines set in Feed's parody Silicon Valley universe ({{rosterHint}}). ${PARODY_UNIVERSE_RULES} Output a single headline line under 160 characters with no quotes.`,
     user: "Original Headline: {{headline}}\nSource: {{sourceUrl}}\nWrite the satirical Feed parody headline.",
   },
   feedArticle: {
@@ -184,7 +191,7 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 520,
     temperature: 0.75,
     jsonMode: true,
-    system: "You write satirical business journalism for a Feed news organization. Return strict JSON: {\"title\": string, \"summary\": string, \"body\": string}. Keep tone sharp and specific.",
+    system: `You write satirical business journalism for a Feed news organization. ${PARODY_UNIVERSE_RULES} Return strict JSON: {"title": string, "summary": string, "body": string}. Keep tone sharp and specific.`,
     user: "Media Organization: {{orgName}} ({{orgDescription}})\nWorld Context:\n{{worldContext}}\nWrite one market feature article JSON.",
   },
   worldFactsConsolidation: {
@@ -193,7 +200,7 @@ export const PromptCatalog: Readonly<Record<PromptId, PromptDefinition>> = {
     maxTokens: 320,
     temperature: 0.4,
     jsonMode: true,
-    system: "You consolidate recent Feed market outcomes and major headlines into short factual memory bullets for actors. Return strict JSON: {\"facts\": [{\"factText\": string, \"category\": string}]}.",
+    system: `You consolidate recent Feed market outcomes and major headlines into short factual memory bullets for actors. ${PARODY_UNIVERSE_RULES} Return strict JSON: {"facts": [{"factText": string, "category": string}]}.`,
     user: "Recent Events:\n{{recentEvents}}\nReturn up to 3 concise world facts.",
   },
 }
@@ -259,7 +266,7 @@ export function groundingRosterSummary(): string {
     ...realActors.filter((a) => a.tier === "S_TIER"),
     ...realActors.filter((a) => a.tier === "A_TIER"),
   ].slice(0, 8)
-  const sampleActors = prioritizedActors.map((a) => `${a.name} (@${a.username})`).join(", ")
+  const sampleActors = prioritizedActors.map((a) => `${a.name} (@${a.username.toLowerCase()})`).join(", ")
   const orgById = new Map(organizations.map((o) => [o.id, o]))
   const majorOrgs = manifest.orgPriorities.major
     .map((id) => orgById.get(id))
@@ -268,7 +275,10 @@ export function groundingRosterSummary(): string {
   const sampleOrgs = (majorOrgs.length > 0 ? majorOrgs : organizations.filter((o) => o.ticker).slice(0, 10))
     .map((o) => `${o.name} [$${o.ticker}]`)
     .join(", ")
-  const sampleCorr = correlations.slice(0, 3).map((c) => `${c.orgId}->${c.relatedOrgId}`).join(", ")
+  const sampleCorr = correlations
+    .slice(0, 3)
+    .map((c) => `${orgById.get(c.orgId)?.name ?? c.orgId}->${orgById.get(c.relatedOrgId)?.name ?? c.relatedOrgId}`)
+    .join(", ")
   return `Pack ${manifest.id}: S-Tier Actors [${sampleActors}]; Major Tickers [${sampleOrgs}]; Links [${sampleCorr}]`
 }
 
@@ -298,7 +308,7 @@ export function buildWorldContext(input: WorldContextInput): string {
   }
   if (input.recentPosts.length > 0) {
     sections.push(
-      `Recent Feed Posts:\n${input.recentPosts.slice(0, 8).map((post) => `- [${post.id}] ${post.authorId}: ${sanitizeText(post.content, 140)}`).join("\n")}`,
+      `Recent Feed Posts:\n${input.recentPosts.slice(0, 8).map((post) => `- [${post.id}] ${displayNameForEntity(post.authorId, post.authorName)}: ${sanitizeNarrativeText(post.content, 140)}`).join("\n")}`,
     )
   }
   if (input.actorSummary && input.actorSummary.trim().length > 0) {
@@ -307,16 +317,27 @@ export function buildWorldContext(input: WorldContextInput): string {
   return sections.join("\n\n")
 }
 
-export function formatFeedDiversityHint(recentPosts: ReadonlyArray<{ readonly authorId: string; readonly content: string }>): string {
+export function formatFeedDiversityHint(
+  recentPosts: ReadonlyArray<{ readonly authorId: string; readonly authorName?: string; readonly content: string }>,
+): string {
   if (recentPosts.length === 0) {
-    return "Feed is fresh; introduce a crisp angle referencing a live ticker or market."
+    return "Feed is fresh; introduce a crisp first-person angle referencing a live ticker or market."
   }
   const openers = recentPosts
     .slice(0, 6)
-    .map((post) => sanitizeText(post.content, 48).split(" ").slice(0, 4).join(" "))
+    .map((post) => sanitizeNarrativeText(post.content, 48).split(" ").slice(0, 4).join(" "))
     .filter((snippet) => snippet.length > 0)
-  const recentAuthors = [...new Set(recentPosts.slice(0, 6).map((p) => p.authorId))].join(", ")
-  return `Avoid repeating recent openers (${openers.join(" | ")}) or echoing ${recentAuthors}; offer a distinct price/catalyst claim.`
+  const recentAuthors = [...new Set(recentPosts.slice(0, 6).map((p) => displayNameForEntity(p.authorId, p.authorName)))].join(", ")
+  const recentTickers = new Set<string>()
+  for (const post of recentPosts.slice(0, 6)) {
+    for (const match of post.content.matchAll(/\$([A-Za-z][A-Za-z0-9_]{1,10})\b/g)) {
+      if (match[1]) recentTickers.add(`$${match[1].toUpperCase()}`)
+    }
+  }
+  const tickerNote = recentTickers.size > 0
+    ? ` Recently covered tickers: ${[...recentTickers].slice(0, 5).join(", ")} — prefer a fresh ticker or catalyst.`
+    : ""
+  return `Avoid repeating recent openers (${openers.join(" | ")}) or echoing ${recentAuthors}; offer a distinct first-person price/catalyst claim.${tickerNote}`
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -401,7 +422,7 @@ function parseSocialDecision(
   }
   const rawContent = asNonEmptyString(item.content)
   if (rawContent === null) return null
-  const content = sanitizeText(rawContent, 275)
+  const content = sanitizeNarrativeText(rawContent, 260)
   if (kind === "CREATE_POST") {
     const marketId = asNonEmptyString(item.marketId)
     const ticker = asNonEmptyString(item.ticker)?.toUpperCase()
@@ -447,16 +468,24 @@ export function validateNpcTradingDecision(
   const heldPredSet = new Set(heldPredictionKeys.map((k) => k.toLowerCase()))
   const followSet = new Set(followTargetIds)
   const out: NpcDecisionAction[] = []
+  let postCount = 0
+  let replyCount = 0
   for (const entry of rawActions) {
     if (out.length >= cap) break
     const item = asRecord(entry)
     if (!item) continue
     const kind = asNonEmptyString(item.kind)
     if (!kind) continue
+    if (kind === "CREATE_POST" && postCount >= 1) continue
+    if (kind === "CREATE_REPLY" && replyCount >= 1) continue
     const parsed =
       parseTradeDecision(item, kind, tickerSet, marketSet, openPerpSet, heldPredSet) ??
       parseSocialDecision(item, kind, tickerSet, marketSet, replySet, chatSet, followSet)
-    if (parsed !== null) out.push(parsed)
+    if (parsed !== null) {
+      if (parsed.kind === "CREATE_POST") postCount += 1
+      if (parsed.kind === "CREATE_REPLY") replyCount += 1
+      out.push(parsed)
+    }
   }
   return out
 }
