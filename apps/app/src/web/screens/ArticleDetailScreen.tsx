@@ -36,7 +36,8 @@ export function ArticleDetailScreen({ mode }: { readonly mode: UiMode }) {
   return (
     <div className="flex flex-col">
       <BackHeader fallbackPath="/explore">
-        <h1 className="truncate text-base font-bold text-foreground">Article</h1>
+        <h1 className="hidden truncate text-base font-bold text-foreground md:block">Article</h1>
+        <span className="text-sm font-medium text-muted-foreground md:hidden">Back</span>
       </BackHeader>
 
       {s.articleLoading && !article ? (
@@ -47,22 +48,38 @@ export function ArticleDetailScreen({ mode }: { readonly mode: UiMode }) {
         </div>
       ) : !article ? (
         <EmptyState title="Article not found">
-          <Button variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/explore"); }}>
+          <Button variant="outline" onClick={() => { void storeActions.navigate("/explore"); }}>
             Back to Explore
           </Button>
         </EmptyState>
       ) : (
         <article className="flex flex-col gap-5 px-4 py-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5">
-              <Avatar name={article.source} src={article.orgAvatarUrl} seed={article.source} size="sm" />
-              <div className="flex flex-col">
-                <span className="text-sm font-bold text-foreground">{article.source}</span>
-                <span className="text-xs text-muted-foreground">
-                  {article.publishedAtMs > 0 ? formatFullTimestamp(article.publishedAtMs) : article.timestamp}
-                </span>
+            {article.authorOrgId ? (
+              <button
+                type="button"
+                onClick={() => { void storeActions.navigate(`/orgs/${encodeURIComponent(article.authorOrgId ?? "")}`); }}
+                className="flex items-center gap-2.5 text-left hover:opacity-85"
+              >
+                <Avatar name={article.source} src={article.orgAvatarUrl} seed={article.source} size="sm" />
+                <div className="flex flex-col">
+                  <span className="text-sm font-bold text-foreground hover:underline">{article.source}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {article.publishedAtMs > 0 ? formatFullTimestamp(article.publishedAtMs) : article.timestamp}
+                  </span>
+                </div>
+              </button>
+            ) : (
+              <div className="flex items-center gap-2.5">
+                <Avatar name={article.source} src={article.orgAvatarUrl} seed={article.source} size="sm" />
+                <div className="flex flex-col">
+                  <span className="text-sm font-bold text-foreground">{article.source}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {article.publishedAtMs > 0 ? formatFullTimestamp(article.publishedAtMs) : article.timestamp}
+                  </span>
+                </div>
               </div>
-            </div>
+            )}
             <div className="flex items-center gap-1.5">
               {article.category ? <Badge variant="secondary">{article.category}</Badge> : null}
               {isGame && article.ticker ? (

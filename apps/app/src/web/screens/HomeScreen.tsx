@@ -1,20 +1,36 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   Button,
   EmptyState,
+  FeedMarketCard,
   PostCardSkeleton,
   PostComposer,
   Tabs,
   TabsList,
   TabsTrigger,
+  type FeedMarketStatus,
   type UiMode,
 } from "@repo/ui";
 import { FeedPostCard } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+import type { AppPredictionMarket } from "../types.ts";
 
 interface HomeScreenProps {
   readonly mode: UiMode;
+}
+
+function toFeedMarketStatus(status: string): FeedMarketStatus {
+  const lower = status.toLowerCase();
+  if (lower === "cancelled") return "cancelled";
+  if (lower === "resolved") return "resolved";
+  return "active";
+}
+
+function toFeedResolvedOutcome(raw?: "YES" | "NO" | "CANCELLED"): "yes" | "no" | null {
+  if (raw === "YES") return "yes";
+  if (raw === "NO") return "no";
+  return null;
 }
 
 export function HomeScreen({ mode }: HomeScreenProps) {
@@ -30,6 +46,21 @@ export function HomeScreen({ mode }: HomeScreenProps) {
       setComposerText("");
     }
   };
+
+  const showFeedMarketCards = mode === "GameMode" && (s.feedTab === "latest" || s.feedTab === "top");
+  const embeddedMarketIds = new Set<string>();
+  for (const post of s.feedPosts) {
+    if (post.card.marketBadge?.kind === "prediction" && post.card.marketBadge.marketId) {
+      embeddedMarketIds.add(post.card.marketBadge.marketId);
+    } else if (post.marketId) {
+      embeddedMarketIds.add(post.marketId);
+    }
+  }
+  const feedMarkets: ReadonlyArray<AppPredictionMarket> = showFeedMarketCards
+    ? s.predictions
+        .filter((m) => (m.status === "open" || m.status === "resolved") && !embeddedMarketIds.has(m.card.id))
+        .slice(0, 6)
+    : [];
 
   return (
     <div className="flex flex-col">
@@ -85,22 +116,52 @@ export function HomeScreen({ mode }: HomeScreenProps) {
       ) : s.feedPosts.length === 0 ? (
         <EmptyState title="No posts in this feed yet">
           {s.viewer ? null : (
-            <Button variant="outline" shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+            <Button variant="outline" shape="pill" onClick={() => storeActions.openJoinSheet()}>
               Sign in to post
             </Button>
           )}
         </EmptyState>
       ) : (
         <div className="flex flex-col">
-          {s.feedPosts.map((post) => (
-            <FeedPostCard key={post.card.id} post={post} mode={mode} />
-          ))}
+          {s.feedPosts.map((post, index) => {
+            const marketSlot = (index + 1) % 5 === 0 ? Math.floor((index + 1) / 5) - 1 : -1;
+            const interleavedMarket = marketSlot >= 0 ? feedMarkets[marketSlot] ?? null : null;
+            return (
+              <Fragment key={post.card.id}>
+                <FeedPostCard post={post} mode={mode} />
+                {interleavedMarket ? (
+                  <FeedMarketCard
+                    variant="standalone"
+                    marketId={interleavedMarket.card.id}
+                    question={interleavedMarket.card.question}
+                    yesOddsPct={interleavedMarket.card.yesOddsPct}
+                    closesAt={interleavedMarket.card.closesIn}
+                    status={toFeedMarketStatus(interleavedMarket.status)}
+                    resolvedOutcome={toFeedResolvedOutcome(interleavedMarket.card.resolvedOutcome)}
+                    volumePts={interleavedMarket.volumeCents > 0 ? interleavedMarket.volumeCents / 100 : undefined}
+                    yesShares={interleavedMarket.yesShares > 0 ? interleavedMarket.yesShares : undefined}
+                    noShares={interleavedMarket.noShares > 0 ? interleavedMarket.noShares : undefined}
+                    category={interleavedMarket.category}
+                    onOpen={(marketId) => {
+                      void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}`);
+                    }}
+                    onQuickTrade={(marketId, side) => {
+                      if (!s.viewer) {
+                        storeActions.openJoinSheet();
+                        return;
+                      }
+                      void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}?side=${encodeURIComponent(side)}`);
+                    }}
+                  />
+                ) : null}
+              </Fragment>
+            );
+          })}
           {s.feedNextCursor ? (
             <div className="flex justify-center border-b border-border p-4">
               <Button
                 variant="outline"
                 size="sm"
-                shape="pill"
                 loading={s.feedLoadingMore}
                 onClick={() => { void storeActions.loadMoreFeed(); }}
               >

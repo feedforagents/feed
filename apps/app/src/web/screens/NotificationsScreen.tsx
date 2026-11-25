@@ -23,18 +23,18 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
   const activeFilter: NotifFilter = isSocial && filter === "markets" ? "all" : filter;
 
   const modeFiltered = s.notifications.filter(
-    (n) => !isSocial || (!n.isGameOnly && n.item.kind !== "MarketResolved" && n.item.kind !== "PnLDigest"),
+    (n) => !isSocial || (!n.isGameOnly && n.eventKind !== "MarketResolved" && n.eventKind !== "PnLDigest"),
   );
 
   const visible = modeFiltered.filter((n) => {
     if (activeFilter === "mentions") {
-      return n.item.kind === "SocialMention" || n.item.kind === "SocialReply";
+      return n.eventKind === "SocialMention" || n.eventKind === "SocialReply";
     }
     if (activeFilter === "verified") {
-      return Boolean(n.item.actorHandle) && (n.item.kind === "GroupInvite" || n.item.kind === "SocialMention" || n.item.kind === "SocialReply");
+      return n.actorIsVerified;
     }
     if (activeFilter === "markets") {
-      return n.isGameOnly || n.item.kind === "MarketResolved" || n.item.kind === "PnLDigest";
+      return n.isGameOnly || n.eventKind === "MarketResolved" || n.eventKind === "PnLDigest";
     }
     return true;
   });
@@ -50,7 +50,7 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
 
   const handleOpen = (notif: AppNotification) => {
     void storeActions.markNotificationRead(notif.item.id);
-    if (notif.item.kind === "SocialFollow" && notif.item.actorHandle) {
+    if (notif.eventKind === "SocialFollow" && notif.item.actorHandle) {
       void storeActions.navigate(`/u/${encodeURIComponent(notif.item.actorHandle)}`);
       return;
     }
@@ -58,15 +58,20 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
       void storeActions.navigate(`/post/${encodeURIComponent(notif.postId)}`);
       return;
     }
-    if (notif.item.kind === "GroupInvite" || notif.chatId) {
+    if (notif.eventKind === "GroupInvite" || notif.eventKind === "ChatMessage" || notif.chatId) {
       const targetChatId = notif.chatId;
-      void storeActions.navigate("/chats").then(() => {
-        if (targetChatId) void storeActions.loadChatMessages(targetChatId);
-      });
+      void storeActions.navigate(targetChatId ? `/chats?chat=${encodeURIComponent(targetChatId)}` : "/chats");
       return;
     }
-    if (notif.marketId && !isSocial) {
-      void storeActions.navigate(`/markets/predictions/${encodeURIComponent(notif.marketId)}`);
+    if ((notif.marketId || notif.ticker) && !isSocial) {
+      if (notif.marketKind === "perp" || notif.ticker) {
+        const ref = notif.ticker ?? notif.marketId ?? "";
+        void storeActions.navigate(`/markets/perps/${encodeURIComponent(ref.toUpperCase())}`);
+        return;
+      }
+      if (notif.marketId) {
+        void storeActions.navigate(`/markets/predictions/${encodeURIComponent(notif.marketId)}`);
+      }
     }
   };
 
@@ -84,12 +89,11 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
     <div className="flex flex-col">
       <div className="sticky top-[53px] z-20 flex flex-col border-b border-border bg-background/85 backdrop-blur-md md:top-0">
         <div className="flex h-[53px] items-center justify-between gap-2 px-4">
-          <h1 className="text-base font-bold text-foreground">Notifications</h1>
-          <div className="flex items-center gap-1.5">
+          <h1 className="hidden text-base font-bold text-foreground md:block">Notifications</h1>
+          <div className="ml-auto flex items-center gap-1.5">
             <Button
               variant="ghost"
               size="sm"
-              shape="pill"
               disabled={modeFiltered.every((n) => n.item.read)}
               onClick={() => { void storeActions.markAllNotificationsRead(); }}
             >
@@ -98,7 +102,6 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
             <Button
               variant="ghost"
               size="sm"
-              shape="pill"
               disabled={s.notifications.length === 0}
               onClick={() => { void storeActions.clearNotifications(); }}
             >

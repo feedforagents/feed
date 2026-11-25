@@ -1,12 +1,17 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"
 import { useSyncExternalStore } from "react";
+import type { AppNavRoute } from "@repo/ui";
 import type { AppRoute } from "../../gen/app__navigation.ts";
 import { type SettingsTabId, parseLocation, routeToPath } from "./routes.ts";
 import {
+  adminCreateWorldFact,
+  adminDeleteWorldFact,
   adminFastForward,
   adminResolveHold,
+  adminResolveReport,
   adminRunCron,
   approveDeviceCode,
+  completeEmailOnboard,
   completePhoneOnboard,
   confirmPhoneChange,
   copySkillPrompt,
@@ -17,23 +22,32 @@ import {
   formatPhoneToE164,
   hydrateAuth,
   launchAgentHost,
+  loadAdminReports,
   loadAdminStatus,
+  loadAdminUsers,
+  loadAdminWorldFacts,
   loadOAuthConsent,
   loadSkillsHosts,
   logout,
+  lookupDeviceCode,
   openJoinSheet,
+  requestEmailMagicLink,
   requestSmsCode,
+  resendEmailMagicLink,
   resendSmsCode,
   revokeAgentGrant,
+  setJoinEmailStep,
   setJoinPhoneStep,
   setJoinSheetOpen,
   setJoinTab,
   setPlayMode,
   signOutEverywhere,
+  startEmailLink,
   startPhoneChange,
   submitOAuthDecision,
   submitReviewerLogin,
   toggleUiModeFromControl,
+  verifyEmailMagicLink,
   verifySmsCode,
 } from "./store-auth.ts";
 import {
@@ -45,10 +59,15 @@ import {
   closeDeletePostDialog,
   closeMuteDialog,
   closeReportDialog,
+  consumeInitialChatId,
+  consumeInitialEmailMagicToken,
   currentUiMode,
   cycleThemePreference,
+  decrementSpaNavDepth,
   dismissToast,
   getStoreSnapshot,
+  hasInternalBackHistory,
+  incrementSpaNavDepth,
   navRuntime,
   openBlockDialog,
   openComposeDialog,
@@ -59,6 +78,8 @@ import {
   pushToast,
   recordPublicView,
   registerAuthChangedHook,
+  registerNavigateHook,
+  requireAuthOrQueue,
   sendApp,
   sendNav,
   setStoreState,
@@ -97,7 +118,9 @@ import {
   loadPnlHistory,
   loadPositionsSilent,
   loadProfile,
+  loadProfileLikes,
   loadProfileReplies,
+  loadProfileTrades,
   loadTrending,
   loadTrendingTag,
   loadWorldStatus,
@@ -128,6 +151,7 @@ import {
   toggleFollow,
   toggleLike,
   toggleMute,
+  transferGroupOwnership,
   updateOwnProfile,
 } from "./store-world.ts";
 import { isRecord, num, optStr } from "./types.ts";
@@ -136,6 +160,7 @@ type SseDomain = "feed" | "markets" | "explore" | "profile" | "chats" | "notific
 
 let booted = false;
 let activeEventSource: EventSource | null = null;
+let lastFallbackRefreshAt = 0;
 const sseDomainInFlight = new Set<SseDomain>();
 const sseDomainPending = new Map<SseDomain, () => Promise<void>>();
 
@@ -186,9 +211,12 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
     case "Leaderboard":
       await Promise.all([loadLeaderboard(), loadWorldStatus()]);
       return;
-    case "Chats":
-      await loadChats();
+    case "Chats": {
+      const params = new URLSearchParams(search);
+      const chatId = params.get("chat")?.trim() || consumeInitialChatId() || s.selectedChatId;
+      await loadChats(true, chatId);
       return;
+    }
     case "Notifications":
       await loadNotifications();
       return;
@@ -204,11 +232,26 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
     case "OAuthConsent":
       await loadOAuthConsent(search);
       return;
+    case "AuthEmail": {
+      const params = new URLSearchParams(search);
+      const token = params.get("token")?.trim() || consumeInitialEmailMagicToken();
+      if (typeof window !== "undefined" && window.location.search.includes("token=")) {
+        window.history.replaceState(null, "", "/auth/email");
+      }
+      await verifyEmailMagicLink(token);
+      return;
+    }
     case "Admin":
-      await loadAdminStatus();
+      await Promise.all([loadAdminStatus(), loadAdminReports("open"), loadAdminUsers(""), loadAdminWorldFacts()]);
       return;
-    case "Link":
+    case "Link": {
+      const params = new URLSearchParams(search);
+      const code = params.get("userCode")?.trim() || params.get("user_code")?.trim() || "";
+      if (code) {
+        await lookupDeviceCode(code);
+      }
       return;
+    }
   }
 }
 
@@ -223,6 +266,7 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
     walletView: parsed.walletView,
     ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
     ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
+    ...(parsed.chatId ? { selectedChatId: parsed.chatId } : {}),
     selectedTicker: parsed.queryTicker,
     ...(parsed.route === "Markets"
       ? {
@@ -238,33 +282,57 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
   });
 }
 
+function guardRouteAccess(parsed: ReturnType<typeof parseLocation>, rawPath: string): "allow" | "blocked_auth" | "blocked_redirect" {
+  const mode = currentUiMode();
+  const blockedInSocial = mode === "SocialMode" && (parsed.route === "Markets" || parsed.route === "Leaderboard" || parsed.walletView);
+  if (parsed.route === "OAuthConsent" || parsed.route === "AuthEmail" || parsed.route === "Link") {
+    return "allow";
+  }
+  if (!canEnterRoute(parsed.route) || blockedInSocial) {
+    const s = getStoreSnapshot();
+    if (s.viewer === null && (parsed.route === "Chats" || parsed.route === "Notifications" || parsed.route === "Settings")) {
+      const label = parsed.route === "Chats"
+        ? "open Chats"
+        : parsed.route === "Notifications"
+          ? "view Notifications"
+          : "open Settings";
+      requireAuthOrQueue({ kind: "navigate", path: rawPath, label });
+      return "blocked_auth";
+    }
+    if (blockedInSocial) {
+      pushToast("Switch to Game mode to view Markets and Leaderboard.", "info");
+    }
+    return "blocked_redirect";
+  }
+  return "allow";
+}
+
+async function redirectToHome(): Promise<void> {
+  pushBrowserRoute("Home");
+  sendNav({ type: "navigateTo", targetRoute: "Home" });
+  sendApp({ type: "navigateApp", targetRoute: "Home" });
+  setStoreState({
+    route: "Home",
+    profileHandle: null,
+    activePostId: null,
+    activeArticleId: null,
+    activeTrendingTag: null,
+    walletView: false,
+  });
+  if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
+    window.scrollTo(0, 0);
+  }
+  await loadFeed();
+}
+
 export async function navigate(path: string): Promise<void> {
   const url = new URL(path, "https://feed.local");
   const parsed = parseLocation(url.pathname, url.search);
   clearNotices();
-  const mode = currentUiMode();
-  const blockedInSocial = mode === "SocialMode" && (parsed.route === "Markets" || parsed.route === "Leaderboard" || parsed.walletView);
-  if ((!canEnterRoute(parsed.route) || blockedInSocial) && parsed.route !== "OAuthConsent") {
-    const s = getStoreSnapshot();
-    if (s.viewer === null && (parsed.route === "Chats" || parsed.route === "Notifications" || parsed.route === "Settings")) {
-      openJoinSheet("phone");
-      return;
-    }
-    pushBrowserRoute("Home");
-    sendNav({ type: "navigateTo", targetRoute: "Home" });
-    sendApp({ type: "navigateApp", targetRoute: "Home" });
-    setStoreState({
-      route: "Home",
-      profileHandle: null,
-      activePostId: null,
-      activeArticleId: null,
-      activeTrendingTag: null,
-      walletView: false,
-    });
-    if (typeof window !== "undefined" && typeof window.scrollTo === "function") {
-      window.scrollTo(0, 0);
-    }
-    await loadFeed();
+  const guard = guardRouteAccess(parsed, `${url.pathname}${url.search}`);
+  if (guard === "blocked_auth") return;
+  if (guard === "blocked_redirect") {
+    await redirectToHome();
     return;
   }
   if (typeof window !== "undefined") {
@@ -273,6 +341,7 @@ export async function navigate(path: string): Promise<void> {
       if (parsed.replaceCanonical) {
         window.history.replaceState(null, "", parsed.canonicalPath);
       } else {
+        incrementSpaNavDepth();
         window.history.pushState(null, "", parsed.canonicalPath);
       }
     }
@@ -287,7 +356,11 @@ export async function navigate(path: string): Promise<void> {
   await loadDataForRoute(parsed.route, url.search);
 }
 
-export function navigateRoute(route: AppRoute): void {
+export function navigateRoute(route: AppNavRoute): void {
+  if (route === "Wallet") {
+    void navigate("/wallet");
+    return;
+  }
   const s = getStoreSnapshot();
   const handle = route === "Profile" ? s.viewer?.handle ?? s.profileHandle : null;
   void navigate(routeToPath(route, { profileHandle: handle }));
@@ -321,6 +394,32 @@ function parseSseData(raw: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function refreshActiveRouteIfStale(minGapMs: number): void {
+  const now = Date.now();
+  if (now - lastFallbackRefreshAt < minGapMs) return;
+  lastFallbackRefreshAt = now;
+  const s = getStoreSnapshot();
+  if (s.route === "AuthEmail") return;
+  void runDomainRefresh("feed", async () => {
+    await loadWorldStatus();
+    if (s.route === "Home") {
+      await loadFeed();
+    } else if (s.route === "Markets") {
+      await loadMarkets();
+      if (s.walletView && s.viewer) {
+        await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
+      }
+    } else if (s.route === "Leaderboard") {
+      await loadLeaderboard();
+    } else if (s.route === "Chats" && s.viewer) {
+      await loadChats(false);
+      if (s.selectedChatId) await loadChatMessages(s.selectedChatId);
+    } else if (s.route === "Notifications" && s.viewer) {
+      await loadNotifications();
+    }
+  });
 }
 
 function handleSseEvent(eventType: string, rawData: unknown): void {
@@ -358,7 +457,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
       void runDomainRefresh("feed", () => openThread(s.activePostId ?? "", s.threadSort));
       return;
     }
-    if (s.route === "Home") {
+    if (s.route === "Home" && replyToPostId === null) {
       const scrolledDown = typeof window !== "undefined" && window.scrollY > 120;
       const paginated = s.feedPosts.length > 25;
       if (scrolledDown || paginated) {
@@ -410,7 +509,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     const chatId = data ? optStr(data.chatId) : null;
     void runDomainRefresh("chats", async () => {
       if (s.route === "Chats" && chatId && chatId === s.selectedChatId) {
-        await Promise.all([loadChats(false), loadChatMessages(chatId)]);
+        await Promise.all([loadChats(false, chatId), loadChatMessages(chatId)]);
       } else {
         await loadChats(s.route === "Chats");
       }
@@ -440,6 +539,7 @@ export function reconnectRealtime(): void {
   });
   source.addEventListener("error", () => {
     setStoreState({ sseConnected: false });
+    refreshActiveRouteIfStale(15_000);
   });
   const types = [
     "post.created",
@@ -471,6 +571,7 @@ export function bootStore(): void {
   if (booted) return;
   booted = true;
   registerAuthChangedHook(reconnectRealtime);
+  registerNavigateHook(navigate);
   applyDocumentTheme(getStoreSnapshot().theme);
   if (typeof window !== "undefined") {
     if (typeof window.matchMedia === "function") {
@@ -481,8 +582,22 @@ export function bootStore(): void {
         }
       });
     }
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          refreshActiveRouteIfStale(5_000);
+        }
+      });
+    }
     window.addEventListener("popstate", () => {
+      decrementSpaNavDepth();
       const parsed = parseLocation(window.location.pathname, window.location.search);
+      const guard = guardRouteAccess(parsed, `${window.location.pathname}${window.location.search}`);
+      if (guard === "blocked_auth") return;
+      if (guard === "blocked_redirect") {
+        void redirectToHome();
+        return;
+      }
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
       sendApp({ type: "navigateApp", targetRoute: parsed.route });
       applyParsedLocation(parsed);
@@ -540,6 +655,7 @@ export function useAppStore() {
 export const storeActions = {
   navigate,
   navigateRoute,
+  hasInternalBackHistory,
   setSettingsTab,
   setExploreUrlQuery,
   setTheme: setThemePreference,
@@ -598,6 +714,7 @@ export const storeActions = {
   leaveGroupChat,
   renameGroupChat,
   removeGroupMember,
+  transferGroupOwnership,
   deleteGroupChat,
   sendChatMessage,
   reactToChatMessage,
@@ -608,6 +725,8 @@ export const storeActions = {
   clearNotifications,
   loadProfile,
   loadProfileReplies,
+  loadProfileLikes,
+  loadProfileTrades,
   loadMoreProfilePosts,
   loadFollowList,
   closeFollowList,
@@ -620,7 +739,13 @@ export const storeActions = {
   openJoinSheet,
   setJoinSheetOpen,
   setJoinTab,
+  setJoinEmailStep,
   setJoinPhoneStep,
+  requestEmailMagicLink,
+  resendEmailMagicLink,
+  verifyEmailMagicLink,
+  completeEmailOnboard,
+  startEmailLink,
   requestSmsCode,
   resendSmsCode,
   verifySmsCode,
@@ -642,8 +767,15 @@ export const storeActions = {
   deleteAccount,
   loadOAuthConsent,
   submitOAuthDecision,
+  lookupDeviceCode,
   approveDeviceCode,
   loadAdminStatus,
+  loadAdminReports,
+  adminResolveReport,
+  loadAdminUsers,
+  loadAdminWorldFacts,
+  adminCreateWorldFact,
+  adminDeleteWorldFact,
   adminFastForward,
   adminRunCron,
   adminResolveHold,
