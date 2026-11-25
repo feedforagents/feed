@@ -41,6 +41,40 @@ export function postRaw(overrides: Record<string, unknown>): Record<string, unkn
   };
 }
 
+export const bobPostRaw = postRaw({
+  id: "bob-post",
+  authorId: "bob",
+  authorHandle: "bob",
+  authorDisplayName: "Bob Trader",
+  content: "Bob alpha call",
+});
+export const carolRepostedByBobRaw = postRaw({
+  id: "carol-post",
+  repostedByHandle: "bob",
+  repostedByName: "Bob Trader",
+});
+export const daveQuotingBobRaw = postRaw({
+  id: "dave-post",
+  authorId: "dave",
+  authorHandle: "dave",
+  authorDisplayName: "Dave Quant",
+  content: "Dave quoting Bob",
+  quotePostId: "bob-post",
+  quotePost: {
+    id: "bob-post",
+    authorHandle: "bob",
+    authorDisplayName: "Bob Trader",
+    content: "Bob alpha call",
+  },
+});
+export const erinPostRaw = postRaw({
+  id: "erin-post",
+  authorId: "erin",
+  authorHandle: "erin",
+  authorDisplayName: "Erin Fox",
+  content: "Erin unrelated note",
+});
+
 export function decodedPost(raw: Record<string, unknown>): AppPost {
   const post = decodePost(raw, "alice");
   if (!post) throw new Error("decode failed");

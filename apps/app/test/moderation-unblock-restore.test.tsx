@@ -2,15 +2,17 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadProfile, toggleBlock } from "../src/web/store-world.ts";
-import { aliceViewer, decodedPost, postRaw, resetModerationStore } from "./moderation-fixtures.ts";
+import {
+  aliceViewer,
+  bobPostRaw as bobRaw,
+  carolRepostedByBobRaw as carolRaw,
+  daveQuotingBobRaw as daveRaw,
+  decodedPost,
+  erinPostRaw as erinRaw,
+  postRaw,
+  resetModerationStore,
+} from "./moderation-fixtures.ts";
 
-const bobRaw = postRaw({
-  id: "bob-post",
-  authorId: "bob",
-  authorHandle: "bob",
-  authorDisplayName: "Bob Trader",
-  content: "Bob alpha call",
-});
 const bobReplyRaw = postRaw({
   id: "bob-reply",
   authorId: "bob",
@@ -18,32 +20,6 @@ const bobReplyRaw = postRaw({
   authorDisplayName: "Bob Trader",
   content: "Bob reply",
   replyToPostId: "carol-post",
-});
-const carolRaw = postRaw({
-  id: "carol-post",
-  repostedByHandle: "bob",
-  repostedByName: "Bob Trader",
-});
-const daveRaw = postRaw({
-  id: "dave-post",
-  authorId: "dave",
-  authorHandle: "dave",
-  authorDisplayName: "Dave Quant",
-  content: "Dave quoting Bob",
-  quotePostId: "bob-post",
-  quotePost: {
-    id: "bob-post",
-    authorHandle: "bob",
-    authorDisplayName: "Bob Trader",
-    content: "Bob alpha call",
-  },
-});
-const erinRaw = postRaw({
-  id: "erin-post",
-  authorId: "erin",
-  authorHandle: "erin",
-  authorDisplayName: "Erin Fox",
-  content: "Erin unrelated note",
 });
 const fullFeedRaw = [bobRaw, carolRaw, daveRaw, erinRaw];
 
@@ -82,7 +58,8 @@ afterEach(() => {
 it('Unblocking an author restores their posts, repost attribution, and quoted content in the loaded feed and profile (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
   let serverBlocked = false;
   let feedGate: Promise<void> | null = null;
-  let releaseFeed: (() => void) | null = null;
+  let releaseFeed: () => void = () => {};
+  let bobProfileRequests = 0;
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
     const method = init?.method ?? "GET";
@@ -95,6 +72,7 @@ it('Unblocking an author restores their posts, repost attribution, and quoted co
       return feedGate ? feedGate.then(respond) : Promise.resolve(respond());
     }
     if (url.startsWith("/api/users/bob")) {
+      bobProfileRequests += 1;
       return Promise.resolve(Response.json(profileRaw("bob", serverBlocked)));
     }
     if (url.startsWith("/api/users/carol")) {
@@ -126,10 +104,15 @@ it('Unblocking an author restores their posts, repost attribution, and quoted co
   });
   const unblock = toggleBlock("bob", true);
   await loadProfile("carol");
-  releaseFeed?.();
+  releaseFeed();
   await unblock;
 
   const after = getStoreSnapshot();
+  setStoreState({ route: "Settings", profileHandle: "bob" });
+  const bobRequestsBeforeSettingsUnblock = bobProfileRequests;
+  await toggleBlock("bob", false);
+  await toggleBlock("bob", true);
+  const settingsUnblockBobRequests = bobProfileRequests - bobRequestsBeforeSettingsUnblock;
   expect({
     feedIds: restored.feedPosts.map((p) => p.card.id),
     carolReposter: restored.feedPosts.find((p) => p.card.id === "carol-post")?.card.repostedByHandle ?? null,
@@ -140,6 +123,7 @@ it('Unblocking an author restores their posts, repost attribution, and quoted co
     navigatedProfileHandle: after.profileHandle,
     navigatedProfile: after.profileBundle?.summary.handle ?? null,
     navigatedFeedIds: after.feedPosts.map((p) => p.card.id),
+    settingsUnblockBobRequests,
   }).toEqual({
     feedIds: ["bob-post", "carol-post", "dave-post", "erin-post"],
     carolReposter: "bob",
@@ -150,5 +134,6 @@ it('Unblocking an author restores their posts, repost attribution, and quoted co
     navigatedProfileHandle: "carol",
     navigatedProfile: "carol",
     navigatedFeedIds: ["bob-post", "carol-post", "dave-post", "erin-post"],
+    settingsUnblockBobRequests: 0,
   });
 });
