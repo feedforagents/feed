@@ -1507,6 +1507,9 @@ async function toggleModeration(
               ...cur.profileBundle.summary,
               isBlocked: !active,
               isFollowing: active ? cur.profileBundle.summary.isFollowing : false,
+              followersCount: !active && cur.profileBundle.summary.isFollowing
+                ? Math.max(0, cur.profileBundle.summary.followersCount - 1)
+                : cur.profileBundle.summary.followersCount,
             }
           : { ...cur.profileBundle.summary, isMuted: !active },
       },
