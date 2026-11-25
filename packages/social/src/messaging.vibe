@@ -981,10 +981,12 @@ function rowToGroupInvite(row: Row): GroupInviteView {
   const accountHandle = toText(row.account_handle)
   const accountDisplayName = toText(row.account_display_name)
   const inviterKind: ChatSenderKind = actorUsername !== undefined || actorName !== undefined ? "npc" : "user"
-  const inviterHandle = actorUsername ?? accountHandle ?? inviterId
+  const inviterHandle = inviterKind === "npc"
+    ? (actorUsername ?? inviterId.replace(/^org-/, "")).toLowerCase()
+    : (accountHandle ?? inviterId)
   const inviterDisplayName = actorName ?? accountDisplayName ?? inviterHandle
   const actorAvatarUrl = inviterKind === "npc"
-    ? (toText(row.actor_avatar_url) ?? (inviterId !== "" ? resolveActorAvatarUrl(inviterId) : null))
+    ? (inviterId !== "" ? resolveActorAvatarUrl(inviterId, toText(row.actor_avatar_url)) : null)
     : (toText(row.account_avatar_url) ?? null)
   return {
     id: toText(row.id) ?? "",
@@ -1205,9 +1207,9 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
       throw new SocialFailure({ code: "NotFound", message: `NPC actor not found: ${input.actorId}` })
     }
     const actorId = toText(actorRow.id) ?? input.actorId
-    const actorUsername = toText(actorRow.username) ?? actorId
+    const actorUsername = (toText(actorRow.username) ?? actorId.replace(/^org-/, "")).toLowerCase()
     const actorName = toText(actorRow.name) ?? actorId
-    const actorAvatarUrl = toText(actorRow.profile_image_url) ?? (actorId !== "" ? resolveActorAvatarUrl(actorId) : null)
+    const actorAvatarUrl = actorId !== "" ? resolveActorAvatarUrl(actorId, toText(actorRow.profile_image_url)) : null
     const actorTier = normalizeOptionalText(input.tier ?? undefined) ?? toText(actorRow.tier) ?? null
     const targetRows = try tx.query(
       "SELECT account_id FROM feed_accounts WHERE account_id = $1 LIMIT 1",

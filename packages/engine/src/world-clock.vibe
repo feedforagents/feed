@@ -28,6 +28,7 @@ import { groundingRosterSummary, renderPrompt } from "./prompts.vibe"
 import {
   EngineFailure,
   advanceDayHour,
+  displayNameForEntity,
   ensureWorldStateTx,
   executeHttpWithTimeout,
   hashString,
@@ -37,7 +38,9 @@ import {
   newEngineId,
   parseLlmJsonRecord,
   recordTickHealth,
+  replaceActorSlugsWithNames,
   resolveClockNow,
+  sanitizeNarrativeText,
   sanitizeText,
 } from "./shared.vibe"
 import { getDailySpendStatus, reconcileStaleUncertainSpend } from "./spend-budget.vibe"
@@ -657,7 +660,7 @@ export effect function runOrganizationTick(nowMs?: number): { readonly skipped: 
         try createPost({
           authorId: orgId,
           authorKind: "org",
-          content: sanitizeText(completion.text, 275),
+          content: sanitizeNarrativeText(completion.text, 260),
           ...(ticker ? { ticker } : {}),
         })
         try maybePublishFeedEvent({ type: "org.posted", organizationId: orgId, ticker })
@@ -721,11 +724,13 @@ export effect function runArticleTick(nowMs?: number): { readonly skipped: boole
         nowMs: resolvedNow,
       })
       const parsed = parseLlmJsonRecord(completion.text)
-      const title = sanitizeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
-      const summary = sanitizeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
-      const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0
-        ? parsed.body.trim()
-        : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`
+      const title = sanitizeNarrativeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
+      const summary = sanitizeNarrativeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
+      const body = replaceActorSlugsWithNames(
+        typeof parsed?.body === "string" && parsed.body.trim().length > 0
+          ? parsed.body.trim()
+          : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`,
+      )
       const articleId = newEngineId("art")
       try store.transaction(effect (tx: Tx) => {
         try tx.query(
@@ -737,7 +742,7 @@ export effect function runArticleTick(nowMs?: number): { readonly skipped: boole
       try createPost({
         authorId: orgId,
         authorKind: "org",
-        content: sanitizeText(`${title} — ${summary}`, 275),
+        content: sanitizeNarrativeText(`${title} — ${summary}`, 260),
       })
       try maybePublishFeedEvent({ type: "article.published", articleId, organizationId: orgId })
       const endWall = try Clock.currentTimeMillis
@@ -812,7 +817,7 @@ export effect function runWorldFactsTick(nowMs?: number): { readonly skipped: bo
         )
         const posts = try tx.query("SELECT author_id, content FROM feed_posts WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 6")
         const settledStr = settled.map((r) => `Resolved ${toText(r.resolved_outcome)}: ${toText(r.question)}`).join("\n")
-        const postsStr = posts.map((r) => `@${toText(r.author_id)}: ${sanitizeText(toText(r.content) ?? "", 100)}`).join("\n")
+        const postsStr = posts.map((r) => `${displayNameForEntity(toText(r.author_id) ?? "")}: ${sanitizeNarrativeText(toText(r.content) ?? "", 100)}`).join("\n")
         return `${settledStr}\n${postsStr}`.trim() || "Initial market trading session active."
       })
       const rendered = renderPrompt("worldFactsConsolidation", { recentEvents: recentText })
@@ -831,7 +836,7 @@ export effect function runWorldFactsTick(nowMs?: number): { readonly skipped: bo
       try store.transaction(effect (tx: Tx) => {
         for (const item of items) {
           const rec = item as Record<string, unknown> | null
-          const factText = sanitizeText(typeof rec?.factText === "string" ? rec.factText : "", 220)
+          const factText = sanitizeNarrativeText(typeof rec?.factText === "string" ? rec.factText : "", 220)
           if (factText.length === 0) continue
           const category = sanitizeText(typeof rec?.category === "string" ? rec.category : "markets", 40) || "markets"
           try tx.query(
@@ -959,7 +964,7 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
           temperature: rendered.temperature,
           nowMs: resolvedNow,
         }) catch effect () => null
-        const parody = completion ? sanitizeText(completion.text, 180) : item.title
+        const parody = completion ? sanitizeNarrativeText(completion.text, 180) : item.title
         try store.transaction(effect (tx: Tx) => {
           try tx.query(
             `INSERT INTO feed_rss_headlines (id, source_url, title, parody_headline, published_at, created_at)

@@ -92,6 +92,11 @@ export function normalizeOptionalText(value: string | undefined): string | null 
   return trimmed === "" ? null : trimmed
 }
 
+export function canonicalHandle(raw: string | undefined, fallback = ""): string {
+  const cleaned = (raw ?? "").trim().replace(/^@+/, "")
+  return (cleaned === "" ? fallback.trim().replace(/^@+/, "") : cleaned).toLowerCase()
+}
+
 export function toSpecMode(mode: SocialPresentationMode | undefined): PostsPresentationMode {
   return mode === "social" ? "SocialMode" : "GameMode"
 }
@@ -162,10 +167,10 @@ function subjectFromActorRow(row: Row): ResolvedSubject {
   return {
     id,
     kind: "npc",
-    handle: toText(row.username) ?? "",
+    handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
     displayName: toText(row.name) ?? "",
-    avatarUrl: toText(row.profile_image_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
-    bannerUrl: toText(row.profile_banner_url) ?? (id !== "" ? resolveActorBannerUrl(id) : null),
+    avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
+    bannerUrl: id !== "" ? resolveActorBannerUrl(id, toText(row.profile_banner_url)) : null,
     uiMode: "game"
   }
 }
@@ -175,10 +180,10 @@ function subjectFromOrgRow(row: Row): ResolvedSubject {
   return {
     id,
     kind: "org",
-    handle: id,
+    handle: canonicalHandle(id),
     displayName: toText(row.name) ?? "",
-    avatarUrl: toText(row.image_url) ?? (id !== "" ? resolveOrgLogoUrl(id) : null),
-    bannerUrl: toText(row.banner_url) ?? (id !== "" ? resolveOrgBannerUrl(id) : null),
+    avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
+    bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null,
     uiMode: "game"
   }
 }
@@ -393,10 +398,10 @@ export effect function loadSubjectProfilesMapTx(
       profiles.set(`npc:${id}`, {
         id,
         kind: "npc",
-        handle: toText(row.username) ?? id,
+        handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
         displayName: toText(row.name) ?? id,
-        avatarUrl: toText(row.profile_image_url) ?? (id !== "" ? resolveActorAvatarUrl(id) : null),
-        bannerUrl: toText(row.profile_banner_url) ?? (id !== "" ? resolveActorBannerUrl(id) : null)
+        avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
+        bannerUrl: id !== "" ? resolveActorBannerUrl(id, toText(row.profile_banner_url)) : null
       })
     }
   }
@@ -410,10 +415,10 @@ export effect function loadSubjectProfilesMapTx(
       profiles.set(`org:${id}`, {
         id,
         kind: "org",
-        handle: id,
+        handle: canonicalHandle(id),
         displayName: toText(row.name) ?? id,
-        avatarUrl: toText(row.image_url) ?? (id !== "" ? resolveOrgLogoUrl(id) : null),
-        bannerUrl: toText(row.banner_url) ?? (id !== "" ? resolveOrgBannerUrl(id) : null)
+        avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
+        bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null
       })
     }
   }
@@ -449,10 +454,10 @@ export effect function loadProfilesByIdsTx(
         profiles.set(id, {
           id,
           kind: "org",
-          handle: id,
+          handle: canonicalHandle(id),
           displayName: toText(row.name) ?? id,
-          avatarUrl: toText(row.image_url) ?? resolveOrgLogoUrl(id),
-          bannerUrl: toText(row.banner_url) ?? resolveOrgBannerUrl(id)
+          avatarUrl: resolveOrgLogoUrl(id, toText(row.image_url)),
+          bannerUrl: resolveOrgBannerUrl(id, toText(row.banner_url))
         })
       }
     }
@@ -469,10 +474,10 @@ export effect function loadProfilesByIdsTx(
         profiles.set(id, {
           id,
           kind: "npc",
-          handle: toText(row.username) ?? id,
+          handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
           displayName: toText(row.name) ?? id,
-          avatarUrl: toText(row.profile_image_url) ?? resolveActorAvatarUrl(id),
-          bannerUrl: toText(row.profile_banner_url) ?? resolveActorBannerUrl(id)
+          avatarUrl: resolveActorAvatarUrl(id, toText(row.profile_image_url)),
+          bannerUrl: resolveActorBannerUrl(id, toText(row.profile_banner_url))
         })
       }
     }

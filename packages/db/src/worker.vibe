@@ -233,7 +233,7 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         tierStartingBalanceCents(actor.tier),
         now
       ]),
-      "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, description = EXCLUDED.description, system_prompt = EXCLUDED.system_prompt, personality_json = EXCLUDED.personality_json, profile_image_url = COALESCE(feed_actors.profile_image_url, EXCLUDED.profile_image_url), profile_banner_url = COALESCE(feed_actors.profile_banner_url, EXCLUDED.profile_banner_url)"
+      "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, tier = EXCLUDED.tier, description = EXCLUDED.description, system_prompt = EXCLUDED.system_prompt, personality_json = EXCLUDED.personality_json, profile_image_url = CASE WHEN feed_actors.profile_image_url IS NULL OR btrim(feed_actors.profile_image_url) = '' OR feed_actors.profile_image_url LIKE '/images/%' THEN EXCLUDED.profile_image_url ELSE feed_actors.profile_image_url END, profile_banner_url = CASE WHEN feed_actors.profile_banner_url IS NULL OR btrim(feed_actors.profile_banner_url) = '' OR feed_actors.profile_banner_url LIKE '/images/%' THEN EXCLUDED.profile_banner_url ELSE feed_actors.profile_banner_url END"
     ))
     try runBatches(tx, buildInsertBatches(
       "feed_organizations",
@@ -251,7 +251,7 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         resolveOrgBannerUrl(org.id),
         now
       ]),
-      "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, org_type = EXCLUDED.org_type, description = EXCLUDED.description, post_style = EXCLUDED.post_style, can_be_involved = EXCLUDED.can_be_involved, initial_price_cents = COALESCE(feed_organizations.initial_price_cents, EXCLUDED.initial_price_cents), image_url = COALESCE(feed_organizations.image_url, EXCLUDED.image_url), banner_url = COALESCE(feed_organizations.banner_url, EXCLUDED.banner_url)"
+      "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, org_type = EXCLUDED.org_type, description = EXCLUDED.description, post_style = EXCLUDED.post_style, can_be_involved = EXCLUDED.can_be_involved, initial_price_cents = COALESCE(feed_organizations.initial_price_cents, EXCLUDED.initial_price_cents), image_url = CASE WHEN feed_organizations.image_url IS NULL OR btrim(feed_organizations.image_url) = '' OR feed_organizations.image_url LIKE '/images/%' THEN EXCLUDED.image_url ELSE feed_organizations.image_url END, banner_url = CASE WHEN feed_organizations.banner_url IS NULL OR btrim(feed_organizations.banner_url) = '' OR feed_organizations.banner_url LIKE '/images/%' THEN EXCLUDED.banner_url ELSE feed_organizations.banner_url END"
     ))
     const tradeableOrgs: ReadonlyArray<TradeableOrgSeed> = organizations.flatMap((org) => {
       const priceCents = initialOrgPriceCents(org)
