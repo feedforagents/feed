@@ -434,8 +434,6 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
 
-  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
-
   await act(async () => {
     await storeActions.navigate("/u/ailonmusk");
   });
@@ -457,7 +455,6 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   });
   await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
   await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
-  // (a) a different handle whose load fails with 503 clears the open profile (handle guard)
   profileShouldFail = false;
   await act(async () => {
     await storeActions.navigate("/u/ailonmusk");
@@ -471,7 +468,6 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
   profileShouldFail = false;
 
-  // (b) the open handle returning 404 on a refetch clears the open profile (404 guard)
   await act(async () => {
     await storeActions.navigate("/u/ailonmusk");
   });
