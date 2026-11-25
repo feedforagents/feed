@@ -4,6 +4,7 @@ import { Store, type StoreFailure, type Tx, toInt } from "@repo/db"
 import { actors, organizations } from "@repo/pack-default"
 import { RealtimeBus, publishFeedEvent } from "@repo/social"
 import { FetchHttpClient, HttpClient, type HttpClientRequest, type HttpClientResponse } from "effect/http"
+import { REAL_TO_PARODY_MAPPINGS } from "./data/reality-grounding.ts"
 
 export type EngineErrorCode =
   | "BUDGET_EXCEEDED"
@@ -148,13 +149,49 @@ export function sanitizeText(input: string, maxLen: number): string {
   return trimToWordBoundary(plain, maxLen)
 }
 
+export function safeNonNegInt(value: unknown, fallback: number = 0): number {
+  if (value === null || value === undefined) return fallback
+  const parsed = toInt(value)
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback
+  return parsed
+}
+
+const realNameReplacements: ReadonlyArray<{ readonly pattern: RegExp; readonly parody: string }> = REAL_TO_PARODY_MAPPINGS.map((entry) => ({
+  pattern: new RegExp(
+    `(?<![a-zA-Z0-9_@$])${escapeSlugRegExp(entry.real)}(?![a-zA-Z0-9_])`,
+    entry.caseSensitive ? "g" : "gi",
+  ),
+  parody: entry.parody,
+}))
+
+export function scrubRealWorldNames(input: string): string {
+  let output = input
+  for (const entry of realNameReplacements) {
+    output = output.replace(entry.pattern, entry.parody)
+  }
+  return output
+}
+
+export function stripTrailingHashtagsAndEmojis(input: string): string {
+  const withoutEmojis = input.replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, "")
+  return withoutEmojis.replace(/(?:\s+#[a-zA-Z0-9_]+)+\s*$/, "").trim()
+}
+
+const FIRST_PERSON_SINGULAR_RE = /\b(I|me|my|myself|I'm|I've|I'll|I'd)\b/
+
+export function hasFirstPersonSingularLeak(input: string): boolean {
+  return FIRST_PERSON_SINGULAR_RE.test(input)
+}
+
 export function sanitizeNarrativeText(input: string, maxLen: number): string {
-  return sanitizeText(replaceActorSlugsWithNames(input), maxLen)
+  const scrubbed = stripTrailingHashtagsAndEmojis(scrubRealWorldNames(replaceActorSlugsWithNames(input)))
+  return sanitizeText(scrubbed, maxLen)
 }
 
 export function isRuntimeNpcActor(id: string, name?: string, username?: string): boolean {
   const cleanId = id.trim()
   if (cleanId.length === 0) return false
+  if (/^org[-_]/i.test(cleanId)) return false
   if (/\btest\b/i.test(cleanId) || /^test[-_]/i.test(cleanId)) return false
   if (name !== undefined && /\btest\b/i.test(name)) return false
   if (username !== undefined && (/\btest\b/i.test(username) || /^test[-_]/i.test(username))) return false

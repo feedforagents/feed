@@ -41,6 +41,8 @@ import { minAlphaEngagement } from "../gen/engine__npcLoop.effect.vibe"
 import { generateCompletion } from "./llm-client.vibe"
 import {
   buildWorldContext,
+  formatActorToneAndFinanceGuardrails,
+  formatActorVoiceContext,
   formatFeedDiversityHint,
   prioritizePerpMarkets,
   renderPrompt,
@@ -56,6 +58,7 @@ import {
   newEngineId,
   parseLlmJsonRecord,
   resolveClockNow,
+  safeNonNegInt,
   sanitizeNarrativeText,
   sanitizeText,
   stripLeadingSelfPrefix,
@@ -145,11 +148,13 @@ function buildNpcCharacter(actor: DbActorRow, packActor: PackActor | undefined):
 }
 
 interface NpcProviderSnapshot {
+  readonly worldClockText: string
   readonly worldFactsText: string
   readonly marketsText: string
   readonly postsText: string
   readonly portfolioText: string
   readonly alphaChatsText: string
+  readonly ownRecentPosts: ReadonlyArray<string>
   readonly worldContext: string
   readonly diversityHint: string
   readonly tickers: ReadonlyArray<string>
@@ -218,6 +223,14 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
       "SELECT blocker_id, blocked_id FROM feed_blocks WHERE blocker_id = $1 OR blocked_id = $1",
       [actor.id],
     )
+    const ownPostRows = try tx.query(
+      `SELECT content
+       FROM feed_posts
+       WHERE author_id = $1 AND author_kind = 'npc' AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 5`,
+      [actor.id],
+    )
     return {
       stateRow: stateRows[0] ?? {},
       facts,
@@ -226,6 +239,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
       chatRows,
       chatMessages,
       followCandidates,
+      ownPostRows,
       alreadyFollowing: new Set(alreadyFollowingRows.map((r) => toText(r.target_id) ?? "")),
       blockedIds: new Set(
         blockedRows.map((r) => {
@@ -299,10 +313,14 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
     `Cash: $${(actor.balanceCents / 100).toFixed(2)} | Held Predictions: ${heldPredictionsSummary} | Open Perps (${openPerps.length}): ${openPerpPositionsSummary}`
   const factsLines = dbSnap.facts.map((r) => toText(r.fact_text) ?? "").filter((s) => s.length > 0)
   const headlineLines = dbSnap.headlines.map((r) => toText(r.headline) ?? "").filter((s) => s.length > 0)
+  const currentDay = Math.max(1, safeNonNegInt(dbSnap.stateRow.current_day, 1))
+  const currentHour = safeNonNegInt(dbSnap.stateRow.current_hour, 0)
+  const worldPhase = toText(dbSnap.stateRow.phase) ?? "active"
+  const worldClockText = `World Clock: Day ${currentDay}, Hour ${String(currentHour).padStart(2, "0")}:00 UTC (Phase: ${worldPhase})`
   const worldContext = buildWorldContext({
-    currentDay: Math.max(1, toInt(dbSnap.stateRow.current_day) || 1),
-    currentHour: Math.max(0, toInt(dbSnap.stateRow.current_hour)),
-    phase: toText(dbSnap.stateRow.phase) ?? "active",
+    currentDay,
+    currentHour,
+    phase: worldPhase,
     worldFacts: factsLines,
     parodyHeadlines: headlineLines,
     openMarkets: markets,
@@ -345,12 +363,17 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
     }
     if (followTargetsSet.size >= 8) break
   }
+  const ownRecentPosts = dbSnap.ownPostRows
+    .map((r) => sanitizeNarrativeText(toText(r.content) ?? "", 140))
+    .filter((line) => line.length > 0)
   return {
+    worldClockText,
     worldFactsText: [...factsLines, ...headlineLines].join(" | ") || "No breaking world facts.",
     marketsText,
     postsText: recentPosts.slice(0, 6).map((p) => `[${p.id}] ${p.authorName}: ${sanitizeNarrativeText(p.content, 80)}`).join(" | ") || "Feed empty.",
     portfolioText,
     alphaChatsText,
+    ownRecentPosts,
     worldContext,
     diversityHint: formatFeedDiversityHint(recentPosts),
     tickers: perps.map((p) => p.ticker),
@@ -513,8 +536,9 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
     wrap("PERP_TRADE", "Open a leveraged NPC perpetual position", effect (p) => {
       const ticker = String(p.ticker ?? "")
       const side = p.side === "short" ? "short" : "long"
-      const collateralCents = Math.max(500, Math.round(Number(p.collateralCents ?? 2500)))
       const leverage = Math.max(1, Math.min(20, Math.round(Number(p.leverage ?? 3))))
+      const minCollateral = Math.max(500, Math.ceil(1_000 / leverage))
+      const collateralCents = Math.max(minCollateral, Math.round(Number(p.collateralCents ?? 2500)))
       const opened = try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc" })
       try maybePublishFeedEvent({
         type: "market.perp",
@@ -533,6 +557,14 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       const positionId = String(p.positionId ?? "")
       if (!positionId) return { success: false, text: "Missing positionId" }
       const rawPct = typeof p.closePct === "number" && Number.isFinite(p.closePct) ? Math.max(1, Math.min(100, Math.round(p.closePct))) : undefined
+      const store = try Store
+      const actualLeverage = try store.transaction(effect (tx: Tx) => {
+        const rows = try tx.query(
+          `SELECT leverage FROM feed_perp_positions WHERE id = $1 AND holder_id = $2`,
+          [positionId, actor.id],
+        )
+        return Math.max(1, safeNonNegInt(rows[0]?.leverage, 1))
+      })
       const closed = try closePerpPosition({
         positionId,
         ownerId: actor.id,
@@ -546,7 +578,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
         ticker: closed.ticker,
         side: closed.side,
         sizeCents: closed.sizeCents,
-        leverage: 1,
+        leverage: actualLeverage,
         positionId: closed.positionId,
         markPriceCents: closed.exitPriceCents,
       })
@@ -598,6 +630,16 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
         side,
         shares: sellShares,
         viaClientName: "eliza-npc",
+      })
+      try maybePublishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents,
       })
       return {
         success: true,
@@ -799,9 +841,10 @@ export effect function executeNpcDecision(
 }
 
 effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
+  if (!isRuntimeNpcActor(actor.id, actor.name, actor.username)) return 0
   const runWithStore = try makeStoreEffectRunner()
   const snap = try loadNpcProviderSnapshot(actor, nowMs)
-  const packActor = packActorById.get(actor.id) ?? actors.find((a) => a.username === actor.username)
+  const packActor = packActorById.get(actor.id) ?? actors.find((a) => a.username === actor.username.toLowerCase())
   const character = buildNpcCharacter(actor, packActor)
   const plugin = createFeedNpcPlugin(actor, snap, runWithStore, nowMs)
   const agentUuid = safeElizaUuid(`feed-npc:${actor.id}`)
@@ -821,11 +864,22 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     content: { text: "Observe Feed markets and social posts, then plan bounded actions." },
   }
   const composedState = try composeFeedProviders(runtime, plugin.providers ?? [], triggerMemory)
+  const voiceSeed = hashString(`${actor.id}:${Math.floor(nowMs / 60_000)}`)
+  const budgetedWorldContext = [
+    snap.worldClockText,
+    `WORLD_FACTS: ${sanitizeText(snap.worldFactsText, 900)}`,
+    `TRENDING_MARKETS: ${sanitizeText(snap.marketsText, 1200)}`,
+    `RECENT_POSTS: ${sanitizeText(snap.postsText, 750)}`,
+    `ALPHA_CHATS: ${sanitizeText(snap.alphaChatsText, 450)}`,
+  ].join("\n")
   const rendered = renderPrompt("npcTradingDecision", {
     actorId: actor.id,
     actorHandle: actor.username.toLowerCase(),
     actorName: actor.name,
     actorPersona: sanitizeText(packActor?.personality ?? actor.description, 200),
+    actorVoiceContext: formatActorVoiceContext(packActor, actor.description, voiceSeed),
+    actorGuardrails: formatActorToneAndFinanceGuardrails(packActor),
+    ownRecentPosts: snap.ownRecentPosts.length > 0 ? snap.ownRecentPosts.map((p) => `- ${p}`).join("\n") : "(none)",
     tradingStyle: packActor?.feed.tradingStyle ?? "balanced catalyst trader",
     maxSteps: String(maxSteps),
     tickers: snap.tickers.join(", ") || "(none)",
@@ -836,15 +890,16 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     followTargets: snap.followTargetIds.join(", ") || "(none)",
     chatIds: snap.chatIds.join(", ") || "(none)",
     portfolio: snap.portfolioText,
-    worldContext: sanitizeText(composedState.text || snap.worldContext, 2200),
+    worldContext: budgetedWorldContext,
     diversityHint: snap.diversityHint,
   })
+  const turnTemperature = Math.max(0.7, Math.min(0.92, packActor?.settings.temperature ?? rendered.temperature))
   const completion = try generateCompletion({
     promptId: "npcTradingDecision",
     system: rendered.system,
     user: rendered.user,
     maxTokens: rendered.maxTokens,
-    temperature: rendered.temperature,
+    temperature: turnTemperature,
     jsonMode: true,
     nowMs,
     actorId: actor.id,
@@ -996,7 +1051,7 @@ export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(
     const rows = try tx.query(
       `SELECT id, name, username, tier, description, system_prompt, balance_cents
        FROM feed_actors
-       WHERE id NOT LIKE 'test-%'
+       WHERE id NOT LIKE 'test-%' AND id NOT LIKE 'org-%'
        ORDER BY id ASC`,
     )
     const allActors: DbActorRow[] = rows
