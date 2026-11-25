@@ -218,6 +218,7 @@ export interface ExploreAccountHit {
   readonly displayName: string;
   readonly bio: string;
   readonly avatarUrl: string | null;
+  readonly isFollowing: boolean;
 }
 
 export interface ExploreActorHit {
@@ -1327,6 +1328,7 @@ export function decodeExplore(raw: unknown, viewerAccountId?: string | null): Ex
         displayName: str(u.displayName, handle),
         bio: str(u.bio, ""),
         avatarUrl: optStr(u.avatarUrl ?? u.avatar_url),
+        isFollowing: bool(u.isFollowing, false),
       };
     })
     .filter((u): u is ExploreAccountHit => u !== null);

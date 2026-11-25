@@ -201,6 +201,7 @@ export interface SearchAccountResult {
   readonly displayName: string
   readonly bio: string
   readonly avatarUrl: string | null
+  readonly isFollowing: boolean
 }
 
 export interface SearchActorResult {
@@ -409,6 +410,20 @@ function projectRowToPreview(
     linkCashtags: projected.linkCashtags,
     createdAt: safeInt(row.created_at, 0)
   }
+}
+
+effect function loadFollowedTargetIdsTx(tx: Tx, viewerId: string | undefined, targetIds: ReadonlyArray<string>): Set<string>!StoreFailure {
+  const followed = new Set<string>()
+  if (viewerId === undefined || viewerId === "" || targetIds.length === 0) return followed
+  const followRows = try tx.query(
+    "SELECT target_id FROM feed_follows WHERE follower_id = $1 AND target_id = ANY($2)",
+    [viewerId, targetIds]
+  )
+  for (const row of followRows) {
+    const tid = toText(row.target_id)
+    if (tid !== undefined) followed.add(tid)
+  }
+  return followed
 }
 
 effect function hydratePostRowsTx(
@@ -1426,12 +1441,15 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
           `SELECT account_id, handle, display_name, bio, avatar_url FROM feed_accounts WHERE ${accountWhere} AND ${viewerAuthorVisibilitySql("$5", "account_id")} ORDER BY ${accountOrder} LIMIT $6`,
           [entityLikePattern, compactLikePattern, entityQuery, entityPrefixPattern, viewerId, limit]
         )
+    const accountIds = accountRows.map((row) => textOrEmpty(row.account_id)).filter((id) => id !== "")
+    const followedAccountIds = try loadFollowedTargetIdsTx(tx, viewerId, accountIds)
     const accounts: SearchAccountResult[] = accountRows.map((row) => ({
       accountId: textOrEmpty(row.account_id),
       handle: textOrEmpty(row.handle),
       displayName: textOrEmpty(row.display_name),
       bio: textOrEmpty(row.bio),
-      avatarUrl: toText(row.avatar_url) ?? null
+      avatarUrl: toText(row.avatar_url) ?? null,
+      isFollowing: followedAccountIds.has(textOrEmpty(row.account_id))
     }))
     const actorWhere = "id NOT LIKE 'test-%' AND (lower(username) LIKE $1 ESCAPE '\\' OR lower(name) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' OR replace(replace(lower(id), '-', ''), '_', '') LIKE $2 ESCAPE '\\' OR lower(description) LIKE $1 ESCAPE '\\')"
     const actorOrder = "CASE WHEN lower(username) = $3 OR lower(name) = $3 OR lower(id) = $3 THEN 0 WHEN lower(username) LIKE $4 ESCAPE '\\' OR lower(name) LIKE $4 ESCAPE '\\' OR lower(id) LIKE $4 ESCAPE '\\' THEN 1 WHEN lower(username) LIKE $1 ESCAPE '\\' OR lower(name) LIKE $1 ESCAPE '\\' OR lower(id) LIKE $1 ESCAPE '\\' OR replace(replace(lower(name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\' OR replace(replace(lower(id), '-', ''), '_', '') LIKE $2 ESCAPE '\\' THEN 2 ELSE 3 END ASC, CASE tier WHEN 'S_TIER' THEN 0 WHEN 'A_TIER' THEN 1 WHEN 'B_TIER' THEN 2 WHEN 'C_TIER' THEN 3 ELSE 4 END ASC, name ASC"

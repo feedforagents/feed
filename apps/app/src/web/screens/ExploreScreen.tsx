@@ -89,7 +89,7 @@ function ExplorePeopleList({ hasSearch }: { readonly hasSearch: boolean }) {
               onClick={() => { void storeActions.toggleFollow(acct.handle); }}
               className="shrink-0 font-bold"
             >
-              Follow
+              {acct.isFollowing ? "Following" : "Follow"}
             </Button>
           ) : null}
         </div>

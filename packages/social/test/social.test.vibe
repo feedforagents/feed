@@ -1472,3 +1472,39 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'Explore search carries the viewer follow state for already-followed people (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+
+    const searchBefore = try searchWorld({ query: "bob", mode: "game", viewerId: "alice", limit: 10 })
+    const bobBefore = searchBefore.accounts.find((a) => a.handle === "bob")
+    try followAccount("alice", "bob")
+    const searchAfter = try searchWorld({ query: "bob", mode: "game", viewerId: "alice", limit: 10 })
+    const bobAfter = searchAfter.accounts.find((a) => a.handle === "bob")
+    const searchCarol = try searchWorld({ query: "carol", mode: "game", viewerId: "alice", limit: 10 })
+    const carolAfter = searchCarol.accounts.find((a) => a.handle === "carol")
+    const searchAnonymous = try searchWorld({ query: "bob", mode: "game", limit: 10 })
+    const bobAnonymous = searchAnonymous.accounts.find((a) => a.handle === "bob")
+    try unfollowAccount("alice", "bob")
+    const searchUnfollowed = try searchWorld({ query: "bob", mode: "game", viewerId: "alice", limit: 10 })
+    const bobUnfollowed = searchUnfollowed.accounts.find((a) => a.handle === "bob")
+
+    try check(() => assert.deepStrictEqual({
+      bobFound: bobBefore !== undefined,
+      bobBefore: bobBefore?.isFollowing,
+      bobAfter: bobAfter?.isFollowing,
+      carolAfter: carolAfter?.isFollowing,
+      bobAnonymous: bobAnonymous?.isFollowing,
+      bobUnfollowed: bobUnfollowed?.isFollowing
+    }, {
+      bobFound: true,
+      bobBefore: false,
+      bobAfter: true,
+      carolAfter: false,
+      bobAnonymous: false,
+      bobUnfollowed: false
+    }))
+  })
+)

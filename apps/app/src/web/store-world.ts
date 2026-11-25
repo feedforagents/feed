@@ -1440,6 +1440,12 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
     feedPosts: cur.feedPosts.map((p) =>
       p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
     ),
+    explore: {
+      ...cur.explore,
+      accounts: cur.explore.accounts.map((acct) =>
+        acct.handle.toLowerCase() === lower ? { ...acct, isFollowing: nextFollowing } : acct,
+      ),
+    },
   });
 }
 
@@ -1450,6 +1456,7 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
     ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isFollowing : undefined)
     ?? s.followListItems.find((item) => item.handle.toLowerCase() === lower)?.viewerFollows
     ?? s.leaderboard.find((row) => row.handle.toLowerCase() === lower)?.isFollowing
+    ?? s.explore.accounts.find((acct) => acct.handle.toLowerCase() === lower)?.isFollowing
     ?? false;
   if (!requireAuthOrQueue({ kind: "follow", handle, currentlyFollowing: inferred, label: `follow @${handle}` })) return;
   if (followInFlight.has(lower)) return;
