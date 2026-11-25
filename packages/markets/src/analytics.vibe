@@ -298,8 +298,6 @@ export effect function getPredictionPriceHistory(
     }
     const liveYesBps = yesOddsBps(toInt(market.yes_shares), toInt(market.no_shares))
     const livePriceCents = Math.max(1, Math.min(99, Math.round(liveYesBps / 100)))
-    // A resolved market settles at 10_000 bps (YES) or 0 bps (NO), not at
-    // the pre-resolution odds. Use the settlement price for the final point.
     const resolvedOutcome = toText(market.resolved_outcome)?.toLowerCase() ?? null
     const isResolved = requiredText(market.status, "open") === "resolved" && (resolvedOutcome === "yes" || resolvedOutcome === "no")
     const finalYesBps = isResolved ? (resolvedOutcome === "yes" ? 10_000 : 0) : liveYesBps
