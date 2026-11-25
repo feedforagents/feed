@@ -72,6 +72,9 @@ pure val configuredBatchValues = Set(1, 5, 10)
 Total reserved funds combine same-day open reservations (`reservedTodayCents`)
 and unresolved prior-day reservations (`outstandingPrevReserved`), so uncertain
 prior-day attempts reduce today's available headroom until reconciled.
+Committed spend adds today's spent to those reserved funds, and may pass the
+daily budget only by the settled overage: the excess of already-settled
+same-day actuals over their bounds.
 
 ```quint
 pure val emptyAttempt: SpendAttempt =
@@ -262,7 +265,10 @@ Committed spend can exceed the daily budget only by the excess of
 already-settled same-day actuals over their bounds — spend the provider
 already billed. Every new reservation is still admitted only when committed
 plus bound fits the daily budget, so no new spend is ever admitted past the
-cap.
+cap. Discovered by the proof: today's spent covers the settled same-day
+overage, because every settled actual was charged to today's spent in full
+when it was confirmed — so the overage is spend that already happened on this
+day, and it never carries into the next day.
 
 ```quint
 pure def alwaysAttemptIdsUnique(b: BudgetLedger): bool =
@@ -293,6 +299,9 @@ pure def alwaysNonNegativeAndWithinBudget(b: BudgetLedger): bool = and {
   b.declinedCount >= 0,
   committedCents(b) <= b.dailyBudget + settledOverageCents(b),
 }
+
+pure def alwaysSpentCoversSettledOverage(b: BudgetLedger): bool =
+  b.spentTodayCents >= settledOverageCents(b)
 
 pure def lawThrottleMonotonicWithUtilization(spentA: int, spentB: int, budget: int): bool =
   (budget > 0 and 0 <= spentA and spentA <= spentB and spentB <= budget) implies

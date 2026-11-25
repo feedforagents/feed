@@ -167,6 +167,17 @@ lemma settleMarketAndPayout_ensures(j: JourneyState, slotId: int)
   }
 }
 
+lemma OverageNonNeg(xs: seq<engine__spendBudget_SpendAttempt>, day: int, init: int)
+  requires init >= 0
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) >= init
+  decreases |xs|
+{
+  if |xs| > 0 {
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    OverageNonNeg(xs[1..], day, nextInit);
+  }
+}
+
 lemma runNpcTickSpotAndAlpha_ensures(j: JourneyState, actorId: int, boundCents: int, actualCents: int, spotDelta: int)
   ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> alwaysJourneySubmachinesConsistent(runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
   ensures (inv(j) ==> canRunNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta) ==> alwaysEconomyAndSingleAgentConstraints(runNpcTickSpotAndAlpha(j, actorId, boundCents, actualCents, spotDelta)))
@@ -206,6 +217,13 @@ lemma runNpcTickSpotAndAlpha_ensures(j: JourneyState, actorId: int, boundCents: 
       b0.attempts,
       aSettled
     );
+    ProofLib.FoldLeftAppend(
+      (acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == b0.currentDay) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc),
+      0,
+      b0.attempts,
+      aSettled
+    );
+    OverageNonNeg(b2.attempts, b0.currentDay, 0);
     AttemptIdsUniqueBridge(b0);
     AttemptIdsUniqueBridge(b2);
     forall a | a in b2.attempts

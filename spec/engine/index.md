@@ -244,6 +244,7 @@ pure def alwaysAllEngineSubmachinesValid(e: EngineState): bool = and {
   SB::alwaysAttemptBoundsValid(e.budget),
   SB::alwaysTotalsMatchAttempts(e.budget),
   SB::alwaysNonNegativeAndWithinBudget(e.budget),
+  SB::alwaysSpentCoversSettledOverage(e.budget),
   NA::alwaysTenMarketSlots(e.arcs),
   NA::alwaysLiveSlotHasSecretOutcome(e.arcs),
   NA::alwaysUniqueClues(e.arcs),

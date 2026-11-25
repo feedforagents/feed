@@ -218,11 +218,86 @@ lemma SumPrevRollover(xs: seq<SpendAttempt>, oldDay: int, newDay: int, initToday
   }
 }
 
+lemma OverageShift(xs: seq<SpendAttempt>, day: int, init: int, d: int)
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init + d, xs)
+       == Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) + d
+  decreases |xs|
+{
+  if |xs| > 0 {
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    OverageShift(xs[1..], day, nextInit, d);
+  }
+}
+
+lemma OverageNonNeg(xs: seq<SpendAttempt>, day: int, init: int)
+  requires init >= 0
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) >= init
+  decreases |xs|
+{
+  if |xs| > 0 {
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    OverageNonNeg(xs[1..], day, nextInit);
+  }
+}
+
+lemma OverageSettleOne(xs: seq<SpendAttempt>, ys: seq<SpendAttempt>, day: int, idx: int, init: int, actualCents: int)
+  requires |xs| == |ys|
+  requires 0 <= idx < |xs|
+  requires forall i :: 0 <= i < |xs| && i != idx ==> xs[i] == ys[i]
+  requires xs[idx].attemptStatus.AttemptReserved? || xs[idx].attemptStatus.AttemptUncertain?
+  requires ys[idx].attemptStatus.AttemptSettled?
+  requires ys[idx].utcDay == xs[idx].utcDay
+  requires ys[idx].boundCents == xs[idx].boundCents
+  requires ys[idx].actualCents == actualCents
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, ys)
+       == Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs)
+          + (if ((xs[idx].utcDay == day) && (actualCents > xs[idx].boundCents)) then (actualCents - xs[idx].boundCents) else 0)
+  decreases |xs|
+{
+  if idx == 0 {
+    assert xs[1..] == ys[1..];
+    if ((xs[0].utcDay == day) && (actualCents > xs[0].boundCents)) {
+      OverageShift(xs[1..], day, init, actualCents - xs[0].boundCents);
+    }
+  } else {
+    assert xs[0] == ys[0];
+    assert forall i :: 0 <= i < |xs[1..]| ==> xs[1..][i] == xs[i + 1] && ys[1..][i] == ys[i + 1];
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    OverageSettleOne(xs[1..], ys[1..], day, idx - 1, nextInit, actualCents);
+  }
+}
+
+lemma OverageSame(xs: seq<SpendAttempt>, ys: seq<SpendAttempt>, day: int, init: int)
+  requires |xs| == |ys|
+  requires forall i :: 0 <= i < |xs| ==> xs[i].utcDay == ys[i].utcDay && xs[i].boundCents == ys[i].boundCents && xs[i].actualCents == ys[i].actualCents && xs[i].attemptStatus.AttemptSettled? == ys[i].attemptStatus.AttemptSettled?
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs)
+       == Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, ys)
+  decreases |xs|
+{
+  if |xs| > 0 {
+    assert forall i :: 0 <= i < |xs[1..]| ==> xs[1..][i] == xs[i + 1] && ys[1..][i] == ys[i + 1];
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    OverageSame(xs[1..], ys[1..], day, nextInit);
+  }
+}
+
+lemma OverageZeroAfterRollover(xs: seq<SpendAttempt>, newDay: int, init: int)
+  requires forall a :: a in xs ==> a.utcDay < newDay
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: SpendAttempt) => (if (((a.utcDay == newDay) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) == init
+  decreases |xs|
+{
+  if |xs| > 0 {
+    assert forall a :: a in xs[1..] ==> a in xs;
+    OverageZeroAfterRollover(xs[1..], newDay, init);
+  }
+}
+
 lemma reserveAttempt_ensures(b: BudgetLedger, boundKnown: bool, boundCents: int)
   ensures (inv(b) ==> canReserveAttempt(b, boundKnown, boundCents) ==> alwaysAttemptIdsUnique(reserveAttempt(b, boundKnown, boundCents)))
   ensures (inv(b) ==> canReserveAttempt(b, boundKnown, boundCents) ==> alwaysAttemptBoundsValid(reserveAttempt(b, boundKnown, boundCents)))
   ensures (inv(b) ==> canReserveAttempt(b, boundKnown, boundCents) ==> alwaysTotalsMatchAttempts(reserveAttempt(b, boundKnown, boundCents)))
   ensures (inv(b) ==> canReserveAttempt(b, boundKnown, boundCents) ==> alwaysNonNegativeAndWithinBudget(reserveAttempt(b, boundKnown, boundCents)))
+  ensures (inv(b) ==> canReserveAttempt(b, boundKnown, boundCents) ==> alwaysSpentCoversSettledOverage(reserveAttempt(b, boundKnown, boundCents)))
 {
   if inv(b) && canReserveAttempt(b, boundKnown, boundCents) {
     var after := reserveAttempt(b, boundKnown, boundCents);
@@ -253,6 +328,13 @@ lemma reserveAttempt_ensures(b: BudgetLedger, boundKnown: bool, boundCents: int)
       b.attempts,
       added
     );
+    ProofLib.FoldLeftAppend(
+      (acc: int, a: SpendAttempt) => (if (((a.utcDay == b.currentDay) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc),
+      0,
+      b.attempts,
+      added
+    );
+    OverageNonNeg(after.attempts, b.currentDay, 0);
   }
 }
 
@@ -261,6 +343,7 @@ lemma confirmSpend_ensures(b: BudgetLedger, attemptId: int, actualCents: int)
   ensures (inv(b) ==> canConfirmSpend(b, attemptId, actualCents) ==> alwaysAttemptBoundsValid(confirmSpend(b, attemptId, actualCents)))
   ensures (inv(b) ==> canConfirmSpend(b, attemptId, actualCents) ==> alwaysTotalsMatchAttempts(confirmSpend(b, attemptId, actualCents)))
   ensures (inv(b) ==> canConfirmSpend(b, attemptId, actualCents) ==> alwaysNonNegativeAndWithinBudget(confirmSpend(b, attemptId, actualCents)))
+  ensures (inv(b) ==> canConfirmSpend(b, attemptId, actualCents) ==> alwaysSpentCoversSettledOverage(confirmSpend(b, attemptId, actualCents)))
 {
   if inv(b) && canConfirmSpend(b, attemptId, actualCents) {
     var after := confirmSpend(b, attemptId, actualCents);
@@ -269,9 +352,11 @@ lemma confirmSpend_ensures(b: BudgetLedger, attemptId: int, actualCents: int)
     assert b.attempts[idx] in b.attempts;
     AttemptIdUniqueAt(b.attempts, idx);
     FindAttemptUnique(b.attempts, attemptId, idx, emptyAttempt);
+    assert b.attempts[idx].boundCents > 0;
     PreserveAttemptIdsUnique(b, after);
     SumTodaySettleOne(b.attempts, after.attempts, b.currentDay, idx, 0);
     SumPrevSettleOne(b.attempts, after.attempts, b.currentDay, idx, 0);
+    OverageSettleOne(b.attempts, after.attempts, b.currentDay, idx, 0, actualCents);
     SumTodayNonNeg(after.attempts, b.currentDay, 0);
     SumPrevNonNeg(after.attempts, b.currentDay, 0);
   }
@@ -282,6 +367,7 @@ lemma markUncertain_ensures(b: BudgetLedger, attemptId: int)
   ensures (inv(b) ==> canMarkUncertain(b, attemptId) ==> alwaysAttemptBoundsValid(markUncertain(b, attemptId)))
   ensures (inv(b) ==> canMarkUncertain(b, attemptId) ==> alwaysTotalsMatchAttempts(markUncertain(b, attemptId)))
   ensures (inv(b) ==> canMarkUncertain(b, attemptId) ==> alwaysNonNegativeAndWithinBudget(markUncertain(b, attemptId)))
+  ensures (inv(b) ==> canMarkUncertain(b, attemptId) ==> alwaysSpentCoversSettledOverage(markUncertain(b, attemptId)))
 {
   if inv(b) && canMarkUncertain(b, attemptId) {
     var after := markUncertain(b, attemptId);
@@ -292,6 +378,7 @@ lemma markUncertain_ensures(b: BudgetLedger, attemptId: int)
     PreserveAttemptIdsUnique(b, after);
     SumTodaySame(b.attempts, after.attempts, b.currentDay, 0);
     SumPrevSame(b.attempts, after.attempts, b.currentDay, 0);
+    OverageSame(b.attempts, after.attempts, b.currentDay, 0);
   }
 }
 
@@ -300,12 +387,14 @@ lemma simulateWorkerRestart_ensures(b: BudgetLedger)
   ensures (inv(b) ==> canSimulateWorkerRestart(b) ==> alwaysAttemptBoundsValid(simulateWorkerRestart(b)))
   ensures (inv(b) ==> canSimulateWorkerRestart(b) ==> alwaysTotalsMatchAttempts(simulateWorkerRestart(b)))
   ensures (inv(b) ==> canSimulateWorkerRestart(b) ==> alwaysNonNegativeAndWithinBudget(simulateWorkerRestart(b)))
+  ensures (inv(b) ==> canSimulateWorkerRestart(b) ==> alwaysSpentCoversSettledOverage(simulateWorkerRestart(b)))
 {
   if inv(b) && canSimulateWorkerRestart(b) {
     var after := simulateWorkerRestart(b);
     PreserveAttemptIdsUnique(b, after);
     SumTodaySame(b.attempts, after.attempts, b.currentDay, 0);
     SumPrevSame(b.attempts, after.attempts, b.currentDay, 0);
+    OverageSame(b.attempts, after.attempts, b.currentDay, 0);
   }
 }
 
@@ -314,10 +403,12 @@ lemma rolloverUtcDay_ensures(b: BudgetLedger, newDay: int)
   ensures (inv(b) ==> canRolloverUtcDay(b, newDay) ==> alwaysAttemptBoundsValid(rolloverUtcDay(b, newDay)))
   ensures (inv(b) ==> canRolloverUtcDay(b, newDay) ==> alwaysTotalsMatchAttempts(rolloverUtcDay(b, newDay)))
   ensures (inv(b) ==> canRolloverUtcDay(b, newDay) ==> alwaysNonNegativeAndWithinBudget(rolloverUtcDay(b, newDay)))
+  ensures (inv(b) ==> canRolloverUtcDay(b, newDay) ==> alwaysSpentCoversSettledOverage(rolloverUtcDay(b, newDay)))
 {
   if inv(b) && canRolloverUtcDay(b, newDay) {
     var after := rolloverUtcDay(b, newDay);
     SumTodayZeroAfterRollover(b.attempts, newDay, 0);
     SumPrevRollover(b.attempts, b.currentDay, newDay, 0, 0);
+    OverageZeroAfterRollover(b.attempts, newDay, 0);
   }
 }

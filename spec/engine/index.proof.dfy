@@ -265,6 +265,80 @@ lemma EngineBudgetSumPrevRollover(xs: seq<engine__spendBudget_SpendAttempt>, old
   }
 }
 
+lemma EngineBudgetOverageShift(xs: seq<engine__spendBudget_SpendAttempt>, day: int, init: int, d: int)
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init + d, xs)
+       == Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) + d
+  decreases |xs|
+{
+  if |xs| > 0 {
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    EngineBudgetOverageShift(xs[1..], day, nextInit, d);
+  }
+}
+
+lemma EngineBudgetOverageNonNeg(xs: seq<engine__spendBudget_SpendAttempt>, day: int, init: int)
+  requires init >= 0
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) >= init
+  decreases |xs|
+{
+  if |xs| > 0 {
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    EngineBudgetOverageNonNeg(xs[1..], day, nextInit);
+  }
+}
+
+lemma EngineBudgetOverageSettleOne(xs: seq<engine__spendBudget_SpendAttempt>, ys: seq<engine__spendBudget_SpendAttempt>, day: int, idx: int, init: int, actualCents: int)
+  requires |xs| == |ys|
+  requires 0 <= idx < |xs|
+  requires forall i :: 0 <= i < |xs| && i != idx ==> xs[i] == ys[i]
+  requires xs[idx].attemptStatus.AttemptReserved? || xs[idx].attemptStatus.AttemptUncertain?
+  requires ys[idx].attemptStatus.AttemptSettled?
+  requires ys[idx].utcDay == xs[idx].utcDay
+  requires ys[idx].boundCents == xs[idx].boundCents
+  requires ys[idx].actualCents == actualCents
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, ys)
+       == Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs)
+          + (if ((xs[idx].utcDay == day) && (actualCents > xs[idx].boundCents)) then (actualCents - xs[idx].boundCents) else 0)
+  decreases |xs|
+{
+  if idx == 0 {
+    assert xs[1..] == ys[1..];
+    if ((xs[0].utcDay == day) && (actualCents > xs[0].boundCents)) {
+      EngineBudgetOverageShift(xs[1..], day, init, actualCents - xs[0].boundCents);
+    }
+  } else {
+    assert xs[0] == ys[0];
+    assert forall i :: 0 <= i < |xs[1..]| ==> xs[1..][i] == xs[i + 1] && ys[1..][i] == ys[i + 1];
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    EngineBudgetOverageSettleOne(xs[1..], ys[1..], day, idx - 1, nextInit, actualCents);
+  }
+}
+
+lemma EngineBudgetOverageSame(xs: seq<engine__spendBudget_SpendAttempt>, ys: seq<engine__spendBudget_SpendAttempt>, day: int, init: int)
+  requires |xs| == |ys|
+  requires forall i :: 0 <= i < |xs| ==> xs[i].utcDay == ys[i].utcDay && xs[i].boundCents == ys[i].boundCents && xs[i].actualCents == ys[i].actualCents && xs[i].attemptStatus.AttemptSettled? == ys[i].attemptStatus.AttemptSettled?
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs)
+       == Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == day) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, ys)
+  decreases |xs|
+{
+  if |xs| > 0 {
+    assert forall i :: 0 <= i < |xs[1..]| ==> xs[1..][i] == xs[i + 1] && ys[1..][i] == ys[i + 1];
+    var nextInit := if (((xs[0].utcDay == day) && xs[0].attemptStatus.AttemptSettled?) && (xs[0].actualCents > xs[0].boundCents)) then (init + (xs[0].actualCents - xs[0].boundCents)) else init;
+    EngineBudgetOverageSame(xs[1..], ys[1..], day, nextInit);
+  }
+}
+
+lemma EngineBudgetOverageZeroAfterRollover(xs: seq<engine__spendBudget_SpendAttempt>, newDay: int, init: int)
+  requires forall a :: a in xs ==> a.utcDay < newDay
+  ensures Std.Collections.Seq.FoldLeft((acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == newDay) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc), init, xs) == init
+  decreases |xs|
+{
+  if |xs| > 0 {
+    assert forall a :: a in xs[1..] ==> a in xs;
+    EngineBudgetOverageZeroAfterRollover(xs[1..], newDay, init);
+  }
+}
+
 lemma EngineBudgetReservePreserves(b: engine__spendBudget_BudgetLedger, boundKnown: bool, boundCents: int)
   requires engine__spendBudget_inv(b)
   requires engine__spendBudget_canReserveAttempt(b, boundKnown, boundCents)
@@ -298,6 +372,13 @@ lemma EngineBudgetReservePreserves(b: engine__spendBudget_BudgetLedger, boundKno
     b.attempts,
     added
   );
+  ProofLib.FoldLeftAppend(
+    (acc: int, a: engine__spendBudget_SpendAttempt) => (if (((a.utcDay == b.currentDay) && a.attemptStatus.AttemptSettled?) && (a.actualCents > a.boundCents)) then (acc + (a.actualCents - a.boundCents)) else acc),
+    0,
+    b.attempts,
+    added
+  );
+  EngineBudgetOverageNonNeg(after.attempts, b.currentDay, 0);
 }
 
 lemma EngineBudgetConfirmPreserves(b: engine__spendBudget_BudgetLedger, attemptId: int, actualCents: int)
@@ -312,6 +393,7 @@ lemma EngineBudgetConfirmPreserves(b: engine__spendBudget_BudgetLedger, attemptI
   assert b.attempts[idx] in b.attempts;
   EngineBudgetAttemptIdUniqueAt(b.attempts, idx);
   EngineBudgetFindAttemptUnique(b.attempts, attemptId, idx, engine__spendBudget_emptyAttempt);
+  assert b.attempts[idx].boundCents > 0;
   forall a | a in after.attempts
     ensures |ProofLib.Filter((x: engine__spendBudget_SpendAttempt) => (x.attemptId == a.attemptId), after.attempts)| == 1
   {
@@ -329,6 +411,7 @@ lemma EngineBudgetConfirmPreserves(b: engine__spendBudget_BudgetLedger, attemptI
   EngineBudgetSumPrevSettleOne(b.attempts, after.attempts, b.currentDay, idx, 0);
   EngineBudgetSumTodayNonNeg(after.attempts, b.currentDay, 0);
   EngineBudgetSumPrevNonNeg(after.attempts, b.currentDay, 0);
+  EngineBudgetOverageSettleOne(b.attempts, after.attempts, b.currentDay, idx, 0, actualCents);
 }
 
 lemma EngineBudgetMarkUncertainPreserves(b: engine__spendBudget_BudgetLedger, attemptId: int)
@@ -369,6 +452,7 @@ lemma EngineBudgetMarkUncertainPreserves(b: engine__spendBudget_BudgetLedger, at
     b.attempts,
     after.attempts
   );
+  EngineBudgetOverageSame(b.attempts, after.attempts, b.currentDay, 0);
 }
 
 lemma EngineBudgetRolloverPreserves(b: engine__spendBudget_BudgetLedger, newDay: int)
@@ -378,6 +462,7 @@ lemma EngineBudgetRolloverPreserves(b: engine__spendBudget_BudgetLedger, newDay:
 {
   EngineBudgetSumTodayZeroAfterRollover(b.attempts, newDay, 0);
   EngineBudgetSumPrevRollover(b.attempts, b.currentDay, newDay, 0, 0);
+  EngineBudgetOverageZeroAfterRollover(b.attempts, newDay, 0);
 }
 
 lemma EngineArcTenMarketSlotsBridge(s: engine__narrativeArc_NarrativeState)
@@ -787,4 +872,5 @@ lemma initialHolds_ensures()
   ensures inv(initialHolds())
 {
   EngineArcInitialValid();
+  engine__spendBudget_initialHolds_ensures();
 }
