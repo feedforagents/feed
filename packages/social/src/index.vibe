@@ -8,7 +8,9 @@ export {
   likePost,
   listArticles,
   listFeedPosts,
+  listPostsByTag,
   listTrending,
+  listUserLikedPosts,
   repostPost,
   searchWorld,
   unlikePost,
@@ -21,8 +23,11 @@ export {
   type FeedTab,
   type LikeResult,
   type ListFeedPostsInput,
+  type ListPostsByTagInput,
+  type ListUserLikedPostsInput,
   type PostAuthorKind,
   type PostMarketBadge,
+  type PostMarketSparklinePoint,
   type PostQuotePreview,
   type PostThreadSort,
   type PostThreadView,
@@ -87,6 +92,7 @@ export {
   createNpcAlphaInvite,
   createUserGroupChat,
   deleteGroupChat,
+  getChat,
   getChatMessages,
   inviteToUserGroupChat,
   leaveGroupChat,
@@ -126,6 +132,8 @@ export {
   type RespondGroupInviteInput,
   type SendChatMessageInput
 } from "./messaging.vibe"
+
+export { validateProfileImageUrl } from "./shared.vibe"
 
 export {
   RealtimeBus,

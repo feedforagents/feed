@@ -36,6 +36,7 @@ import {
   SocialFailure,
   toSpecMode,
   toSpecNotificationKind,
+  validateProfileImageUrl,
   type ResolvedSubject,
   type SocialPresentationMode,
   type SubjectKind,
@@ -154,6 +155,8 @@ export interface NotificationView {
   readonly actorName: string | null
   readonly actorHandle: string | null
   readonly actorAvatarUrl: string | null
+  readonly actorIsParody: boolean
+  readonly actorIsVerified: boolean
   readonly postId: string | null
   readonly marketId: string | null
   readonly chatId: string | null
@@ -357,11 +360,19 @@ export effect function getProfile(
         orgType: toText(orgRow?.org_type) ?? ""
       }
     }
-    const followersCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_follows WHERE target_id = $1", [target.id]))[0]?.count, 0)
-    const followingCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_follows WHERE follower_id = $1", [target.id]))[0]?.count, 0)
-    const postsCount = target.kind === "org"
-      ? safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE (author_id = $1 OR author_id = $2) AND deleted_at IS NULL", [target.id, `org-${target.id}`]))[0]?.count, 0)
-      : safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE author_id = $1 AND deleted_at IS NULL", [target.id]))[0]?.count, 0)
+    const followersCount = viewer === undefined
+      ? safeInt((try tx.query("SELECT count(*) AS count FROM feed_follows WHERE target_id = $1", [target.id]))[0]?.count, 0)
+      : safeInt((try tx.query(
+          "SELECT count(*) AS count FROM feed_follows f WHERE f.target_id = $1 AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = f.follower_id) OR (b.blocker_id = f.follower_id AND b.blocked_id = $2))",
+          [target.id, viewer]
+        ))[0]?.count, 0)
+    const followingCount = viewer === undefined
+      ? safeInt((try tx.query("SELECT count(*) AS count FROM feed_follows WHERE follower_id = $1", [target.id]))[0]?.count, 0)
+      : safeInt((try tx.query(
+          "SELECT count(*) AS count FROM feed_follows f WHERE f.follower_id = $1 AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = f.target_id) OR (b.blocker_id = f.target_id AND b.blocked_id = $2))",
+          [target.id, viewer]
+        ))[0]?.count, 0)
+    const postsCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE author_id = $1 AND deleted_at IS NULL", [target.id]))[0]?.count, 0)
     let viewerFollows = false
     let viewerFollowedBy = false
     let viewerBlocks = false
@@ -381,7 +392,7 @@ export effect function getProfile(
     }
     let tradeCount: number | null = null
     let openPositionCount: number | null = null
-    if (isSelf && effectiveMode === "game") {
+    if (effectiveMode === "game" && (target.kind === "user" || target.kind === "npc")) {
       tradeCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_trades WHERE trader_id = $1", [target.id]))[0]?.count, 0)
       const openPerps = safeInt((try tx.query("SELECT count(*) AS count FROM feed_perp_positions WHERE holder_id = $1 AND status = 'open'", [target.id]))[0]?.count, 0)
       const openPreds = safeInt((try tx.query("SELECT count(*) AS count FROM feed_prediction_positions WHERE holder_id = $1 AND settled_at IS NULL AND shares > 0", [target.id]))[0]?.count, 0)
@@ -426,11 +437,13 @@ export effect function updateProfile(
     readonly avatarUrl?: string | null
     readonly bannerUrl?: string | null
   }
-): (UpdatedAccountProfile | undefined)!StoreFailure!Store {
-  const store = try Store
-  const now = try Clock.currentTimeMillis
+): (UpdatedAccountProfile | undefined)!(SocialFailure | StoreFailure)!Store {
   const hasAvatarUrl = patch.avatarUrl !== undefined
   const hasBannerUrl = patch.bannerUrl !== undefined
+  const validatedAvatarUrl = hasAvatarUrl ? try validateProfileImageUrl(patch.avatarUrl, "avatarUrl") : null
+  const validatedBannerUrl = hasBannerUrl ? try validateProfileImageUrl(patch.bannerUrl, "bannerUrl") : null
+  const store = try Store
+  const now = try Clock.currentTimeMillis
   const rows = try store.transaction((tx: Tx) => tx.query(
     `UPDATE feed_accounts
      SET display_name = COALESCE($2, display_name),
@@ -445,9 +458,9 @@ export effect function updateProfile(
       patch.displayName ?? null,
       patch.bio ?? null,
       hasAvatarUrl,
-      patch.avatarUrl ?? null,
+      validatedAvatarUrl,
       hasBannerUrl,
-      patch.bannerUrl ?? null,
+      validatedBannerUrl,
       now
     ]
   ))
@@ -539,7 +552,7 @@ export effect function blockAccount(blockerId: string, targetHandleOrId: string)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, false, true)
+    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, true, true)
     if (pair.actor.id === pair.target.id) {
       throw new SocialFailure({ code: "InvalidInput", message: "Cannot block yourself" })
     }
@@ -570,7 +583,7 @@ export effect function blockAccount(blockerId: string, targetHandleOrId: string)
 export effect function unblockAccount(blockerId: string, targetHandleOrId: string): BlockResult!(SocialFailure | StoreFailure)!Store {
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, false, true)
+    const pair = try loadPairSnapshotTx(tx, blockerId, targetHandleOrId, true, true)
     if (pair.directBlock && !canUnblock(pair.state, pair.target.id, pair.actor.id)) {
       throw new SocialFailure({ code: "Forbidden", message: "Cannot unblock account" })
     }
@@ -804,6 +817,7 @@ interface HydratedNotificationMeta {
 function rowToNotification(row: Row, meta: HydratedNotificationMeta): NotificationView {
   const readAt = row.read_at === null || row.read_at === undefined ? null : safeInt(row.read_at, 0)
   const kind = toText(row.kind) ?? ""
+  const actorIsParody = meta.actor !== undefined && meta.actor.kind !== "user"
   return {
     id: toText(row.id) ?? "",
     kind,
@@ -813,6 +827,8 @@ function rowToNotification(row: Row, meta: HydratedNotificationMeta): Notificati
     actorName: meta.actor?.displayName ?? null,
     actorHandle: meta.actor?.handle ?? null,
     actorAvatarUrl: meta.actor?.avatarUrl ?? null,
+    actorIsParody,
+    actorIsVerified: actorIsParody,
     postId: toText(row.post_id) ?? null,
     marketId: toText(row.market_id) ?? null,
     chatId: meta.chatId,
@@ -864,10 +880,28 @@ export effect function listNotifications(
     if (rows.length === 0) return []
     const actorIds = rows.map((r) => toText(r.actor_id) ?? "").filter(Boolean)
     const actorProfiles = try loadProfilesByIdsTx(tx, actorIds)
-    const hasInviteRows = rows.some((r) => toText(r.kind) === "group_invite")
+    const directInviteIds = [...new Set(rows.map((r) => toText(r.invite_id) ?? "").filter(Boolean))]
+    const inviteById = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
+    if (directInviteIds.length > 0) {
+      const directInviteRows = try tx.query(
+        "SELECT id, chat_id, status FROM feed_group_invites WHERE id = ANY($1)",
+        [directInviteIds]
+      )
+      for (const inv of directInviteRows) {
+        const id = toText(inv.id) ?? ""
+        if (id !== "") {
+          inviteById.set(id, {
+            id,
+            chatId: toText(inv.chat_id) ?? "",
+            pending: toText(inv.status) === "pending"
+          })
+        }
+      }
+    }
+    const needsLegacyInviteLookup = rows.some((r) => toText(r.kind) === "group_invite" && (toText(r.invite_id) ?? "") === "")
     const inviteExact = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
     const inviteLatestByInviter = new Map<string, { readonly id: string; readonly chatId: string; readonly pending: boolean }>()
-    if (hasInviteRows) {
+    if (needsLegacyInviteLookup) {
       const inviteRows = try tx.query(
         "SELECT id, chat_id, invited_by_id, status, created_at FROM feed_group_invites WHERE invited_account_id = $1 ORDER BY created_at DESC, id DESC",
         [accountId]
@@ -885,22 +919,22 @@ export effect function listNotifications(
         if (!inviteLatestByInviter.has(inviter)) inviteLatestByInviter.set(inviter, entry)
       }
     }
-    const chatSenderIds = [...new Set(
+    const legacyChatSenderIds = [...new Set(
       rows
-        .filter((r) => toText(r.kind) === "chat_message")
+        .filter((r) => toText(r.kind) === "chat_message" && (toText(r.chat_id) ?? "") === "")
         .map((r) => toText(r.actor_id) ?? "")
         .filter(Boolean)
     )]
     const chatExact = new Map<string, string>()
     const chatLatestBySender = new Map<string, string>()
-    if (chatSenderIds.length > 0) {
+    if (legacyChatSenderIds.length > 0) {
       const msgRows = try tx.query(
         `SELECT m.chat_id, m.sender_id, m.created_at
          FROM feed_messages m
          INNER JOIN feed_chat_members cm ON cm.chat_id = m.chat_id AND cm.member_id = $1
          WHERE m.sender_id = ANY($2)
          ORDER BY m.created_at DESC, m.id DESC`,
-        [accountId, chatSenderIds]
+        [accountId, legacyChatSenderIds]
       )
       for (const msg of msgRows) {
         const sender = toText(msg.sender_id) ?? ""
@@ -917,17 +951,25 @@ export effect function listNotifications(
         const actorId = toText(row.actor_id) ?? null
         const createdAt = safeInt(row.created_at, 0)
         const actor = actorId === null ? undefined : actorProfiles.get(actorId)
-        let chatId: string | null = null
-        let inviteId: string | null = null
+        let chatId: string | null = normalizeOptionalText(toText(row.chat_id))
+        let inviteId: string | null = normalizeOptionalText(toText(row.invite_id))
         let invitePending = false
-        if (kind === "group_invite" && actorId !== null) {
-          const matched = inviteExact.get(`${actorId}:${createdAt}`) ?? inviteLatestByInviter.get(actorId)
-          if (matched !== undefined) {
-            chatId = matched.chatId === "" ? null : matched.chatId
-            inviteId = matched.id === "" ? null : matched.id
-            invitePending = matched.pending
+        if (kind === "group_invite") {
+          if (inviteId !== null) {
+            const direct = inviteById.get(inviteId)
+            if (direct !== undefined) {
+              chatId = chatId ?? (direct.chatId === "" ? null : direct.chatId)
+              invitePending = direct.pending
+            }
+          } else if (actorId !== null) {
+            const matched = inviteExact.get(`${actorId}:${createdAt}`) ?? inviteLatestByInviter.get(actorId)
+            if (matched !== undefined) {
+              chatId = chatId ?? (matched.chatId === "" ? null : matched.chatId)
+              inviteId = matched.id === "" ? null : matched.id
+              invitePending = matched.pending
+            }
           }
-        } else if (kind === "chat_message" && actorId !== null) {
+        } else if (kind === "chat_message" && chatId === null && actorId !== null) {
           chatId = chatExact.get(`${actorId}:${createdAt}`) ?? chatLatestBySender.get(actorId) ?? null
         }
         return rowToNotification(row, { actor, chatId, inviteId, invitePending })
@@ -944,12 +986,14 @@ effect function requireNonEmptyAccountId(accountId: string): void!SocialFailure 
 
 export effect function clearNotifications(
   accountId: string,
-  notificationIds?: ReadonlyArray<string>
+  notificationIds?: ReadonlyArray<string>,
+  modeOverride?: SocialPresentationMode
 ): ClearNotificationsResult!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyAccountId(accountId)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
-    const mode = try requireAccountUiModeTx(tx, accountId)
+    const accountMode = try requireAccountUiModeTx(tx, accountId)
+    const mode = modeOverride ?? accountMode
     if (notificationIds !== undefined && notificationIds.length === 0) {
       return { clearedCount: 0, unreadCount: try countUnreadNotificationsTx(tx, accountId, mode) }
     }
@@ -1046,13 +1090,15 @@ export effect function getUnreadNotificationCount(
 
 export effect function markNotificationsRead(
   accountId: string,
-  notificationIds?: ReadonlyArray<string>
+  notificationIds?: ReadonlyArray<string>,
+  modeOverride?: SocialPresentationMode
 ): MarkNotificationsReadResult!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyAccountId(accountId)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const mode = try requireAccountUiModeTx(tx, accountId)
+    const accountMode = try requireAccountUiModeTx(tx, accountId)
+    const mode = modeOverride ?? accountMode
     const unreadRows = try tx.query(
       `SELECT n.id, n.kind, n.actor_id, n.is_game_only FROM feed_notifications n LEFT JOIN feed_posts p ON p.id = n.post_id WHERE n.read_at IS NULL AND ${notificationVisibilityWhereSql(mode)}`,
       [accountId]
@@ -1097,12 +1143,28 @@ effect function hydratePeerEntriesTx(
   viewerId: string | undefined,
   skipBlocked: boolean
 ): ReadonlyArray<FollowListEntry>!StoreFailure {
-  const resolvedPeers: ResolvedSubject[] = []
-  for (const peerId of peerIds) {
-    if (peerId === "") continue
-    if (skipBlocked && viewerId !== undefined && (try isBlockedBetweenTx(tx, viewerId, peerId))) continue
-    const resolved = resolveSubjectTx(tx, peerId) catch () => undefined
-    if (resolved !== undefined) resolvedPeers.push(resolved)
+  const uniqueIds = [...new Set(peerIds.filter((id) => id !== ""))]
+  if (uniqueIds.length === 0) return []
+  const blockedSet = new Set<string>()
+  if (skipBlocked && viewerId !== undefined) {
+    const blockRows = try tx.query(
+      "SELECT blocker_id, blocked_id FROM feed_blocks WHERE (blocker_id = $1 AND blocked_id = ANY($2)) OR (blocked_id = $1 AND blocker_id = ANY($2))",
+      [viewerId, uniqueIds]
+    )
+    for (const r of blockRows) {
+      const blocker = toText(r.blocker_id) ?? ""
+      const blocked = toText(r.blocked_id) ?? ""
+      if (blocker === viewerId && blocked !== "") blockedSet.add(blocked)
+      else if (blocked === viewerId && blocker !== "") blockedSet.add(blocker)
+    }
+  }
+  const visibleIds = uniqueIds.filter((id) => !blockedSet.has(id))
+  if (visibleIds.length === 0) return []
+  const profileMap = try loadProfilesByIdsTx(tx, visibleIds)
+  const resolvedPeers: SubjectProfile[] = []
+  for (const id of visibleIds) {
+    const found = profileMap.get(id)
+    if (found !== undefined) resolvedPeers.push(found)
   }
   if (resolvedPeers.length === 0) return []
   const userIds = resolvedPeers.filter((p) => p.kind === "user").map((p) => p.id)
@@ -1168,14 +1230,16 @@ effect function listFollowEdges(
     if (viewer !== undefined && (try isBlockedBetweenTx(tx, viewer, subject.id))) {
       throw new SocialFailure({ code: "Blocked", message: "Follow list unavailable due to a block" })
     }
-    const rows = direction === "followers"
+    const peerCol = direction === "followers" ? "f.follower_id" : "f.target_id"
+    const matchCol = direction === "followers" ? "f.target_id" : "f.follower_id"
+    const rows = viewer === undefined
       ? try tx.query(
-          "SELECT f.follower_id AS peer_id FROM feed_follows f WHERE f.target_id = $1 ORDER BY f.created_at DESC LIMIT $2",
+          `SELECT ${peerCol} AS peer_id FROM feed_follows f WHERE ${matchCol} = $1 ORDER BY f.created_at DESC LIMIT $2`,
           [subject.id, effectiveLimit]
         )
       : try tx.query(
-          "SELECT f.target_id AS peer_id FROM feed_follows f WHERE f.follower_id = $1 ORDER BY f.created_at DESC LIMIT $2",
-          [subject.id, effectiveLimit]
+          `SELECT ${peerCol} AS peer_id FROM feed_follows f WHERE ${matchCol} = $1 AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = ${peerCol}) OR (b.blocker_id = ${peerCol} AND b.blocked_id = $2)) ORDER BY f.created_at DESC LIMIT $3`,
+          [subject.id, viewer, effectiveLimit]
         )
     const peerIds = rows.map((r) => toText(r.peer_id) ?? "").filter(Boolean)
     return try hydratePeerEntriesTx(tx, peerIds, viewer, true)

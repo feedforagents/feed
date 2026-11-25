@@ -835,8 +835,22 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     try resolvePredictionMarket({ marketId: "seed-market-2" })
     try store.transaction(effect (tx: Tx) => {
       try tx.query("UPDATE feed_actors SET profile_image_url = NULL WHERE id = 'eric-weinstain'")
-      try tx.query("UPDATE feed_actors SET profile_image_url = '/images/actors/org-politaico.jpg' WHERE id = 'org-politaico'")
+      try tx.query("INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ('org-email-only', 'Email Only', 0, $1) ON CONFLICT (id) DO NOTHING", [now])
+      try tx.query(
+        `INSERT INTO accounts (key, state, revision, organization_id, status, email, phone, name, created_at, updated_at)
+         VALUES ('user-email-only', '{}'::jsonb, 1, 'org-email-only', 'active', NULL, NULL, 'Email Only', $1, $1)
+         ON CONFLICT (key) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_accounts (account_id, handle, display_name, phone_hash, phone_last2, phone_verified_at, email_hash, email_masked, email_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, created_at, updated_at)
+         VALUES ('user-email-only', 'emailonly', 'Email Only', NULL, NULL, NULL, 'hash-email-only', 'e***@example.com', $1, $1, 'game', 10000, 10000, 0, false, false, $1, $1)
+         ON CONFLICT (account_id) DO NOTHING`,
+        [now]
+      )
     })
+    const emailEconomy = try getAccountEconomy("user-email-only")
+    const emailBoard = try getLeaderboard({ scope: "players", metric: "net_profit", page: 1, pageSize: 20, viewerAccountId: "user-email-only" })
     const npcBoard = try getLeaderboard({ scope: "characters", metric: "net_profit", page: 1, pageSize: 200 })
     const ericEntry = npcBoard.entries.find((e) => e.accountId === "eric-weinstain")
     const politaicoEntry = npcBoard.entries.find((e) => e.accountId === "org-politaico")
@@ -857,6 +871,11 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           [...page1.entries, ...page2.entries].map((e) => e.accountId).every((id) =>
             id !== "user-deleted" && id !== "user-reviewer" && id !== "user-unverified" && id !== "user-ghost"
           )
+        ],
+        emailVerifiedEligible: [
+          emailEconomy.verified,
+          emailBoard.entries.some((e) => e.accountId === "user-email-only"),
+          emailBoard.currentUser?.accountId
         ],
         sharedTiedRankForZeroProfitPlayers: [
           page1.entries[0]?.accountId,
@@ -884,8 +903,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           (npcBoard.entries[0]?.netProfitCents ?? 0) > 0,
           ericEntry?.avatarUrl,
           ericEntry?.handle,
-          politaicoEntry?.avatarUrl,
-          politaicoEntry?.handle
+          politaicoEntry === undefined
         ]
       },
       {
@@ -893,6 +911,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
         slippageAwareMtm: [true, true],
         earlySellProfitable: true,
         filteredEligiblePlayers: [4, 2, 2, 2, true],
+        emailVerifiedEligible: [true, true, "user-email-only"],
         sharedTiedRankForZeroProfitPlayers: ["user-alice", 1, 2, 2, 2, "user-dave", 2, 2, 2],
         serverSideMetricSorting: ["user-alice", "user-alice", 100, 1, 1],
         charactersBoard: [
@@ -903,8 +922,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           true,
           "/images/actors/eric-weinstain.jpg",
           "ericrweinstain",
-          "/images/organizations/politaico.jpg",
-          "politaico"
+          true
         ]
       }
     ))
