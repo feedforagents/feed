@@ -282,6 +282,11 @@ function ExploreMarketsList() {
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
   const [draftQuery, setDraftQuery] = useState(s.exploreQuery);
+  const [prevExploreQuery, setPrevExploreQuery] = useState(s.exploreQuery);
+  if (prevExploreQuery !== s.exploreQuery) {
+    setPrevExploreQuery(s.exploreQuery);
+    setDraftQuery(s.exploreQuery);
+  }
   const [browseTab, setBrowseTab] = useState<BrowseTab>("trending");
   const [searchTab, setSearchTab] = useState<SearchTab>("top");
   const isGame = mode === "GameMode";
