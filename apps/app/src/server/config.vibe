@@ -13,8 +13,6 @@ export interface AppServerConfig {
   readonly gameStart: "run" | "paused"
   readonly commitSha: string | undefined
   readonly cronSecret: string
-  readonly stripeSecretKey: string | undefined
-  readonly stripeWebhookSecret: string | undefined
   readonly auth: AuthRuntimeConfig
 }
 
@@ -130,8 +128,6 @@ export function parseAppServerConfig(
     gameStart,
     commitSha: trimmed(env.COMMIT_SHA),
     cronSecret: trimmed(env.CRON_SECRET) ?? "",
-    stripeSecretKey: trimmed(env.STRIPE_SECRET_KEY),
-    stripeWebhookSecret: trimmed(env.STRIPE_WEBHOOK_SECRET),
     auth: {
       digestKey,
       oauthSigningSecret,

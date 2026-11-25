@@ -1,2 +1,23 @@
 @import "@repo/design-system/theme.css";
 @import "@repo/ui/styles.css";
+
+html {
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;
+}
+
+body {
+  overscroll-behavior-y: contain;
+}
+
+.hide-scrollbar {
+  scrollbar-width: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}

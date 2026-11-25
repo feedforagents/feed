@@ -39,7 +39,6 @@ jobs:
       CLOUDFLARE_RUNTIME_SECRETS: ${{ secrets.CLOUDFLARE_RUNTIME_SECRETS }}
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
       SURPLUS_API_KEY: ${{ secrets.SURPLUS_API_KEY }}
-      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
       DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
       PROD_DIRECT_DATABASE_URL: ${{ secrets.PROD_DIRECT_DATABASE_URL }}
       STAGING_DIRECT_DATABASE_URL: ${{ secrets.STAGING_DIRECT_DATABASE_URL }}
@@ -142,7 +141,7 @@ jobs:
                 secrets[key] = value;
               }
             }
-            for (const key of ["CRON_SECRET", "SURPLUS_API_KEY", "STRIPE_SECRET_KEY"]) {
+            for (const key of ["CRON_SECRET", "SURPLUS_API_KEY"]) {
               const fromEnv = process.env[key]?.trim();
               if (fromEnv && !secrets[key]) secrets[key] = fromEnv;
             }
@@ -306,8 +305,12 @@ jobs:
                 throw new Error("/api/markets returned empty perps");
               }
             });
-            await expectStatus("/api/leaderboard", 200);
-            await expectStatus("/api/economy/packs", 200);
+            await expectStatus("/api/leaderboard", 200, (t) => {
+              const j = JSON.parse(t);
+              if (!Array.isArray(j.entries) || !Array.isArray(j.leaderboard)) {
+                throw new Error("/api/leaderboard missing entries/leaderboard arrays");
+              }
+            });
 
             const mcpPublic = await fetch(`${primaryOrigin}/mcp`, {
               method: "POST",

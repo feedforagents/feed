@@ -1,20 +1,35 @@
 // spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"
 import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
-import { resolvePredictionMarket, type MarketFailure } from "@repo/markets"
-import { organizations } from "@repo/pack-default"
+import { resolvePredictionMarket, resolvePredictionMarketTx, type MarketFailure } from "@repo/markets"
+import { actors, organizations, type PackActor } from "@repo/pack-default"
 import { createPost, type SocialFailure } from "@repo/social"
 import {
+  declassifyClueSignal,
   declassifyResolution,
   isOpenTradingPhase,
   makeSecretDraft,
   phaseMatchesClue,
   type CluePhase,
+  type ClueSignal,
   type MarketPhase,
   type SecretOutcome,
 } from "../gen/engine__narrativeArc.effect.vibe"
-import { generateCompletion } from "./llm-client.vibe"
-import { buildWorldContext, renderPrompt, type WorldContextMarketItem } from "./prompts.vibe"
-import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, parseLlmJsonRecord, resolveClockNow, sanitizeText } from "./shared.vibe"
+import { generateCompletion, hasLiveLlmProvider } from "./llm-client.vibe"
+import { buildWorldContext, prioritizePerpMarkets, renderPrompt, type WorldContextMarketItem } from "./prompts.vibe"
+import {
+  EngineFailure,
+  displayNameForEntity,
+  hashString,
+  isRuntimeNpcActor,
+  maybePublishFeedEvent,
+  newEngineId,
+  parseLlmJsonRecord,
+  replaceActorSlugsWithNames,
+  resolveClockNow,
+  sanitizeNarrativeText,
+  sanitizeText,
+  stripLeadingSelfPrefix,
+} from "./shared.vibe"
 
 export const ROLLING_SLOT_TIMEFRAMES: ReadonlyArray<{ readonly timeframe: string; readonly durationMs: number }> = [
   { timeframe: "3d", durationMs: 3 * 86_400_000 },
@@ -49,6 +64,11 @@ export interface ManualResolutionResult {
   readonly articleId: string
   readonly replacementMarketId: string | null
 }
+
+const packActorById: ReadonlyMap<string, PackActor> = new Map(actors.map((a) => [a.id, a]))
+const orgById = new Map(organizations.map((o) => [o.id, o]))
+
+const RESOLUTION_CLAIM_LEASE_MS = 60_000
 
 function normalizeMarketPhase(
   status: string,
@@ -106,6 +126,101 @@ function parseSecretOutcome(value: string | undefined): SecretOutcome {
   if (value === "YES") return "SecretYes"
   if (value === "NO") return "SecretNo"
   return "SecretUnset"
+}
+
+function describeClueSignalGuidance(signal: ClueSignal, phaseSlug: string): string {
+  switch (signal) {
+    case "SignalLeanYes":
+      return `Affiliated ${phaseSlug} channel check: your read leans bullish on this catalyst coming through, framed as sharp rumor/tape observation without claiming certainty.`
+    case "SignalLeanNo":
+      return `Affiliated ${phaseSlug} channel check: your read leans skeptical that this catalyst hits before deadline, framed as sharp insider doubt without claiming certainty.`
+    case "SignalAmbiguous":
+      return `Balanced ${phaseSlug} market chatter: keep the take genuinely uncertain with credible arguments on both sides of the tape.`
+  }
+}
+
+function findMatchedOrgIds(text: string): ReadonlySet<string> {
+  const lower = text.toLowerCase()
+  const matched = new Set<string>()
+  for (const org of organizations) {
+    const idMatch = org.id.length >= 3 && lower.includes(org.id.toLowerCase())
+    const nameMatch = org.name.length >= 3 && lower.includes(org.name.toLowerCase())
+    const tickerMatch = Boolean(org.ticker && new RegExp(`\\b${org.ticker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text))
+    if (idMatch || nameMatch || tickerMatch) {
+      matched.add(org.id)
+    }
+  }
+  return matched
+}
+
+function selectClueActor(
+  question: string,
+  description: string,
+  category: string,
+  clueKey: string,
+  actorRows: ReadonlyArray<Readonly<Record<string, unknown>>>,
+): { readonly row: Readonly<Record<string, unknown>>; readonly packActor: PackActor | undefined; readonly isAffiliatedInsider: boolean } {
+  const combinedText = `${question} ${description}`
+  const lowerCombined = combinedText.toLowerCase()
+  const matchedOrgIds = findMatchedOrgIds(combinedText)
+  const affiliated: Array<{ readonly row: Readonly<Record<string, unknown>>; readonly packActor: PackActor | undefined }> = []
+  const categoryMatched: Array<{ readonly row: Readonly<Record<string, unknown>>; readonly packActor: PackActor | undefined }> = []
+  const lowerCategory = category.toLowerCase()
+  for (const row of actorRows) {
+    const actorId = toText(row.id) ?? ""
+    const packActor = packActorById.get(actorId)
+    const actorName = (toText(row.name) ?? "").toLowerCase()
+    const actorUsername = (toText(row.username) ?? "").toLowerCase()
+    const orgAffiliated = packActor !== undefined && packActor.affiliations.some((orgId) => matchedOrgIds.has(orgId))
+    const directlyMentioned =
+      (actorName.length >= 4 && lowerCombined.includes(actorName)) ||
+      (actorUsername.length >= 4 && lowerCombined.includes(actorUsername))
+    if (orgAffiliated || directlyMentioned) {
+      affiliated.push({ row, packActor })
+    } else if (
+      packActor !== undefined &&
+      (packActor.domain.some((d) => d.toLowerCase().includes(lowerCategory)) ||
+        packActor.topics.some((t) => t.toLowerCase().includes(lowerCategory)))
+    ) {
+      categoryMatched.push({ row, packActor })
+    }
+  }
+  if (affiliated.length > 0) {
+    const picked = affiliated[hashString(clueKey) % affiliated.length]!
+    return { row: picked.row, packActor: picked.packActor, isAffiliatedInsider: true }
+  }
+  if (categoryMatched.length > 0) {
+    const picked = categoryMatched[hashString(clueKey) % categoryMatched.length]!
+    return { row: picked.row, packActor: picked.packActor, isAffiliatedInsider: false }
+  }
+  const fallbackRow = actorRows[hashString(clueKey) % actorRows.length]!
+  return { row: fallbackRow, packActor: packActorById.get(toText(fallbackRow.id) ?? ""), isAffiliatedInsider: false }
+}
+
+effect function insertWorldEventTx(
+  tx: Tx,
+  input: {
+    readonly eventType: string
+    readonly marketId: string | null
+    readonly headline: string
+    readonly summary: string
+    readonly actorIds: ReadonlyArray<string>
+    readonly createdAt: number
+  },
+): void!StoreFailure {
+  try tx.query(
+    `INSERT INTO feed_world_events (id, event_type, market_id, headline, summary, actors_json, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      newEngineId("evt"),
+      sanitizeText(input.eventType, 48),
+      input.marketId,
+      sanitizeText(input.headline, 180),
+      sanitizeText(input.summary, 360),
+      JSON.stringify(input.actorIds),
+      input.createdAt,
+    ],
+  )
 }
 
 export effect function advanceNarrativePhases(nowMs?: number): PhaseAdvanceResult!(EngineFailure | StoreFailure)!Store {
@@ -173,7 +288,11 @@ export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
      ORDER BY slot_index ASC NULLS LAST, expires_at ASC`,
     [nowMs],
   )
-  const perpRows = try tx.query("SELECT ticker, mark_price_cents, index_price_cents, funding_rate_bps FROM feed_perp_markets ORDER BY ticker ASC LIMIT 12")
+  const perpRows = try tx.query(
+    `SELECT ticker, mark_price_cents, index_price_cents, funding_rate_bps
+     FROM feed_perp_markets
+     ORDER BY ticker ASC`,
+  )
   const postRows = try tx.query(
     `SELECT id, author_id, author_kind, content
      FROM feed_posts
@@ -194,6 +313,17 @@ export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
       expiresAt: toInt(row.expires_at),
     }
   })
+  const prioritizedPerps = prioritizePerpMarkets(
+    perpRows
+      .map((r) => ({
+        ticker: toText(r.ticker) ?? "",
+        markPriceCents: toInt(r.mark_price_cents),
+        indexPriceCents: toInt(r.index_price_cents),
+        fundingRateBps: toInt(r.funding_rate_bps),
+      }))
+      .filter((p) => p.ticker.length > 0),
+    Math.max(16, perpRows.length),
+  )
   const worldContext = buildWorldContext({
     currentDay,
     currentHour,
@@ -201,18 +331,17 @@ export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
     worldFacts: factsRows.map((r) => toText(r.fact_text) ?? "").filter((s) => s.length > 0),
     parodyHeadlines: rssRows.map((r) => toText(r.headline) ?? "").filter((s) => s.length > 0),
     openMarkets,
-    perpMarkets: perpRows.map((r) => ({
-      ticker: toText(r.ticker) ?? "",
-      markPriceCents: toInt(r.mark_price_cents),
-      indexPriceCents: toInt(r.index_price_cents),
-      fundingRateBps: toInt(r.funding_rate_bps),
-    })),
-    recentPosts: postRows.map((r) => ({
-      id: toText(r.id) ?? "",
-      authorId: toText(r.author_id) ?? "",
-      authorKind: toText(r.author_kind) ?? "npc",
-      content: toText(r.content) ?? "",
-    })),
+    perpMarkets: prioritizedPerps,
+    recentPosts: postRows.map((r) => {
+      const authorId = toText(r.author_id) ?? ""
+      return {
+        id: toText(r.id) ?? "",
+        authorId,
+        authorName: displayNameForEntity(authorId),
+        authorKind: toText(r.author_kind) ?? "npc",
+        content: toText(r.content) ?? "",
+      }
+    }),
   })
   return {
     currentDay,
@@ -220,7 +349,7 @@ export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
     phase,
     worldContext,
     openMarketIds: openMarkets.map((m) => m.id),
-    tickers: perpRows.map((r) => toText(r.ticker) ?? "").filter((t) => t.length > 0),
+    tickers: prioritizedPerps.map((p) => p.ticker),
     existingQuestions: openMarkets.map((m) => m.question),
   }
 }
@@ -231,14 +360,16 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
   const candidates = try store.transaction(effect (tx: Tx) => {
     const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     const markets = try tx.query(
-      `SELECT id, question, category, phase, created_at, expires_at
+      `SELECT id, question, description, category, phase, created_at, expires_at, secret_outcome
        FROM feed_prediction_markets
        WHERE status = 'open' AND expires_at > $1
        ORDER BY expires_at ASC
        LIMIT 10`,
       [resolvedNow],
     )
-    const actorsRows = try tx.query("SELECT id, name, username, system_prompt FROM feed_actors ORDER BY id ASC")
+    const actorsRows = (try tx.query("SELECT id, name, username, system_prompt FROM feed_actors ORDER BY id ASC")).filter((r) =>
+      isRuntimeNpcActor(toText(r.id) ?? "", toText(r.name), toText(r.username)),
+    )
     const clueRows = try tx.query("SELECT clue_key, market_id, actor_id FROM feed_npc_market_clues")
     const existingKeys = new Set(clueRows.map((r) => toText(r.clue_key) ?? ""))
     return { snapshot, markets, actorsRows, existingKeys }
@@ -248,6 +379,9 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
   for (const market of candidates.markets) {
     if (published >= 3) break
     const marketId = toText(market.id) ?? ""
+    const question = toText(market.question) ?? ""
+    const description = toText(market.description) ?? ""
+    const category = toText(market.category) ?? "markets"
     const dbPhase = toText(market.phase) ?? "opening"
     const specPhase = normalizeMarketPhase("open", dbPhase, toInt(market.created_at), toInt(market.expires_at), resolvedNow)
     const clueTarget = phaseToCluePhase(specPhase)
@@ -256,16 +390,26 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
     }
     const clueKey = `${marketId}:${clueTarget.slug}`
     if (candidates.existingKeys.has(clueKey)) continue
-    const actorIndex = hashString(clueKey) % candidates.actorsRows.length
-    const actor = candidates.actorsRows[actorIndex]!
+    const picked = selectClueActor(question, description, category, clueKey, candidates.actorsRows)
+    const actor = picked.row
     const actorId = toText(actor.id) ?? ""
+    const secretSpec = parseSecretOutcome(toText(market.secret_outcome))
+    const isDeceiver =
+      picked.isAffiliatedInsider &&
+      (picked.packActor?.feed.alignment === "evil" ||
+        (picked.packActor?.feed.deception !== undefined && picked.packActor.feed.deception !== "none") ||
+        (clueTarget.spec !== "ClueClimax" && hashString(`deceiver:${marketId}:${actorId}`) % 5 === 0))
+    const signal = declassifyClueSignal(secretSpec, clueTarget.spec, picked.isAffiliatedInsider, isDeceiver)
+    const actorName = toText(actor.name) ?? displayNameForEntity(actorId)
+    const actorHandle = (toText(actor.username) ?? actorId).toLowerCase()
     const rendered = renderPrompt("cluePost", {
-      actorName: toText(actor.name) ?? actorId,
-      actorHandle: toText(actor.username) ?? actorId,
+      actorName,
+      actorHandle,
       actorVoice: sanitizeText(toText(actor.system_prompt) ?? "Skeptical market operator", 160),
-      question: toText(market.question) ?? "",
-      category: toText(market.category) ?? "markets",
+      question,
+      category,
       phase: clueTarget.slug,
+      signalGuidance: describeClueSignalGuidance(signal, clueTarget.slug),
       worldContext: candidates.snapshot.worldContext,
     })
     const completion = try generateCompletion({
@@ -277,7 +421,10 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       nowMs: resolvedNow,
       actorId,
     })
-    const clueContent = sanitizeText(completion.text, 275)
+    const clueContent = sanitizeNarrativeText(stripLeadingSelfPrefix(completion.text, actorName, actorHandle), 260)
+    const matchedOrgTicker = [...findMatchedOrgIds(`${question} ${description}`)]
+      .map((id) => orgById.get(id)?.ticker?.toUpperCase())
+      .find((t): t is string => t !== undefined && t !== "")
     const claimed = try store.transaction(effect (tx: Tx) => {
       const currentRows = try tx.query(
         `SELECT status, phase, created_at, expires_at FROM feed_prediction_markets WHERE id = $1`,
@@ -312,10 +459,19 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       authorKind: "npc",
       content: clueContent,
       marketId,
+      ...(matchedOrgTicker !== undefined ? { ticker: matchedOrgTicker } : {}),
     })
     const postId = createdPost.id
     try store.transaction(effect (tx: Tx) => {
       try tx.query("UPDATE feed_npc_market_clues SET post_id = $2 WHERE clue_key = $1", [clueKey, postId])
+      try insertWorldEventTx(tx, {
+        eventType: "narrative_clue",
+        marketId,
+        headline: `${clueTarget.slug.toUpperCase()} signal on ${sanitizeText(question, 120)}`,
+        summary: clueContent,
+        actorIds: [actorId],
+        createdAt: resolvedNow,
+      })
     })
     try maybePublishFeedEvent({ type: "market.clue", marketId, actorId, phase: clueTarget.slug })
     published += 1
@@ -323,10 +479,15 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
   return published
 }
 
-effect function resolveDefaultMediaOrgId(tx: Tx): string!StoreFailure {
-  const rows = try tx.query("SELECT id FROM feed_organizations ORDER BY (CASE WHEN org_type = 'media' THEN 0 ELSE 1 END), id ASC LIMIT 1")
-  const found = rows.length > 0 ? toText(rows[0]?.id) : undefined
-  return found ?? organizations[0]?.id ?? "feed-wire"
+effect function resolveMediaOrgIdTx(tx: Tx, seedKey: string): string!StoreFailure {
+  const mediaRows = try tx.query("SELECT id FROM feed_organizations WHERE org_type = 'media' ORDER BY id ASC")
+  const rows = mediaRows.length > 0 ? mediaRows : try tx.query("SELECT id FROM feed_organizations ORDER BY id ASC")
+  if (rows.length > 0) {
+    const picked = rows[hashString(seedKey) % rows.length]!
+    const found = toText(picked.id)
+    if (found) return found
+  }
+  return organizations.find((o) => o.type === "media")?.id ?? organizations[0]?.id ?? "feed-wire"
 }
 
 effect function settleMarketWithProofArticle(input: {
@@ -340,27 +501,40 @@ effect function settleMarketWithProofArticle(input: {
 }): { readonly articleId: string }!(EngineFailure | StoreFailure | MarketFailure | SocialFailure)!Store {
   const store = try Store
   const articleId = newEngineId("art")
-  const authorOrgId = try store.transaction(effect (tx: Tx) => try resolveDefaultMediaOrgId(tx))
+  const authorOrgId = try store.transaction(effect (tx: Tx) => try resolveMediaOrgIdTx(tx, `proof:${input.marketId}`))
+  const cleanTitle = sanitizeNarrativeText(input.title, 180)
+  const cleanSummary = sanitizeNarrativeText(input.summary, 360)
+  const cleanBody = replaceActorSlugsWithNames(input.body)
   try resolvePredictionMarket({
     marketId: input.marketId,
     outcome: input.outcome,
     proofArticleId: articleId,
-    proofSummary: sanitizeText(input.summary, 480),
+    proofSummary: sanitizeNarrativeText(input.summary, 480),
     approveHold: input.approveHold,
+    proofArticle: {
+      id: articleId,
+      title: cleanTitle,
+      summary: cleanSummary,
+      body: cleanBody,
+      authorOrgId,
+      publishedAt: input.nowMs,
+    },
+    clearResolutionWork: true,
   })
-  try store.transaction(effect (tx: Tx) => {
-    try tx.query(
-      `INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at)
-       VALUES ($1, $2, $3, $4, $5, $6, true, $7)
-       ON CONFLICT (id) DO NOTHING`,
-      [articleId, sanitizeText(input.title, 180), sanitizeText(input.summary, 360), input.body, authorOrgId, input.marketId, input.nowMs],
-    )
-    try tx.query("DELETE FROM feed_prediction_resolution_work WHERE market_id = $1", [input.marketId])
-  })
+  store.transaction(effect (tx: Tx) => {
+    try insertWorldEventTx(tx, {
+      eventType: "market_resolution",
+      marketId: input.marketId,
+      headline: cleanTitle,
+      summary: cleanSummary,
+      actorIds: [authorOrgId],
+      createdAt: input.nowMs,
+    })
+  }) catch effect () => undefined
   createPost({
     authorId: authorOrgId,
     authorKind: "org",
-    content: sanitizeText(`${input.title} — ${input.summary}`, 275),
+    content: sanitizeNarrativeText(`${cleanTitle} — ${cleanSummary}`, 260),
     marketId: input.marketId,
   }) catch effect () => undefined
   try maybePublishFeedEvent({ type: "market.resolved", marketId: input.marketId, outcome: input.outcome, articleId })
@@ -401,13 +575,13 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
     }) catch effect () => null
     const parsed = completion ? parseLlmJsonRecord(completion.text) : null
     const fallbackSeed = hashString(`slot:${slotIndex}:${resolvedNow}`)
-    const question = sanitizeText(
+    const question = sanitizeNarrativeText(
       typeof parsed?.question === "string" && parsed.question.trim().length > 8
         ? parsed.question
         : `Will slot ${slotIndex} (${slotSpec.timeframe}) trigger a major Feed catalyst before expiry?`,
       220,
     )
-    const description = sanitizeText(
+    const description = sanitizeNarrativeText(
       typeof parsed?.description === "string" && parsed.description.trim().length > 8
         ? parsed.description
         : `Rolling ${slotSpec.timeframe} Feed prediction market for slot ${slotIndex}.`,
@@ -421,25 +595,43 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
         : "NO"
     const marketId = newEngineId(`mkt-s${slotIndex}`)
     const expiresAt = resolvedNow + slotSpec.durationMs
-    try store.transaction(effect (tx: Tx) => {
+    const insertedOrgId = try store.transaction(effect (tx: Tx) => {
       const check = try tx.query(
         `SELECT id FROM feed_prediction_markets
          WHERE slot_index = $1 AND status IN ('open', 'expired', 'awaiting_proof', 'manual_hold')
          LIMIT 1`,
         [slotIndex],
       )
-      if (check.length === 0) {
-        try tx.query(
-          `INSERT INTO feed_prediction_markets (
-             id, slot_index, question, description, category, timeframe, phase,
-             yes_shares, no_shares, liquidity_cents, secret_outcome, status, expires_at, created_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, 'opening', 50000, 50000, 50000, $7, 'open', $8, $9)`,
-          [marketId, slotIndex, question, description, category, slotSpec.timeframe, secretOutcome, expiresAt, resolvedNow],
-        )
-        createdIds.push(marketId)
-      }
+      if (check.length > 0) return null
+      try tx.query(
+        `INSERT INTO feed_prediction_markets (
+           id, slot_index, question, description, category, timeframe, phase,
+           yes_shares, no_shares, liquidity_cents, secret_outcome, status, expires_at, created_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, 'opening', 50000, 50000, 50000, $7, 'open', $8, $9)`,
+        [marketId, slotIndex, question, description, category, slotSpec.timeframe, secretOutcome, expiresAt, resolvedNow],
+      )
+      const mediaOrgId = try resolveMediaOrgIdTx(tx, `new-market:${marketId}`)
+      try insertWorldEventTx(tx, {
+        eventType: "market_opened",
+        marketId,
+        headline: `NEW MARKET (${slotSpec.timeframe}): ${question}`,
+        summary: description,
+        actorIds: [mediaOrgId],
+        createdAt: resolvedNow,
+      })
+      return mediaOrgId
     })
+    if (insertedOrgId !== null) {
+      createdIds.push(marketId)
+      createPost({
+        authorId: insertedOrgId,
+        authorKind: "org",
+        content: sanitizeNarrativeText(`NEW MARKET (${slotSpec.timeframe}): ${question}`, 260),
+        marketId,
+      }) catch effect () => undefined
+      try maybePublishFeedEvent({ type: "world.tick", kind: "market", refId: marketId, createdAt: resolvedNow })
+    }
     existingQuestions.push(question)
   }
   return createdIds
@@ -476,12 +668,23 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
        JOIN feed_prediction_markets m ON m.id = w.market_id
        WHERE w.next_retry_at <= $1 AND m.status IN ('expired', 'awaiting_proof')
        ORDER BY w.next_retry_at ASC
-       LIMIT 5`,
+       LIMIT 5
+       FOR UPDATE OF w SKIP LOCKED`,
       [resolvedNow],
     )
+    const claimedIds = due.map((row) => toText(row.market_id) ?? "").filter((id) => id.length > 0)
+    if (claimedIds.length > 0) {
+      try tx.query(
+        `UPDATE feed_prediction_resolution_work
+         SET next_retry_at = $2, updated_at = $1
+         WHERE market_id = ANY($3)`,
+        [resolvedNow, resolvedNow + RESOLUTION_CLAIM_LEASE_MS, claimedIds],
+      )
+    }
     const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
     return { due, worldContext: snapshot.worldContext }
   })
+  const allowOfflineFallback = !hasLiveLlmProvider()
   let processed = 0
   let resolved = 0
   let manualHolds = 0
@@ -528,14 +731,15 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
       maxTokens: rendered.maxTokens,
       temperature: rendered.temperature,
       jsonMode: true,
-      allowOfflineFallback: true,
+      allowOfflineFallback,
       nowMs: resolvedNow,
     }) catch effect () => null
     const parsed = completion ? parseLlmJsonRecord(completion.text) : null
     const title = typeof parsed?.title === "string" && parsed.title.trim().length > 0 ? parsed.title.trim() : ""
     const summary = typeof parsed?.summary === "string" && parsed.summary.trim().length > 0 ? parsed.summary.trim() : ""
     const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0 ? parsed.body.trim() : ""
-    if (!title || !summary || !body) {
+    const auditTag = declassifyResolution(secretSpec, draft)
+    if (!title || !summary || !body || (auditTag !== "proof-yes" && auditTag !== "proof-no")) {
       const nextAttempts = attempts + 1
       const nextRetryAt = resolvedNow + Math.min(300_000, 15_000 * Math.pow(2, attempts))
       try store.transaction(effect (tx: Tx) => {
@@ -555,12 +759,11 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
       else retried += 1
       continue
     }
-    const auditTag = declassifyResolution(secretSpec, draft)
     const settled = settleMarketWithProofArticle({
       marketId,
       outcome: outcomeLower,
       title,
-      summary: `${summary} [${auditTag}]`,
+      summary,
       body,
       approveHold: false,
       nowMs: resolvedNow,
@@ -608,45 +811,78 @@ effect function resolveHoldCommon(
     throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "An admin override reason is required." })
   }
   const nowMs = try resolveClockNow()
+  const articleId = newEngineId("art")
   const store = try Store
-  const market = try store.transaction(effect (tx: Tx) => {
+  const committed = try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       `SELECT id, question, description, status, secret_outcome
        FROM feed_prediction_markets
-       WHERE id = $1`,
+       WHERE id = $1
+       FOR UPDATE`,
       [cleanId],
     )
-    return rows[0] ?? null
+    const market = rows[0] ?? null
+    if (!market) {
+      throw new EngineFailure({ code: "NOT_FOUND", message: `Prediction market ${cleanId} not found.` })
+    }
+    if (toText(market.status) !== "manual_hold") {
+      throw new EngineFailure({ code: "MANUAL_HOLD_INVALID", message: `Market ${cleanId} is not in manual_hold status.` })
+    }
+    const storedOutcome = parseSecretOutcome(toText(market.secret_outcome))
+    const chosenOutcome: "yes" | "no" | null =
+      explicitOutcome ?? (storedOutcome === "SecretYes" ? "yes" : storedOutcome === "SecretNo" ? "no" : null)
+    if (chosenOutcome === null) {
+      throw new EngineFailure({ code: "MANUAL_HOLD_INVALID", message: "Manual hold market has no stored outcome; specify yes or no." })
+    }
+    const question = toText(market.question) ?? cleanId
+    const outcomeUpper = chosenOutcome === "yes" ? "YES" : "NO"
+    const note = reason ? sanitizeNarrativeText(reason, 280) : "Admin approved manual-hold settlement"
+    const cleanTitle = sanitizeNarrativeText(`Admin Resolution: ${sanitizeNarrativeText(question, 96)} (${outcomeUpper})`, 180)
+    const cleanSummary = sanitizeNarrativeText(note, 360)
+    const body = replaceActorSlugsWithNames(`Operator resolved held prediction market "${question}" as ${outcomeUpper}. Reason: ${note}.`)
+    const authorOrgId = try resolveMediaOrgIdTx(tx, `hold:${cleanId}`)
+    try resolvePredictionMarketTx(
+      tx,
+      {
+        marketId: cleanId,
+        outcome: chosenOutcome,
+        proofArticleId: articleId,
+        proofSummary: sanitizeText(note, 480),
+        approveHold: true,
+        proofArticle: {
+          id: articleId,
+          title: cleanTitle,
+          summary: cleanSummary,
+          body,
+          authorOrgId,
+          publishedAt: nowMs,
+        },
+        clearResolutionWork: true,
+      },
+      nowMs,
+    )
+    try insertWorldEventTx(tx, {
+      eventType: "market_resolution",
+      marketId: cleanId,
+      headline: cleanTitle,
+      summary: cleanSummary,
+      actorIds: [authorOrgId],
+      createdAt: nowMs,
+    })
+    return { chosenOutcome, authorOrgId, cleanTitle, cleanSummary }
   })
-  if (!market) {
-    throw new EngineFailure({ code: "NOT_FOUND", message: `Prediction market ${cleanId} not found.` })
-  }
-  if (toText(market.status) !== "manual_hold") {
-    throw new EngineFailure({ code: "MANUAL_HOLD_INVALID", message: `Market ${cleanId} is not in manual_hold status.` })
-  }
-  const storedOutcome = parseSecretOutcome(toText(market.secret_outcome))
-  const chosenOutcome: "yes" | "no" | null =
-    explicitOutcome ?? (storedOutcome === "SecretYes" ? "yes" : storedOutcome === "SecretNo" ? "no" : null)
-  if (chosenOutcome === null) {
-    throw new EngineFailure({ code: "MANUAL_HOLD_INVALID", message: "Manual hold market has no stored outcome; specify yes or no." })
-  }
-  const question = toText(market.question) ?? cleanId
-  const outcomeUpper = chosenOutcome === "yes" ? "YES" : "NO"
-  const note = reason ? sanitizeText(reason, 280) : "Admin approved manual-hold settlement"
-  const settled = try settleMarketWithProofArticle({
+  createPost({
+    authorId: committed.authorOrgId,
+    authorKind: "org",
+    content: sanitizeNarrativeText(`${committed.cleanTitle} — ${committed.cleanSummary}`, 260),
     marketId: cleanId,
-    outcome: chosenOutcome,
-    title: `Admin Resolution: ${sanitizeText(question, 96)} (${outcomeUpper})`,
-    summary: note,
-    body: `Operator resolved held prediction market "${question}" as ${outcomeUpper}. Reason: ${note}.`,
-    approveHold: true,
-    nowMs,
-  })
+  }) catch effect () => undefined
+  try maybePublishFeedEvent({ type: "market.resolved", marketId: cleanId, outcome: committed.chosenOutcome, articleId })
   const createdIds = ensureRollingMarketSlots(nowMs) catch effect () => []
   return {
     marketId: cleanId,
-    outcome: chosenOutcome,
-    articleId: settled.articleId,
+    outcome: committed.chosenOutcome,
+    articleId,
     replacementMarketId: createdIds[0] ?? null,
   }
 }
