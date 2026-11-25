@@ -2,7 +2,6 @@
 import { useState, type FormEvent } from "react";
 import {
   AgentConnectCard,
-  Alert,
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -12,6 +11,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
+  Avatar,
   Button,
   Card,
   CardContent,
@@ -23,13 +23,23 @@ import {
   DialogContent,
   DialogDescription,
   DialogTitle,
+  EmptyState,
   Input,
   Label,
   ModeToggle,
+  Skeleton,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  Textarea,
   type UiMode,
   useTurnstileContainerRef,
 } from "@repo/ui";
+import { MonitorIcon, MoonIcon, SunIcon } from "../icons.tsx";
+import { hasAtRiskOpenPositions } from "../store-core.ts";
 import { storeActions, useAppStore } from "../store.ts";
+import type { AppModerationEntry, ThemePreference } from "../types.ts";
+import { ProfileMediaPickers } from "./ProfileScreen.tsx";
 
 function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; readonly onOpenChange: (open: boolean) => void }) {
   const s = useAppStore();
@@ -82,7 +92,7 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
         {step === "phone" ? (
           <form onSubmit={(e) => { void handleStart(e); }} className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="change-phone-input">New phone number (E.164)</Label>
+              <Label htmlFor="change-phone-input">New phone number</Label>
               <Input
                 id="change-phone-input"
                 type="tel"
@@ -99,7 +109,7 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
                 className="min-h-16"
               />
             ) : null}
-            <Button type="submit" loading={busy} disabled={!newPhone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
+            <Button type="submit" shape="pill" loading={busy} disabled={!newPhone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
               Send 6-digit code
             </Button>
           </form>
@@ -118,11 +128,11 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
             </div>
             <div className="flex items-center justify-end gap-2">
               {s.devSmsCodeEnabled ? (
-                <Button type="button" variant="ghost" size="sm" className="mr-auto" onClick={() => { void fillDevCode(); }}>
+                <Button type="button" variant="ghost" size="sm" shape="pill" className="mr-auto" onClick={() => { void fillDevCode(); }}>
                   Fill dev code
                 </Button>
               ) : null}
-              <Button type="submit" loading={busy} disabled={code.length !== 6}>
+              <Button type="submit" shape="pill" loading={busy} disabled={code.length !== 6}>
                 Confirm change
               </Button>
             </div>
@@ -133,81 +143,316 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
   );
 }
 
+const THEME_OPTIONS: ReadonlyArray<{ readonly id: ThemePreference; readonly label: string; readonly detail: string }> = [
+  { id: "dark", label: "Dark", detail: "Pure black canvas" },
+  { id: "light", label: "Light", detail: "Crisp white canvas" },
+  { id: "system", label: "System", detail: "Match OS setting" },
+];
+
+function SettingsProfileTab() {
+  const s = useAppStore();
+  const [displayName, setDisplayName] = useState(s.viewer?.displayName ?? "");
+  const [bio, setBio] = useState(s.viewer?.bio ?? "");
+  const [avatarUrl, setAvatarUrl] = useState(s.viewer?.avatarUrl ?? "");
+  const [bannerUrl, setBannerUrl] = useState(s.viewer?.bannerUrl ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!displayName.trim()) return;
+    setSaving(true);
+    await storeActions.updateOwnProfile({
+      displayName: displayName.trim(),
+      bio: bio.trim(),
+      avatarUrl: avatarUrl.trim() || null,
+      bannerUrl: bannerUrl.trim() || null,
+    });
+    setSaving(false);
+  };
+
+  return (
+    <Card className="gap-4 rounded-xl p-5">
+      <CardHeader>
+        <CardTitle>Public profile</CardTitle>
+        <CardDescription>Customize how others see you across Feed.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={(e) => { void handleSave(e); }} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="settings-display-name">Display name</Label>
+            <Input
+              id="settings-display-name"
+              maxLength={60}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="settings-bio">Bio</Label>
+            <Textarea
+              id="settings-bio"
+              maxLength={280}
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+            />
+          </div>
+          <ProfileMediaPickers
+            avatarUrl={avatarUrl}
+            bannerUrl={bannerUrl}
+            onSelectAvatar={setAvatarUrl}
+            onSelectBanner={setBannerUrl}
+            avatarLabel="Avatar"
+            bannerLabel="Banner"
+            bannerHeightClass="h-14"
+          />
+          <div className="flex justify-end">
+            <Button type="submit" shape="pill" loading={saving} disabled={!displayName.trim()}>
+              Save profile
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ModerationAccountListCard({
+  title,
+  description,
+  emptyTitle,
+  loading,
+  accounts,
+  actionLabel,
+  onAction,
+}: {
+  readonly title: string;
+  readonly description: string;
+  readonly emptyTitle: string;
+  readonly loading: boolean;
+  readonly accounts: ReadonlyArray<AppModerationEntry>;
+  readonly actionLabel: string;
+  readonly onAction: (handle: string) => void;
+}) {
+  return (
+    <Card className="gap-3 rounded-xl p-5">
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {loading && accounts.length === 0 ? (
+          <Skeleton className="h-16" />
+        ) : accounts.length === 0 ? (
+          <EmptyState title={emptyTitle} />
+        ) : (
+          <div className="divide-y divide-border">
+            {accounts.map((acc) => (
+              <div key={acc.id} className="flex items-center justify-between gap-3 py-2.5">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <Avatar name={acc.displayName} src={acc.avatarUrl ?? undefined} seed={acc.handle} size="sm" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-foreground">{acc.displayName}</p>
+                    <p className="truncate text-xs text-muted-foreground">@{acc.handle}</p>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  shape="pill"
+                  variant="outline"
+                  onClick={() => onAction(acc.handle)}
+                >
+                  {actionLabel}
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SettingsPrivacyTab() {
+  const s = useAppStore();
+  return (
+    <div className="flex flex-col gap-5">
+      <ModerationAccountListCard
+        title="Blocked accounts"
+        description="Blocked accounts cannot follow, message, or interact with you."
+        emptyTitle="No blocked accounts"
+        loading={s.moderationLoading}
+        accounts={s.blockedAccounts}
+        actionLabel="Unblock"
+        onAction={(handle) => { void storeActions.toggleBlock(handle, true); }}
+      />
+      <ModerationAccountListCard
+        title="Muted accounts"
+        description="Posts from muted accounts are hidden from your timelines."
+        emptyTitle="No muted accounts"
+        loading={s.moderationLoading}
+        accounts={s.mutedAccounts}
+        actionLabel="Unmute"
+        onAction={(handle) => { void storeActions.toggleMute(handle, true); }}
+      />
+    </div>
+  );
+}
+
+function SettingsAccountTab({ onOpenPhoneChange }: { readonly onOpenPhoneChange: () => void }) {
+  const s = useAppStore();
+  return (
+    <Card className="gap-4 rounded-xl p-5">
+      <CardHeader>
+        <CardTitle>Account & Security</CardTitle>
+        <CardDescription>
+          @{s.viewer?.handle ?? "player"}
+          {s.viewer?.phoneLast2 ? ` · Phone ending in ${s.viewer.phoneLast2}` : ""}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="gap-3">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" shape="pill" onClick={onOpenPhoneChange}>
+            Change phone
+          </Button>
+          <Button variant="outline" size="sm" shape="pill" onClick={() => { void storeActions.logout(); }}>
+            Sign out
+          </Button>
+          <Button variant="outline" size="sm" shape="pill" onClick={() => { void storeActions.signOutEverywhere(); }}>
+            Sign out everywhere
+          </Button>
+          {s.viewer?.isAdmin ? (
+            <Button variant="secondary" size="sm" shape="pill" onClick={() => { void storeActions.navigate("/admin"); }}>
+              Admin console
+            </Button>
+          ) : null}
+        </div>
+      </CardContent>
+      <CardFooter className="flex-wrap justify-between gap-3 border-t border-border pt-4">
+        <span className="text-xs text-muted-foreground">
+          Deleting your account places your phone number in a 30-day cooldown before re-registration.
+        </span>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button variant="destructive" size="sm" shape="pill">
+              Delete account
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete your Feed account?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Deleting erases your profile, revokes your connected agent and all sessions, and places your phone number in a 30-day cooldown. Requires a sign-in within the last 10 minutes.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => { void storeActions.deleteAccount(); }}>
+                Delete permanently
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardFooter>
+    </Card>
+  );
+}
+
 export function SettingsScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
   const [phoneDialogOpen, setPhoneDialogOpen] = useState(false);
 
   return (
-    <div className="flex flex-col gap-5 p-4">
-      <ModeToggle
-        mode={mode}
-        hasAtRiskOpenPositions={s.positions.length > 0}
-        onModeChange={storeActions.toggleUiModeFromControl}
-        onReturnToGame={() => { void storeActions.navigate("/markets"); }}
-      />
+    <div className="flex flex-col">
+      <div className="sticky top-[53px] z-20 flex flex-col border-b border-border bg-background/85 backdrop-blur-md md:top-0">
+        <div className="flex h-[53px] items-center px-4">
+          <h1 className="text-base font-bold text-foreground">Settings</h1>
+        </div>
+        <Tabs
+          value={s.settingsTab}
+          onValueChange={(next) => {
+            if (next === "profile" || next === "appearance" || next === "agent" || next === "privacy" || next === "account") {
+              storeActions.setSettingsTab(next);
+            }
+          }}
+        >
+          <TabsList variant="underline" className="overflow-x-auto border-b-0">
+            <TabsTrigger value="profile">Profile</TabsTrigger>
+            <TabsTrigger value="appearance">Appearance</TabsTrigger>
+            <TabsTrigger value="agent">Agent</TabsTrigger>
+            <TabsTrigger value="privacy">Safety</TabsTrigger>
+            <TabsTrigger value="account">Account</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
 
-      <AgentConnectCard
-        grant={s.viewer?.agentGrant ?? null}
-        launchers={s.skills.hosts.map((h) => h.launcher)}
-        skillPrompt={s.skills.prompt}
-        onRevoke={() => { void storeActions.revokeAgentGrant(); }}
-        onSelectHost={storeActions.launchAgentHost}
-        onCopyPrompt={storeActions.copySkillPrompt}
-      />
+      <div className="flex flex-col gap-5 p-4">
+        {s.settingsTab === "profile" ? <SettingsProfileTab /> : null}
 
-      {s.hostActionNote ? <Alert variant="info">{s.hostActionNote}</Alert> : null}
+        {s.settingsTab === "appearance" ? (
+          <>
+            <Card className="gap-4 rounded-xl p-5">
+              <CardHeader>
+                <CardTitle>Theme</CardTitle>
+                <CardDescription>Choose how Feed looks on this device.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {THEME_OPTIONS.map((opt) => {
+                    const active = s.theme === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => storeActions.setTheme(opt.id)}
+                        className={`flex flex-col items-start gap-2 rounded-xl border p-4 text-left transition-colors ${active ? "border-feed-brand bg-feed-brand/10" : "border-border bg-background hover:bg-accent/50"}`}
+                      >
+                        {opt.id === "dark" ? (
+                          <MoonIcon className="size-5 text-foreground" />
+                        ) : opt.id === "light" ? (
+                          <SunIcon className="size-5 text-foreground" />
+                        ) : (
+                          <MonitorIcon className="size-5 text-foreground" />
+                        )}
+                        <div>
+                          <p className="text-sm font-bold text-foreground">{opt.label}</p>
+                          <p className="text-xs text-muted-foreground">{opt.detail}</p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
 
-      <Card className="gap-4 p-5">
-        <CardHeader>
-          <CardTitle>Account & Security</CardTitle>
-          <CardDescription>
-            @{s.viewer?.handle ?? "player"}
-            {s.viewer?.phoneLast2 ? ` · Phone ending in ${s.viewer.phoneLast2}` : ""}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="gap-3">
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => setPhoneDialogOpen(true)}>
-              Change phone
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => { void storeActions.logout(); }}>
-              Sign out
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => { void storeActions.signOutEverywhere(); }}>
-              Sign out everywhere
-            </Button>
-            {s.viewer?.isAdmin ? (
-              <Button variant="secondary" size="sm" onClick={() => { void storeActions.navigate("/admin"); }}>
-                Admin console
-              </Button>
-            ) : null}
-          </div>
-        </CardContent>
-        <CardFooter className="justify-between border-t border-border pt-4">
-          <span className="text-xs text-muted-foreground">Self-serve deletion holds your phone hash in a 30-day cooldown.</span>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive" size="sm">
-                Delete account
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete your Feed account?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Deleting erases your profile, revokes your connected agent and all sessions, and holds your phone number in a 30-day cooldown. Requires a sign-in within the last 10 minutes.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={() => { void storeActions.deleteAccount(); }}>
-                  Delete permanently
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </CardFooter>
-      </Card>
+            <ModeToggle
+              mode={mode}
+              hasAtRiskOpenPositions={hasAtRiskOpenPositions(s)}
+              onModeChange={storeActions.toggleUiModeFromControl}
+              onReturnToGame={() => {
+                void storeActions.setPlayMode("game").then(() => storeActions.navigate("/markets"));
+              }}
+            />
+          </>
+        ) : null}
+
+        {s.settingsTab === "agent" ? (
+          <AgentConnectCard
+            grant={s.viewer?.agentGrant ?? null}
+            launchers={s.skills.hosts.map((h) => h.launcher)}
+            skillPrompt={s.skills.prompt}
+            mcpUrl={s.skills.mcpUrl}
+            onOpenLink={() => { void storeActions.navigate("/link"); }}
+            onRevoke={() => { void storeActions.revokeAgentGrant(); }}
+            onSelectHost={storeActions.launchAgentHost}
+            onCopyPrompt={storeActions.copySkillPrompt}
+          />
+        ) : null}
+
+        {s.settingsTab === "privacy" ? <SettingsPrivacyTab /> : null}
+
+        {s.settingsTab === "account" ? <SettingsAccountTab onOpenPhoneChange={() => setPhoneDialogOpen(true)} /> : null}
+      </div>
 
       <PhoneChangeDialog open={phoneDialogOpen} onOpenChange={setPhoneDialogOpen} />
     </div>

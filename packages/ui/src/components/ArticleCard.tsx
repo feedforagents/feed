@@ -1,9 +1,8 @@
 import type { ComponentProps } from "react";
-import { Newspaper } from "lucide-react";
-import { cn } from "../lib/cn.ts";
+import { ArrowRight } from "lucide-react";
+import { cn, focusRing, inactive } from "../lib/cn.ts";
+import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
-import { Button } from "./Button.tsx";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "./Card.tsx";
 import type { UiMode } from "./ModeToggle.tsx";
 
 export interface ArticleItem {
@@ -15,6 +14,10 @@ export interface ArticleItem {
   summary: string;
   /** Publisher or parody news desk name. */
   source: string;
+  /** Optional publisher avatar URL. */
+  orgAvatarUrl?: string;
+  /** Optional editorial cover image URL. */
+  coverImageUrl?: string;
   /** Optional category or clue phase badge. */
   category?: string;
   /** Formatted publication time. */
@@ -23,7 +26,7 @@ export interface ArticleItem {
   ticker?: string;
 }
 
-export type ArticleCardProps = Omit<ComponentProps<"div">, "children"> & {
+export type ArticleCardProps = Omit<ComponentProps<"article">, "children"> & {
   /** Article or resolution proof summary. */
   article: ArticleItem;
   /** Presentation mode (`SocialMode` hides `ticker` market tags). */
@@ -34,42 +37,67 @@ export type ArticleCardProps = Omit<ComponentProps<"div">, "children"> & {
   disabled?: boolean;
 };
 
-/** Editorial news, RSS parody digest, or settled resolution proof card with `SocialMode` ticker filtering. */
+/** Flat hairline editorial news or resolution proof row with optional cover media and `SocialMode` ticker filtering. */
 export function ArticleCard({ article, mode = "GameMode", onSelect, disabled = false, className, ...props }: ArticleCardProps) {
   const isGame = mode === "GameMode";
+  const clickable = Boolean(onSelect && !disabled);
 
   return (
-    <Card className={cn("gap-3 p-5", className)} {...props}>
-      <CardHeader className="gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-            <Newspaper aria-hidden className="size-3.5 text-primary" />
-            {article.source}
+    <article
+      onClick={clickable ? () => onSelect?.(article.id) : undefined}
+      className={cn(
+        "flex flex-col gap-3 border-b border-border bg-background px-4 py-4 text-foreground transition-colors duration-fast hover:bg-muted/30",
+        clickable && "cursor-pointer",
+        className,
+      )}
+      {...props}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span className="inline-flex min-w-0 items-center gap-2 font-semibold text-foreground">
+          <Avatar name={article.source} src={article.orgAvatarUrl} seed={article.source} size="xs" />
+          <span className="truncate">{article.source}</span>
+          <span aria-hidden className="font-normal text-muted-foreground">
+            ·
           </span>
-          <div className="flex items-center gap-1.5">
-            {article.category ? <Badge variant="secondary">{article.category}</Badge> : null}
-            {isGame && article.ticker ? (
-              <Badge variant="outline" className="font-mono text-primary">
-                ${article.ticker}
-              </Badge>
-            ) : null}
-            <span>{article.timestamp}</span>
-          </div>
+          <span className="font-normal text-muted-foreground">{article.timestamp}</span>
+        </span>
+        <div className="flex items-center gap-1.5">
+          {article.category ? <Badge variant="secondary">{article.category}</Badge> : null}
+          {isGame && article.ticker ? (
+            <Badge variant="info" className="font-mono">
+              ${article.ticker}
+            </Badge>
+          ) : null}
         </div>
-        <CardTitle className="leading-snug">{article.title}</CardTitle>
-      </CardHeader>
+      </div>
 
-      <CardContent>
-        <p className="line-clamp-3 text-sm text-muted-foreground">{article.summary}</p>
-      </CardContent>
+      {article.coverImageUrl ? (
+        <div className="overflow-hidden rounded-xl border border-border bg-muted">
+          <img src={article.coverImageUrl} alt="" className="aspect-video w-full object-cover" />
+        </div>
+      ) : null}
+
+      <div className="flex flex-col gap-1.5">
+        <h3 className="text-base leading-snug font-bold text-foreground">{article.title}</h3>
+        <p className="line-clamp-3 text-sm leading-relaxed text-muted-foreground">{article.summary}</p>
+      </div>
 
       {onSelect ? (
-        <CardFooter>
-          <Button variant="outline" size="sm" disabled={disabled} onClick={() => !disabled && onSelect(article.id)}>
-            Read article
-          </Button>
-        </CardFooter>
+        <div>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!disabled) onSelect(article.id);
+            }}
+            className={cn(focusRing, inactive, "inline-flex items-center gap-1 rounded-sm text-sm font-medium text-primary hover:underline")}
+          >
+            <span>Read full article</span>
+            <ArrowRight aria-hidden className="size-3.5" />
+          </button>
+        </div>
       ) : null}
-    </Card>
+    </article>
   );
 }

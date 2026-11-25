@@ -55,6 +55,14 @@ module node {
     }
   }
 
+  function isStaticAssetPath(cleanPath: string): boolean {
+    return (
+      cleanPath.startsWith("/images/") ||
+      cleanPath.startsWith("/icons/") ||
+      cleanPath.startsWith("/assets/")
+    )
+  }
+
   function tryServeStaticAsset(serverDir: string, method: string, pathname: string): Response | undefined {
     if (method !== "GET" && method !== "HEAD") return undefined
     const distWebRoot = path.resolve(serverDir, "../../dist/web")
@@ -71,14 +79,22 @@ module node {
     if (candidate !== distWebRoot && !candidate.startsWith(allowedPrefix)) {
       return undefined
     }
+    const isImmutableAsset = isStaticAssetPath(cleanPath)
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
       const bytes = method === "HEAD" ? null : fs.readFileSync(candidate)
-      const isImmutable = cleanPath.startsWith("/assets/")
       return new Response(bytes, {
         status: 200,
         headers: {
           "content-type": contentTypeForPath(candidate),
-          "cache-control": isImmutable ? "public, max-age=31536000, immutable" : "no-cache"
+          "cache-control": isImmutableAsset ? "public, max-age=31536000, immutable" : "no-cache"
+        }
+      })
+    }
+    if (isImmutableAsset) {
+      return new Response(null, {
+        status: 404,
+        headers: {
+          "cache-control": "no-cache"
         }
       })
     }

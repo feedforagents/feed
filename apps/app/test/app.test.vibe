@@ -8,7 +8,7 @@ import { parseAppServerConfig, type AppServerConfig } from "../src/server/config
 import { handleFeedRequest } from "../src/server/router.vibe"
 
 module node {
-  import { createHash, createHmac } from "node:crypto"
+  import { createHash } from "node:crypto"
 
   /** @throws {never} */
   export function sha256Hex(text: string): string {
@@ -18,16 +18,6 @@ module node {
   /** @throws {never} */
   export function pkceChallenge(verifier: string): string {
     return createHash("sha256").update(verifier, "utf8").digest("base64url")
-  }
-
-  /** @throws {never} */
-  export function stripeWebhookHeaders(rawBody: string, secret: string, nowMs: number): Record<string, string> {
-    const timestampSec = Math.floor(nowMs / 1000)
-    const signature = createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex")
-    return {
-      "content-type": "application/json",
-      "stripe-signature": `t=${timestampSec},v1=${signature}`
-    }
   }
 
   /** @throws {never} */
@@ -60,10 +50,9 @@ module node {
     return reader.read()
   }
 }
-import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk, stripeWebhookHeaders } from node
+import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk } from node
 
 const APP_ORIGIN = "http://feed.localtest"
-const TEST_STRIPE_WEBHOOK_SECRET = "whsec_app_parity_test"
 
 const TEST_CONFIG = parseAppServerConfig(
   {
@@ -74,8 +63,7 @@ const TEST_CONFIG = parseAppServerConfig(
     AUTH_DIGEST_KEY: "test-digest-key-00000000000000000000000000000000",
     OAUTH_SIGNING_SECRET: "test-oauth-secret-00000000000000000000000000000",
     CRON_SECRET: "test-cron-secret",
-    TURNSTILE_SITE_KEY: "0x4AAAAAAB_test_site_key",
-    STRIPE_WEBHOOK_SECRET: TEST_STRIPE_WEBHOOK_SECRET
+    TURNSTILE_SITE_KEY: "0x4AAAAAAB_test_site_key"
   },
   APP_ORIGIN
 )
@@ -386,7 +374,7 @@ effect function readSseEventsUntil(
   return frames
 }
 
-it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 500, profile cursor/edit, SSE auth/block, perp broadcast, single rate-limit bucket (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
+it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocation, leaderboard, perp preview/partial-close, chat invites/reactions, moderation, SSE isolation (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
   provide appLayer() {
     const now = Date.now()
     try TestClock.setTime(now)
@@ -407,9 +395,37 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       }
     ))
 
+    const spoofedMetaRes = try callApp("/.well-known/oauth-authorization-server", {
+      config: TWILIO_CONFIG,
+      headers: { "x-forwarded-host": "evil.example", "x-forwarded-proto": "http" }
+    })
+    const spoofedMeta = try readJson(spoofedMetaRes)
+    try check(() => assert.strictEqual(spoofedMeta.issuer, "https://feed.fun"))
+
     const alice = try onboardPhonePlayer("+14155550111", "parity_alice")
     const bob = try onboardPhonePlayer("+14155550112", "parity_bob")
+    const charlie = try onboardPhonePlayer("+14155550113", "parity_charlie")
     const aliceId = String(alice.account.accountId)
+
+    const aliceMeInitial = try readJson(try callApp("/api/auth/me", { cookie: alice.cookie }))
+    const aliceViewerInitial = aliceMeInitial.viewer as Record<string, unknown>
+    const packsRes = try callApp("/api/economy/packs")
+    const checkoutRes = try callApp("/api/economy/checkout", { cookie: alice.cookie, json: { packId: "pack_5" } })
+    const webhookRes = try callApp("/api/webhooks/stripe", { rawBody: "{}" })
+    try check(() => assert.deepStrictEqual(
+      {
+        startingGrantCents: aliceViewerInitial.startingGrantCents,
+        balanceCents: aliceViewerInitial.balanceCents,
+        hasPurchasedCents: Object.prototype.hasOwnProperty.call(aliceViewerInitial, "purchasedCents"),
+        removedStatuses: [packsRes.status, checkoutRes.status, webhookRes.status]
+      },
+      {
+        startingGrantCents: 10_000,
+        balanceCents: 10_000,
+        hasPurchasedCents: false,
+        removedStatuses: [404, 404, 404]
+      }
+    ))
 
     const badLevRes = try callApp("/api/markets/perp/XTRPC/open", {
       cookie: alice.cookie,
@@ -417,6 +433,15 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     })
     const badLevBody = try readJson(badLevRes)
     try check(() => assert.deepStrictEqual([badLevRes.status, badLevBody.code], [400, "INVALID_LEVERAGE"]))
+
+    const predPreviewRes = try callApp("/api/markets/predictions/seed-market-1/preview", {
+      cookie: alice.cookie,
+      json: { side: "yes", amountCents: 500 }
+    })
+    const predPreviewBody = try readJson(predPreviewRes)
+    const predPreview = predPreviewBody.preview as Record<string, unknown>
+    try check(() => assert.strictEqual(predPreviewRes.status, 200))
+    try check(() => assert.ok(Number(predPreview.sharesOut) > 0))
 
     const buyWithKey = effect (side: "yes" | "no", key: string) => {
       const response = try callApp("/api/markets/prediction/seed-market-1/buy", {
@@ -446,44 +471,146 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       }
     ))
 
-    const checkoutRaw = JSON.stringify({
-      id: "evt_app_checkout_1",
-      type: "checkout.session.completed",
-      data: {
-        object: {
-          id: "cs_app_1",
-          payment_status: "paid",
-          payment_intent: "pi_app_1",
-          amount_total: 500,
-          client_reference_id: aliceId,
-          metadata: { accountId: aliceId, packId: "pack_5" }
-        }
-      }
-    })
-    const checkoutWhRes = try callApp("/api/webhooks/stripe", {
-      rawBody: checkoutRaw,
-      headers: stripeWebhookHeaders(checkoutRaw, TEST_STRIPE_WEBHOOK_SECRET, now)
-    })
-    const earlyWonRaw = JSON.stringify({
-      id: "evt_app_dispute_won_early",
-      type: "charge.dispute.closed",
-      data: {
-        object: {
-          id: "dp_app_missing_1",
-          payment_intent: "pi_app_1",
-          amount: 500,
-          status: "won"
-        }
-      }
-    })
-    const earlyWonRes = try callApp("/api/webhooks/stripe", {
-      rawBody: earlyWonRaw,
-      headers: stripeWebhookHeaders(earlyWonRaw, TEST_STRIPE_WEBHOOK_SECRET, now)
-    })
-    const earlyWonBody = try readJson(earlyWonRes)
+    const predHistoryRes = try callApp("/api/markets/predictions/seed-market-1/history?limit=20")
+    const predTradesRes = try callApp("/api/markets/predictions/seed-market-1/trades?limit=20")
+    const predHistory = (try readJson(predHistoryRes)).history as ReadonlyArray<Record<string, unknown>>
+    const predTrades = (try readJson(predTradesRes)).trades as ReadonlyArray<Record<string, unknown>>
     try check(() => assert.deepStrictEqual(
-      [checkoutWhRes.status, earlyWonRes.status, earlyWonBody.code],
-      [200, 500, "STRIPE_RETRYABLE_DISPUTE_DEBIT_MISSING"]
+      [predHistoryRes.status, predTradesRes.status, predHistory.length >= 1, predTrades.length >= 1],
+      [200, 200, true, true]
+    ))
+
+    const perpPreviewRes = try callApp("/api/markets/perp/preview", {
+      cookie: alice.cookie,
+      json: { ticker: "XTRPC", side: "long", collateralCents: 1000, leverage: 2 }
+    })
+    const perpPreviewBody = try readJson(perpPreviewRes)
+    const perpPreview = perpPreviewBody.preview as Record<string, unknown>
+    try check(() => assert.strictEqual(perpPreviewRes.status, 200))
+    try check(() => assert.deepStrictEqual(
+      [perpPreview.ticker, perpPreview.action, Number(perpPreview.executionPriceCents) >= Number(perpPreview.preMarkPriceCents)],
+      ["XTRPC", "open", true]
+    ))
+
+    const econBefore = try readJson(try callApp("/api/economy/me", { cookie: alice.cookie }))
+    const balanceBeforePerp = Number((econBefore.economy as Record<string, unknown>).balanceCents)
+    const sellPredRes = try callApp("/api/markets/predictions/seed-market-1/sell", {
+      cookie: alice.cookie,
+      json: { side: "yes", shareUnits: 100 }
+    })
+    try check(() => assert.strictEqual(sellPredRes.status, 200))
+    const econAfterPredSell = try readJson(try callApp("/api/economy/me", { cookie: alice.cookie }))
+    const balanceBeforePerpAfterSell = Number((econAfterPredSell.economy as Record<string, unknown>).balanceCents)
+    try check(() => assert.ok(balanceBeforePerpAfterSell > balanceBeforePerp))
+    const roundTripOpenRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: alice.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 3, maxSlippageBps: 500 }
+    })
+    const roundTripOpen = try readJson(roundTripOpenRes)
+    try check(() => assert.strictEqual(roundTripOpenRes.status, 201))
+    try check(() => assert.strictEqual(roundTripOpen.action, "open"))
+    const rtPosId = String(roundTripOpen.positionId ?? "")
+
+    const partialCloseRes = try callApp(`/api/markets/perp/positions/${encodeURIComponent(rtPosId)}/close`, {
+      cookie: alice.cookie,
+      json: { closePct: 50, maxSlippageBps: 500 }
+    })
+    const partialClose = try readJson(partialCloseRes)
+    try check(() => assert.deepStrictEqual(
+      [partialCloseRes.status, partialClose.isFullClose, Number(partialClose.remainingSizeCents) > 0],
+      [200, false, true]
+    ))
+
+    const finalCloseRes = try callApp(`/api/markets/perp/positions/${encodeURIComponent(rtPosId)}/close`, {
+      cookie: alice.cookie,
+      json: {}
+    })
+    const finalClose = try readJson(finalCloseRes)
+    try check(() => assert.deepStrictEqual(
+      [finalCloseRes.status, finalClose.isFullClose, Number(finalClose.remainingSizeCents)],
+      [200, true, 0]
+    ))
+    try check(() => assert.ok(Number(finalClose.balanceAfterCents) < balanceBeforePerpAfterSell))
+
+    const perpHistoryRes = try callApp("/api/markets/perp/XTRPC/history?range=1D&limit=20")
+    const perpTradesRes = try callApp("/api/markets/perp/XTRPC/trades?limit=20")
+    const closedPosRes = try callApp("/api/markets/positions/closed?limit=20", { cookie: alice.cookie })
+    const pnlHistRes = try callApp("/api/economy/me/pnl-history?range=ALL", { cookie: alice.cookie })
+    const aliceTradesRes = try callApp("/api/users/parity_alice/trades?limit=20")
+    const perpHistJson = try readJson(perpHistoryRes)
+    const perpHistory = perpHistJson.history as ReadonlyArray<Record<string, unknown>>
+    const perpPoints = perpHistJson.points as ReadonlyArray<Record<string, unknown>>
+    const perpTrades = (try readJson(perpTradesRes)).trades as ReadonlyArray<Record<string, unknown>>
+    const closedPos = try readJson(closedPosRes)
+    const closedPerps = closedPos.perpPositions as ReadonlyArray<Record<string, unknown>>
+    const closedItems = closedPos.items as ReadonlyArray<Record<string, unknown>>
+    const pnlPoints = (try readJson(pnlHistRes)).points as ReadonlyArray<Record<string, unknown>>
+    const aliceTrades = (try readJson(aliceTradesRes)).trades as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.deepStrictEqual(
+      [
+        perpHistoryRes.status,
+        perpTradesRes.status,
+        closedPosRes.status,
+        pnlHistRes.status,
+        aliceTradesRes.status,
+        perpHistory.length >= 2 && perpPoints.length >= 2,
+        perpTrades.length >= 2,
+        closedPerps.length >= 1 && closedItems.length >= 1,
+        pnlPoints.length >= 2,
+        aliceTrades.length >= 3
+      ],
+      [200, 200, 200, 200, 200, true, true, true, true, true]
+    ))
+
+    const lbPlayersRes = try callApp("/api/leaderboard?scope=players&metric=volume&page=1&pageSize=2", { cookie: alice.cookie })
+    const lbPlayers = try readJson(lbPlayersRes)
+    const lbCharsRes = try callApp("/api/leaderboard?scope=characters&metric=net_profit&page=1&pageSize=5")
+    const lbChars = try readJson(lbCharsRes)
+    const lbFilteredRes = try callApp("/api/leaderboard?filter=traders&timeframe=all&page=1&pageSize=10")
+    const lbFiltered = try readJson(lbFilteredRes)
+    const lbMeRes = try callApp("/api/leaderboard/me?metric=volume&pageSize=2", { cookie: alice.cookie })
+    const lbMe = try readJson(lbMeRes)
+    const lbMeFilteredRes = try callApp("/api/leaderboard/me?filter=traders&timeframe=all", { cookie: alice.cookie })
+    const lbMeFiltered = try readJson(lbMeFilteredRes)
+    try check(() => assert.deepStrictEqual(
+      {
+        statuses: [lbPlayersRes.status, lbCharsRes.status, lbFilteredRes.status, lbMeRes.status, lbMeFilteredRes.status],
+        scopePlayers: lbPlayers.scope,
+        metricPlayers: lbPlayers.metric,
+        hasAlias: Array.isArray(lbPlayers.leaderboard) && Array.isArray(lbPlayers.entries),
+        pageSize: lbPlayers.pageSize,
+        hasCurrentUser: lbPlayers.currentUser !== null,
+        charsCount: (lbChars.entries as ReadonlyArray<unknown>).length,
+        filteredTradersCount: (lbFiltered.entries as ReadonlyArray<unknown>).length,
+        hasMyRank: lbMe.position !== null && typeof lbMe.rank === "number",
+        hasFilteredRank: typeof lbMeFiltered.rank === "number"
+      },
+      {
+        statuses: [200, 200, 200, 200, 200],
+        scopePlayers: "players",
+        metricPlayers: "volume",
+        hasAlias: true,
+        pageSize: 2,
+        hasCurrentUser: true,
+        charsCount: 5,
+        filteredTradersCount: 3,
+        hasMyRank: true,
+        hasFilteredRank: true
+      }
+    ))
+
+    const worldStatusRes = try callApp("/api/world/status")
+    const worldStatus = try readJson(worldStatusRes)
+    const userSearchRes = try callApp("/api/users/search?q=parity")
+    const userSearch = try readJson(userSearchRes)
+    try check(() => assert.deepStrictEqual(
+      [
+        worldStatusRes.status,
+        typeof worldStatus.currentDay === "number" && Number(worldStatus.activeMarketsCount) > 0 && Number(worldStatus.activeActorsCount) > 0,
+        userSearchRes.status,
+        (userSearch.items as ReadonlyArray<unknown>).length >= 2
+      ],
+      [200, true, 200, true]
     ))
 
     const badPatch = try callApp("/api/users/me", { method: "PATCH", cookie: alice.cookie, json: {} })
@@ -508,12 +635,29 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       }
     ))
 
-    const p1 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 1" } })
+    const p1 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 1 #wave3alpha" } })
+    const p1Body = try readJson(p1)
+    const trendingTagRes = try callApp("/api/trending/wave3alpha")
+    const trendingTag = try readJson(trendingTagRes)
+    try check(() => assert.deepStrictEqual(
+      [trendingTagRes.status, (trendingTag.posts as ReadonlyArray<unknown>).length >= 1],
+      [200, true]
+    ))
     try TestClock.adjust("2 seconds")
     const p2 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 2" } })
     try TestClock.adjust("2 seconds")
     const p3 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 3" } })
-    try check(() => assert.deepStrictEqual([p1.status, p2.status, p3.status], [201, 201, 201]))
+    try TestClock.adjust("2 seconds")
+    const r1 = try callApp("/api/posts", {
+      cookie: alice.cookie,
+      json: { content: "Parity reply 1", replyToPostId: String(p1Body.id ?? "") }
+    })
+    try check(() => assert.deepStrictEqual([p1.status, p2.status, p3.status, r1.status], [201, 201, 201, 201]))
+
+    const repliesOnlyRes = try callApp("/api/posts?authorHandle=parity_alice&filter=replies")
+    const repliesOnlyBody = try readJson(repliesOnlyRes)
+    const repliesOnlyItems = repliesOnlyBody.items as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.deepStrictEqual([repliesOnlyRes.status, repliesOnlyItems.length], [200, 1]))
 
     const page1Res = try callApp("/api/users/parity_alice?limit=2")
     const page1 = try readJson(page1Res)
@@ -528,6 +672,10 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     try check(() => assert.strictEqual(page2Posts.length, 1))
     try check(() => assert.ok(!page1Ids.has(String(page2Posts[0]?.id ?? ""))))
 
+    const npcDmRes = try callApp("/api/chats/direct", { cookie: bob.cookie, json: { targetHandleOrId: "ailonmusk" } })
+    const npcDmBody = try readJson(npcDmRes)
+    try check(() => assert.deepStrictEqual([npcDmRes.status, npcDmBody.code], [403, "NpcDmDisallowed"]))
+
     const dmRes = try callApp("/api/chats/direct", { cookie: alice.cookie, json: { targetHandleOrId: "parity_bob" } })
     const dmBody = try readJson(dmRes)
     const dmChatId = String((dmBody.chat as Record<string, unknown>).id ?? "")
@@ -536,16 +684,144 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
       json: { content: "Single bucket check" }
     })
     try check(() => assert.strictEqual(dmMsgRes.status, 201))
+    const dmMsgBody = try readJson(dmMsgRes)
+    const dmMsgId = String(dmMsgBody.id ?? "")
+
+    const readChatRes = try callApp(`/api/chats/${encodeURIComponent(dmChatId)}/read`, { method: "POST", cookie: bob.cookie })
+    const readChatBody = try readJson(readChatRes)
+    try check(() => assert.deepStrictEqual([readChatRes.status, readChatBody.unreadCount], [200, 0]))
+
+    const reactAddRes = try callApp(`/api/chats/${encodeURIComponent(dmChatId)}/messages/${encodeURIComponent(dmMsgId)}/reactions`, {
+      method: "POST",
+      cookie: bob.cookie,
+      json: { emoji: "🔥" }
+    })
+    const reactAdd = try readJson(reactAddRes)
+    const reactDelRes = try callApp(`/api/chats/${encodeURIComponent(dmChatId)}/messages/${encodeURIComponent(dmMsgId)}/reactions?emoji=${encodeURIComponent("🔥")}`, {
+      method: "DELETE",
+      cookie: bob.cookie
+    })
+    const reactDel = try readJson(reactDelRes)
+    try check(() => assert.deepStrictEqual(
+      [reactAddRes.status, reactAdd.added, reactDelRes.status, reactDel.added],
+      [200, true, 200, false]
+    ))
+
+    const groupRes = try callApp("/api/chats/group", {
+      cookie: alice.cookie,
+      json: { title: "Alpha Desk", memberHandles: ["parity_charlie"] }
+    })
+    try check(() => assert.strictEqual(groupRes.status, 201))
+    const groupChatId = String(((try readJson(groupRes)).chat as Record<string, unknown>).id ?? "")
+    const charlieInvitesRes = try callApp("/api/chats/invites?kind=user_group", { cookie: charlie.cookie })
+    const charlieInvites = (try readJson(charlieInvitesRes)).invites as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.strictEqual(charlieInvitesRes.status, 200))
+    try check(() => assert.strictEqual(charlieInvites.length, 1))
+    const inviteId = String(charlieInvites[0]?.id ?? "")
+    const acceptInviteRes = try callApp(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
+      cookie: charlie.cookie,
+      json: { accept: true }
+    })
+    try check(() => assert.strictEqual(acceptInviteRes.status, 200))
+
+    const renameRes = try callApp(`/api/chats/${encodeURIComponent(groupChatId)}`, {
+      method: "PATCH",
+      cookie: alice.cookie,
+      json: { title: "Renamed Desk" }
+    })
+    const renameBody = try readJson(renameRes)
+    const transferRes = try callApp(`/api/chats/${encodeURIComponent(groupChatId)}/transfer`, {
+      cookie: alice.cookie,
+      json: { newOwnerHandleOrId: "parity_charlie" }
+    })
+    const removeMemberRes = try callApp(`/api/chats/${encodeURIComponent(groupChatId)}/members/parity_alice`, {
+      method: "DELETE",
+      cookie: charlie.cookie
+    })
+    const deleteGroupRes = try callApp(`/api/chats/${encodeURIComponent(groupChatId)}`, {
+      method: "DELETE",
+      cookie: charlie.cookie
+    })
+    try check(() => assert.deepStrictEqual(
+      [renameRes.status, (renameBody.chat as Record<string, unknown>).title, transferRes.status, removeMemberRes.status, deleteGroupRes.status],
+      [200, "Renamed Desk", 200, 200, 200]
+    ))
+
+    const reportRes = try callApp("/api/reports", {
+      cookie: alice.cookie,
+      json: { targetKind: "account", targetId: "parity_bob", reason: "Spam bot behavior", category: "spam" }
+    })
+    const reportBody = try readJson(reportRes)
+    const reportId = String(reportBody.id ?? "")
+    try check(() => assert.deepStrictEqual([reportRes.status, reportBody.category], [201, "Spam"]))
+
+    const clearNotifRes = try callApp("/api/notifications", { method: "DELETE", cookie: charlie.cookie })
+    const clearNotifBody = try readJson(clearNotifRes)
+    try check(() => assert.deepStrictEqual([clearNotifRes.status, clearNotifBody.unreadCount], [200, 0]))
 
     const store = try Store
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE feed_accounts SET is_admin = true WHERE account_id = $1", [aliceId])
+    )
+    const adminReportsRes = try callApp("/api/admin/reports?status=open", { cookie: alice.cookie })
+    const adminReports = (try readJson(adminReportsRes)).reports as ReadonlyArray<Record<string, unknown>>
+    const patchReportRes = try callApp(`/api/admin/reports/${encodeURIComponent(reportId)}`, {
+      method: "PATCH",
+      cookie: alice.cookie,
+      json: { status: "open" }
+    })
+    const resolveReportRes = try callApp(`/api/admin/reports/${encodeURIComponent(reportId)}/resolve`, {
+      cookie: alice.cookie,
+      json: { status: "reviewed" }
+    })
+    const adminUsersRes = try callApp("/api/admin/users?q=parity", { cookie: alice.cookie })
+    const adminUsers = (try readJson(adminUsersRes)).users as ReadonlyArray<Record<string, unknown>>
+    const adminFactCreateRes = try callApp("/api/admin/world-facts", {
+      cookie: alice.cookie,
+      json: { factText: "Wave 3 integrated world fact", category: "markets" }
+    })
+    const factId = String((try readJson(adminFactCreateRes)).id ?? "")
+    const adminFactsListRes = try callApp("/api/admin/world-facts", { cookie: alice.cookie })
+    const adminFacts = (try readJson(adminFactsListRes)).facts as ReadonlyArray<Record<string, unknown>>
+    const adminFactDelRes = try callApp(`/api/admin/world-facts/${encodeURIComponent(factId)}`, {
+      method: "DELETE",
+      cookie: alice.cookie
+    })
+    const cancelMarketRes = try callApp("/api/admin/markets/seed-market-2/cancel", {
+      method: "POST",
+      cookie: alice.cookie
+    })
+    const cancelMarketBody = try readJson(cancelMarketRes)
+    try check(() => assert.deepStrictEqual(
+      [
+        adminReportsRes.status,
+        adminReports.some((r) => String(r.id) === reportId),
+        patchReportRes.status,
+        resolveReportRes.status,
+        adminUsersRes.status,
+        adminUsers.length >= 2,
+        adminFactCreateRes.status,
+        adminFactsListRes.status,
+        adminFacts.some((f) => String(f.id) === factId),
+        adminFactDelRes.status,
+        cancelMarketRes.status,
+        cancelMarketBody.status
+      ],
+      [200, true, 200, 200, 200, true, 201, 200, true, 200, 200, "cancelled"]
+    ))
+
     const rlRows = try store.transaction((tx: Tx) =>
       tx.query(
-        "SELECT scope_key, count FROM feed_rate_limits WHERE scope_key = $1 OR scope_key = $2 ORDER BY scope_key ASC",
-        [`${aliceId}:dm`, `${aliceId}:post`]
+        "SELECT scope_key, count FROM feed_rate_limits WHERE scope_key IN ($1, $2, $3) ORDER BY scope_key ASC",
+        [`${aliceId}:dm`, `${aliceId}:post`, `${aliceId}:trade`]
       )
     )
     const countsByKey = Object.fromEntries(rlRows.map((r) => [String(r.scope_key), toInt(r.count)]))
-    try check(() => assert.deepStrictEqual(countsByKey, { [`${aliceId}:dm`]: 1, [`${aliceId}:post`]: 3 }))
+    try check(() => assert.deepStrictEqual(countsByKey, {
+      [`${aliceId}:dm`]: 1,
+      [`${aliceId}:post`]: 4,
+      [`${aliceId}:trade`]: 9
+    }))
 
     const anonAbort = makeAbortController()
     const aliceAbort = makeAbortController()
@@ -564,9 +840,36 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
     try Effect.yieldNow
 
     const blockRes = try callApp("/api/users/parity_bob/block", { method: "POST", cookie: alice.cookie })
-    try check(() => assert.strictEqual(blockRes.status, 200))
+    const muteRes = try callApp("/api/users/parity_charlie/mute", { method: "POST", cookie: alice.cookie })
+    try check(() => assert.deepStrictEqual([blockRes.status, muteRes.status], [200, 200]))
 
-    const privateDmForBob = try callApp("/api/chats/direct", { cookie: bob.cookie, json: { targetHandleOrId: "ailonmusk" } })
+    const blocksListRes = try callApp("/api/moderation/blocks", { cookie: alice.cookie })
+    const mutesListRes = try callApp("/api/moderation/mutes", { cookie: alice.cookie })
+    const blocksItems = (try readJson(blocksListRes)).items as ReadonlyArray<Record<string, unknown>>
+    const mutesItems = (try readJson(mutesListRes)).items as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.deepStrictEqual(
+      [blocksListRes.status, blocksItems.length, mutesListRes.status, mutesItems.length],
+      [200, 1, 200, 1]
+    ))
+
+    const bobOpenPos = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: bob.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 2 }
+    })
+    try check(() => assert.strictEqual(bobOpenPos.status, 201))
+    const blockedProfileRes = try callApp("/api/users/parity_bob", { cookie: alice.cookie })
+    const blockedProfile = try readJson(blockedProfileRes)
+    const blockedPositions = blockedProfile.positions as Record<string, unknown>
+    try check(() => assert.deepStrictEqual(
+      [
+        blockedProfileRes.status,
+        (blockedPositions.perpPositions as ReadonlyArray<unknown>).length,
+        (blockedPositions.predictionPositions as ReadonlyArray<unknown>).length
+      ],
+      [200, 0, 0]
+    ))
+
+    const privateDmForBob = try callApp("/api/chats/direct", { cookie: bob.cookie, json: { targetHandleOrId: "parity_charlie" } })
     const bobDmId = String(((try readJson(privateDmForBob)).chat as Record<string, unknown>).id ?? "")
     try callApp(`/api/chats/${encodeURIComponent(bobDmId)}/messages`, {
       cookie: bob.cookie,
@@ -615,6 +918,25 @@ it.effect('REST parity: Turnstile flags, strict leverage, idempotency, Stripe 50
         aliceHasPerpOpen: true,
         aliceHasPerpClose: true
       }
+    ))
+
+    try TestClock.adjust("11 minutes")
+    const stalePhoneChangeRes = try callApp("/api/auth/phone/change/start", {
+      cookie: alice.cookie,
+      json: { newPhoneE164: "+14155550188" }
+    })
+    const stalePhoneChangeBody = try readJson(stalePhoneChangeRes)
+    try check(() => assert.deepStrictEqual(
+      [stalePhoneChangeRes.status, stalePhoneChangeBody.code],
+      [403, "old_phone_verification_required"]
+    ))
+
+    const logoutRes = try callApp("/api/auth/logout", { method: "POST", cookie: alice.cookie })
+    const reusedCookieEconomyRes = try callApp("/api/economy/me", { cookie: alice.cookie })
+    const reusedCookieMeBody = try readJson(try callApp("/api/auth/me", { cookie: alice.cookie }))
+    try check(() => assert.deepStrictEqual(
+      [logoutRes.status, reusedCookieEconomyRes.status, reusedCookieMeBody.authenticated],
+      [200, 401, false]
     ))
   }
 }, 180_000)
