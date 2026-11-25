@@ -1,12 +1,12 @@
 import type { ComponentProps, ReactNode } from "react";
-import { Bell, Compass, HelpCircle, LineChart, MessageSquare, Settings, TrendingUp, Trophy, User } from "lucide-react";
+import { Bell, Compass, HelpCircle, LineChart, MessageSquare, Settings, TrendingUp, Trophy, User, Wallet } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { Badge } from "./Badge.tsx";
 import { BrandMark, HouseIcon } from "./BrandMark.tsx";
 import { Button } from "./Button.tsx";
 import type { UiMode } from "./ModeToggle.tsx";
 
-export type AppNavRoute = "Home" | "Explore" | "Markets" | "Leaderboard" | "Chats" | "Notifications" | "Profile" | "Settings" | "HowToPlay";
+export type AppNavRoute = "Home" | "Explore" | "Markets" | "Wallet" | "Leaderboard" | "Chats" | "Notifications" | "Profile" | "Settings" | "HowToPlay";
 
 export type AppShellLayout = "social" | "wide";
 
@@ -84,6 +84,7 @@ const navConfig: { id: AppNavRoute; label: string; href: string; icon?: NavIcon;
   { id: "Home", label: "Home", href: "/", mobile: true },
   { id: "Explore", label: "Explore", href: "/explore", icon: Compass, mobile: true },
   { id: "Markets", label: "Markets", href: "/markets", icon: LineChart, gameOnly: true, mobile: true },
+  { id: "Wallet", label: "Wallet", href: "/wallet", icon: Wallet, gameOnly: true },
   { id: "Leaderboard", label: "Leaderboard", href: "/leaderboard", icon: Trophy, gameOnly: true },
   { id: "Chats", label: "Chats", href: "/chats", icon: MessageSquare, authOnly: true, mobile: true },
   { id: "Notifications", label: "Notifications", href: "/notifications", icon: Bell, authOnly: true, mobile: true },
@@ -187,7 +188,7 @@ function DefaultTrendingRail({
   readonly onSelectTrending?: (id: string) => void;
 }) {
   return (
-    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 text-card-foreground">
+    <section className="flex flex-col gap-2 border-b border-border bg-background pb-4 text-foreground">
       <h2 className="flex items-center gap-2 text-base font-bold text-foreground">
         <TrendingUp aria-hidden className="size-4 text-primary" />
         {isSocial ? "Trending on Feed" : "Trending & Movers"}
@@ -365,7 +366,7 @@ export function AppShell({
         </div>
 
         {!isWide ? (
-          <aside aria-label="Trending" className="sticky top-0 hidden h-screen w-[350px] shrink-0 flex-col gap-4 overflow-y-auto px-5 py-3 xl:flex">
+          <aside aria-label="Trending" className="sticky top-0 hidden h-screen w-[350px] shrink-0 flex-col gap-4 overflow-y-auto px-5 py-3 [scrollbar-width:none] xl:flex [&::-webkit-scrollbar]:hidden">
             {resolvedRightRail ?? (
               <DefaultTrendingRail
                 isSocial={isSocial}

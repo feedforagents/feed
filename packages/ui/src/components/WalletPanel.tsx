@@ -5,7 +5,6 @@ import { formatPts } from "../lib/hosts.ts";
 import { Alert } from "./Alert.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardHeader, CardTitle } from "./Card.tsx";
 import {
   LightweightChartBase,
   type LightweightChartPoint,
@@ -72,6 +71,8 @@ export interface WalletClosedPosition {
   realizedPnlPct: number;
   /** Human-readable close timestamp label. */
   closedAtLabel: string;
+  /** Optional explicit settlement outcome (`won`, `lost`, `even`, or `cancelled`). */
+  outcome?: "won" | "lost" | "even" | "cancelled";
 }
 
 export interface WalletLedgerEntry {
@@ -126,29 +127,27 @@ function WalletHeroMetrics({ summary }: { summary: WalletSummary }) {
   const profitPositive = summary.netProfitPts >= 0;
   return (
     <div className="flex flex-col gap-3">
-      <Card className="bg-muted/30 p-5">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium tracking-wide text-muted-foreground">Total Portfolio Value</span>
-          <span className="font-mono text-3xl font-bold tracking-tight text-foreground tabular-nums">
-            {formatPts(summary.equityPts)}
-          </span>
-        </div>
-      </Card>
+      <div className="flex flex-col gap-1 rounded-xl border border-border bg-muted/20 p-5">
+        <span className="text-xs font-medium tracking-wide text-muted-foreground">Total Portfolio Value</span>
+        <span className="font-mono text-3xl font-bold tracking-tight text-foreground tabular-nums">
+          {formatPts(summary.equityPts)}
+        </span>
+      </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Card className="p-4">
+        <div className="flex flex-col rounded-lg border border-border bg-background p-4">
           <span className="text-xs text-muted-foreground">Cash (Spendable)</span>
           <span className="mt-1 font-mono text-lg font-semibold text-foreground tabular-nums">
             {formatPts(summary.cashPts)}
           </span>
-        </Card>
-        <Card className="p-4">
+        </div>
+        <div className="flex flex-col rounded-lg border border-border bg-background p-4">
           <span className="text-xs text-muted-foreground">Open Positions</span>
           <span className="mt-1 font-mono text-lg font-semibold text-foreground tabular-nums">
             {formatPts(summary.openPositionsValuePts)}
           </span>
-        </Card>
-        <Card className="p-4">
+        </div>
+        <div className="flex flex-col rounded-lg border border-border bg-background p-4">
           <span className="text-xs text-muted-foreground">Net Profit</span>
           <div className="mt-1 flex flex-wrap items-baseline gap-1.5 font-mono tabular-nums">
             <span className={cn("text-lg font-semibold", profitPositive ? "text-ok" : "text-destructive")}>
@@ -160,13 +159,13 @@ function WalletHeroMetrics({ summary }: { summary: WalletSummary }) {
               </span>
             ) : null}
           </div>
-        </Card>
-        <Card className="p-4">
+        </div>
+        <div className="flex flex-col rounded-lg border border-border bg-background p-4">
           <span className="text-xs text-muted-foreground">Fees Paid</span>
           <span className="mt-1 font-mono text-lg font-semibold text-muted-foreground tabular-nums">
             {formatPts(summary.feesPaidPts)}
           </span>
-        </Card>
+        </div>
       </div>
     </div>
   );
@@ -184,12 +183,12 @@ function OpenPositionsSection({
   submitting: boolean;
 }) {
   return (
-    <Card className="gap-3 p-4">
-      <CardHeader className="flex-row items-center justify-between gap-2">
-        <CardTitle className="text-sm">Open Positions</CardTitle>
+    <section className="flex flex-col gap-3 border-t border-border bg-background pt-4 xl:border-t-0 xl:pt-0">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-foreground">Open Positions</h2>
         <Badge variant="secondary" className="font-mono tabular-nums">{positions.length}</Badge>
-      </CardHeader>
-      <CardContent className="gap-3">
+      </div>
+      <div className="flex flex-col divide-y divide-border">
         {positions.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No open positions.</p>
         ) : (
@@ -198,7 +197,7 @@ function OpenPositionsSection({
             const positive = pos.pnlPts >= 0;
             const nearLiq = pos.liquidationDistancePct !== undefined && pos.liquidationDistancePct < 5;
             return (
-              <div key={pos.id} className="flex flex-col gap-2 rounded-lg border border-border bg-background p-3">
+              <div key={pos.id} className="flex flex-col gap-2 bg-background py-3 first:pt-0">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                     <Badge variant={bullish ? "ok" : "destructive"} className="font-mono">{pos.side}</Badge>
@@ -254,8 +253,8 @@ function OpenPositionsSection({
             );
           })
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
@@ -270,8 +269,8 @@ function ClosedPositionsSection({
   const [page, setPage] = useState(1);
 
   const filtered = useMemo(() => {
-    if (filter === "won") return positions.filter((p) => p.realizedPnlPts > 0);
-    if (filter === "lost") return positions.filter((p) => p.realizedPnlPts <= 0);
+    if (filter === "won") return positions.filter((p) => p.outcome === "won" || (p.outcome === undefined && p.realizedPnlPts > 0));
+    if (filter === "lost") return positions.filter((p) => p.outcome === "lost" || (p.outcome === undefined && p.realizedPnlPts < 0));
     return positions;
   }, [positions, filter]);
 
@@ -285,10 +284,10 @@ function ClosedPositionsSection({
   };
 
   return (
-    <Card className="gap-3 p-4">
-      <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-        <CardTitle className="text-sm">Closed Positions</CardTitle>
-        <div role="group" aria-label="Filter closed positions" className="inline-flex items-center gap-1 rounded-md border border-border bg-muted p-0.5">
+    <section className="flex flex-col gap-3 border-t border-border bg-background pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-foreground">Closed Positions</h2>
+        <div role="group" aria-label="Filter closed positions" className="inline-flex items-center gap-0.5 rounded-md border border-border bg-muted p-0.5">
           {(["all", "won", "lost"] as const).map((option) => (
             <button
               key={option}
@@ -298,32 +297,43 @@ function ClosedPositionsSection({
               className={cn(
                 focusRing,
                 "rounded-sm px-2.5 py-1 text-xs font-medium capitalize transition-colors duration-fast",
-                filter === option ? "bg-feed-brand text-feed-brand-foreground" : "text-muted-foreground hover:text-foreground",
+                filter === option
+                  ? "bg-background text-foreground shadow-sm ring-1 ring-border"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               {option}
             </button>
           ))}
         </div>
-      </CardHeader>
+      </div>
 
-      <CardContent className="gap-2">
+      <div className="flex flex-col gap-2">
         {slice.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">No closed positions in this filter.</p>
         ) : (
           <ul className="divide-y divide-border">
             {slice.map((pos) => {
-              const won = pos.realizedPnlPts > 0;
+              const isCancelled = pos.outcome === "cancelled";
+              const isEven = !isCancelled && (pos.outcome === "even" || pos.realizedPnlPts === 0);
+              const won = !isCancelled && !isEven && (pos.outcome === "won" || pos.realizedPnlPts > 0);
+              const badgeVariant = isCancelled || isEven ? "secondary" : won ? "ok" : "destructive";
+              const pnlToneClass = isCancelled || isEven ? "text-muted-foreground" : won ? "text-ok" : "text-destructive";
               return (
                 <li key={pos.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                   <div className="flex min-w-0 flex-col gap-0.5">
-                    <div className="flex items-center gap-1.5">
-                      <Badge variant={won ? "ok" : "destructive"} className="font-mono">{pos.side}</Badge>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant={badgeVariant} className="font-mono">{pos.side}</Badge>
+                      {isCancelled ? (
+                        <Badge variant="secondary">Cancelled</Badge>
+                      ) : isEven ? (
+                        <Badge variant="secondary">Even</Badge>
+                      ) : null}
                       <span className="truncate font-medium text-foreground">{pos.marketLabel}</span>
                     </div>
                     <span className="font-mono text-xs text-muted-foreground">{pos.closedAtLabel}</span>
                   </div>
-                  <div className={cn("shrink-0 text-right font-mono text-xs font-bold tabular-nums", won ? "text-ok" : "text-destructive")}>
+                  <div className={cn("shrink-0 text-right font-mono text-xs font-bold tabular-nums", pnlToneClass)}>
                     <div>{formatPts(pos.realizedPnlPts, true)}</div>
                     <div>{formatSignedPct(pos.realizedPnlPct)}</div>
                   </div>
@@ -348,8 +358,8 @@ function ClosedPositionsSection({
             </Button>
           </div>
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
@@ -406,7 +416,7 @@ export function WalletPanel({
 
         <WalletHeroMetrics summary={summary} />
 
-        <Card className="gap-4 p-4 sm:p-5">
+        <section className="flex flex-col gap-4 border-t border-border bg-background pt-4">
           <LightweightChartBase
             ariaLabel="Portfolio profit and loss history"
             series={pnlSeries}
@@ -417,12 +427,10 @@ export function WalletPanel({
             height={240}
             emptyMessage="Trade a market to start tracking P&L history."
           />
-        </Card>
+        </section>
 
-        <Card className="overflow-hidden">
-          <CardHeader className="border-b border-border px-4 py-3">
-            <CardTitle className="text-sm">Point Ledger</CardTitle>
-          </CardHeader>
+        <section className="flex flex-col gap-2 border-t border-border bg-background pt-4">
+          <h2 className="text-sm font-semibold text-foreground">Point Ledger</h2>
           <Table label="Point ledger">
             <TableCaption visuallyHidden>Chronological ledger of virtual points debits, credits, and resulting balances</TableCaption>
             <TableHeader>
@@ -463,10 +471,10 @@ export function WalletPanel({
               )}
             </TableBody>
           </Table>
-        </Card>
+        </section>
       </div>
 
-      <aside aria-label="Positions summary" className="flex w-full shrink-0 flex-col gap-6 xl:sticky xl:top-4 xl:w-96">
+      <aside aria-label="Positions summary" className="flex w-full shrink-0 flex-col gap-6 xl:sticky xl:top-4 xl:w-96 xl:border-l xl:border-border xl:pl-6">
         <OpenPositionsSection
           positions={openPositions}
           onClosePosition={onClosePosition}

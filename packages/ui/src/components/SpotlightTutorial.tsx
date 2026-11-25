@@ -110,7 +110,7 @@ export function SpotlightTutorial({
           </div>
         </div>
 
-        <DialogDescription className="text-sm leading-relaxed text-card-foreground">
+        <DialogDescription className="text-sm leading-relaxed text-foreground">
           {current.description}
         </DialogDescription>
 
@@ -136,7 +136,7 @@ export function SpotlightTutorial({
             <ChevronLeft aria-hidden className="size-4" />
             Back
           </Button>
-          <Button variant="primary" size="sm" shape="pill" onClick={handleNext}>
+          <Button variant="primary" size="sm" onClick={handleNext}>
             {isLast ? "Done" : "Next"}
             {!isLast ? <ChevronRight aria-hidden className="size-4" /> : null}
           </Button>

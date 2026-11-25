@@ -143,7 +143,7 @@ function PinnedCurrentUserBar({
         ) : null}
       </div>
       {onJumpToCurrentUser ? (
-        <Button type="button" variant="outline" size="sm" shape="pill" disabled={disabled} onClick={() => !disabled && onJumpToCurrentUser()}>
+        <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => !disabled && onJumpToCurrentUser()}>
           Jump to my rank
         </Button>
       ) : null}
@@ -200,7 +200,7 @@ export function LeaderboardTable({
     <div
       aria-disabled={disabled || undefined}
       onClick={disabled ? undefined : onClick}
-      className={cn("overflow-hidden rounded-xl border border-border bg-background text-foreground", className)}
+      className={cn("overflow-hidden bg-background text-foreground", className)}
       {...props}
     >
       {onScopeChange ? (
@@ -372,7 +372,6 @@ export function LeaderboardTable({
               type="button"
               variant="outline"
               size="sm"
-              shape="pill"
               disabled={disabled || currentPage <= 1}
               onClick={() => !disabled && onPageChange(currentPage - 1)}
             >
@@ -382,7 +381,6 @@ export function LeaderboardTable({
               type="button"
               variant="outline"
               size="sm"
-              shape="pill"
               disabled={disabled || currentPage >= totalPages}
               onClick={() => !disabled && onPageChange(currentPage + 1)}
             >

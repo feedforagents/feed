@@ -5,6 +5,7 @@ import {
   ColorType,
   CrosshairMode,
   type DeepPartial,
+  type ISeriesApi,
   LineSeries,
   LineStyle,
   type Time,
@@ -25,7 +26,7 @@ export interface LightweightChartPoint {
   value: number;
 }
 
-export type LightweightChartTone = "ok" | "destructive" | "brand" | "primary" | "info";
+export type LightweightChartTone = "ok" | "destructive" | "brand" | "primary" | "info" | "neutral";
 
 export interface LightweightChartPriceLine {
   /** Horizontal price level for the dashed reference line. */
@@ -118,6 +119,7 @@ const TONE_VARS: Record<LightweightChartTone, string> = {
   brand: "--feed-brand",
   primary: "--primary",
   info: "--info",
+  neutral: "--muted-foreground",
 };
 
 interface ResolvedPalette {
@@ -186,6 +188,7 @@ function resolvePalette(root: HTMLElement): ResolvedPalette {
       brand: toneEntry("brand"),
       primary: toneEntry("primary"),
       info: toneEntry("info"),
+      neutral: toneEntry("neutral"),
     },
   };
 }
@@ -341,76 +344,103 @@ export function LightweightChartBase({
           ? () => ({ priceRange: { minValue, maxValue } })
           : undefined;
 
-      const mountedSeries: {
-        spec: LightweightChartSeriesSpec;
-        api: ReturnType<typeof chart.addSeries>;
-      }[] = [];
+      type AreaSpec = Extract<LightweightChartSeriesSpec, { kind: "area" }>;
+      type BaselineSpec = Extract<LightweightChartSeriesSpec, { kind: "baseline" }>;
+      type LineSpec = Extract<LightweightChartSeriesSpec, { kind: "line" }>;
+
+      const buildAreaOptions = (spec: AreaSpec, activePalette: ResolvedPalette) => {
+        const colors = activePalette.tones[spec.tone];
+        return {
+          lineColor: colors.solid,
+          topColor: spec.invertFilledArea ? colors.bottom : colors.top,
+          bottomColor: spec.invertFilledArea ? colors.top : colors.bottom,
+          lineWidth: 2 as const,
+          lineVisible: spec.lineVisible ?? true,
+          invertFilledArea: spec.invertFilledArea ?? false,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: spec.lineVisible ?? true,
+          crosshairMarkerRadius: 4,
+          crosshairMarkerBackgroundColor: colors.solid,
+          crosshairMarkerBorderColor: activePalette.surface,
+          crosshairMarkerBorderWidth: 2,
+          autoscaleInfoProvider,
+        };
+      };
+
+      const buildBaselineOptions = (spec: BaselineSpec, activePalette: ResolvedPalette) => {
+        const top = activePalette.tones[spec.topTone ?? "ok"];
+        const bottom = activePalette.tones[spec.bottomTone ?? "destructive"];
+        return {
+          baseValue: { type: "price" as const, price: spec.baseValue },
+          topLineColor: top.solid,
+          topFillColor1: top.top,
+          topFillColor2: top.bottom,
+          bottomLineColor: bottom.solid,
+          bottomFillColor1: bottom.bottom,
+          bottomFillColor2: bottom.top,
+          lineWidth: 2 as const,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          autoscaleInfoProvider,
+        };
+      };
+
+      const buildLineOptions = (spec: LineSpec, activePalette: ResolvedPalette) => {
+        const colors = activePalette.tones[spec.tone];
+        return {
+          color: colors.solid,
+          lineWidth: 2 as const,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: true,
+          crosshairMarkerRadius: 4,
+          crosshairMarkerBackgroundColor: colors.solid,
+          crosshairMarkerBorderColor: activePalette.surface,
+          crosshairMarkerBorderWidth: 2,
+          autoscaleInfoProvider,
+        };
+      };
+
+      type PriceLineHandle = ReturnType<ISeriesApi<"Area">["createPriceLine"]>;
+      type MountedSeries =
+        | { kind: "area"; spec: AreaSpec; api: ISeriesApi<"Area">; priceLineApi?: PriceLineHandle }
+        | { kind: "baseline"; spec: BaselineSpec; api: ISeriesApi<"Baseline">; priceLineApi?: PriceLineHandle }
+        | { kind: "line"; spec: LineSpec; api: ISeriesApi<"Line">; priceLineApi?: PriceLineHandle };
+
+      const mountedSeries: MountedSeries[] = [];
+
+      const attachPriceLine = (
+        api: ISeriesApi<"Area"> | ISeriesApi<"Baseline"> | ISeriesApi<"Line">,
+        priceLine: LightweightChartPriceLine | undefined,
+      ): PriceLineHandle | undefined => {
+        if (!priceLine) return undefined;
+        const lineTone = palette.tones[priceLine.tone ?? "brand"];
+        return api.createPriceLine({
+          price: priceLine.price,
+          color: lineTone.solid,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: priceLine.axisLabelVisible ?? true,
+          title: priceLine.title ?? "",
+        });
+      };
 
       for (const spec of series) {
         const normalized = normalizePoints(spec.data);
-        let api: ReturnType<typeof chart.addSeries>;
         if (spec.kind === "area") {
-          const colors = palette.tones[spec.tone];
-          api = chart.addSeries(AreaSeries, {
-            lineColor: colors.solid,
-            topColor: spec.invertFilledArea ? colors.bottom : colors.top,
-            bottomColor: spec.invertFilledArea ? colors.top : colors.bottom,
-            lineWidth: 2,
-            lineVisible: spec.lineVisible ?? true,
-            invertFilledArea: spec.invertFilledArea ?? false,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            crosshairMarkerVisible: spec.lineVisible ?? true,
-            crosshairMarkerRadius: 4,
-            crosshairMarkerBackgroundColor: colors.solid,
-            crosshairMarkerBorderColor: palette.surface,
-            crosshairMarkerBorderWidth: 2,
-            autoscaleInfoProvider,
-          });
+          const api = chart.addSeries(AreaSeries, buildAreaOptions(spec, palette));
+          api.setData(normalized);
+          mountedSeries.push({ kind: "area", spec, api, priceLineApi: attachPriceLine(api, spec.priceLine) });
         } else if (spec.kind === "baseline") {
-          const top = palette.tones[spec.topTone ?? "ok"];
-          const bottom = palette.tones[spec.bottomTone ?? "destructive"];
-          api = chart.addSeries(BaselineSeries, {
-            baseValue: { type: "price", price: spec.baseValue },
-            topLineColor: top.solid,
-            topFillColor1: top.top,
-            topFillColor2: top.bottom,
-            bottomLineColor: bottom.solid,
-            bottomFillColor1: bottom.bottom,
-            bottomFillColor2: bottom.top,
-            lineWidth: 2,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            autoscaleInfoProvider,
-          });
+          const api = chart.addSeries(BaselineSeries, buildBaselineOptions(spec, palette));
+          api.setData(normalized);
+          mountedSeries.push({ kind: "baseline", spec, api, priceLineApi: attachPriceLine(api, spec.priceLine) });
         } else {
-          const colors = palette.tones[spec.tone];
-          api = chart.addSeries(LineSeries, {
-            color: colors.solid,
-            lineWidth: 2,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            crosshairMarkerVisible: true,
-            crosshairMarkerRadius: 4,
-            crosshairMarkerBackgroundColor: colors.solid,
-            crosshairMarkerBorderColor: palette.surface,
-            crosshairMarkerBorderWidth: 2,
-            autoscaleInfoProvider,
-          });
+          const api = chart.addSeries(LineSeries, buildLineOptions(spec, palette));
+          api.setData(normalized);
+          mountedSeries.push({ kind: "line", spec, api, priceLineApi: attachPriceLine(api, spec.priceLine) });
         }
-        api.setData(normalized);
-        if (spec.priceLine) {
-          const lineTone = palette.tones[spec.priceLine.tone ?? "brand"];
-          api.createPriceLine({
-            price: spec.priceLine.price,
-            color: lineTone.solid,
-            lineWidth: 1,
-            lineStyle: LineStyle.Dashed,
-            axisLabelVisible: spec.priceLine.axisLabelVisible ?? true,
-            title: spec.priceLine.title ?? "",
-          });
-        }
-        mountedSeries.push({ spec, api });
       }
 
       chart.timeScale().fitContent();
@@ -455,6 +485,19 @@ export function LightweightChartBase({
               const w = container.clientWidth || initialWidth;
               const h = fillHeight ? container.clientHeight || height : height;
               chart.applyOptions(buildChartOptions(nextPalette, w, h, showPriceScale, showTimeScale, scaleMargins, formatPrice));
+              for (const entry of mountedSeries) {
+                if (entry.kind === "area") {
+                  entry.api.applyOptions(buildAreaOptions(entry.spec, nextPalette));
+                } else if (entry.kind === "baseline") {
+                  entry.api.applyOptions(buildBaselineOptions(entry.spec, nextPalette));
+                } else {
+                  entry.api.applyOptions(buildLineOptions(entry.spec, nextPalette));
+                }
+                if (entry.priceLineApi && entry.spec.priceLine) {
+                  const nextLineTone = nextPalette.tones[entry.spec.priceLine.tone ?? "brand"];
+                  entry.priceLineApi.applyOptions({ color: nextLineTone.solid });
+                }
+              }
             })
           : null;
       themeObserver?.observe(root, { attributes: true, attributeFilter: ["class", "data-theme"] });
@@ -492,8 +535,8 @@ export function LightweightChartBase({
         role="img"
         aria-label={ariaLabel}
         className={cn(
-          "relative w-full overflow-hidden rounded-lg border border-border bg-card/40",
-          fillHeight ? "min-h-60 flex-1" : "shrink-0",
+          "relative w-full overflow-hidden rounded-lg bg-muted/10",
+          fillHeight ? "min-h-0 flex-1" : "shrink-0",
         )}
         style={fillHeight ? undefined : { height }}
       >

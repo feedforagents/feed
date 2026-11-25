@@ -93,7 +93,7 @@ export function ModeToggle({
 
   return (
     <div className={cn("flex flex-col gap-3", className)} {...props}>
-      <div className="flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3">
+      <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background px-4 py-3">
         <div className="flex flex-col gap-0.5">
           <span className="text-sm font-semibold text-foreground">Presentation mode</span>
           <span className="text-xs text-muted-foreground">
@@ -110,7 +110,6 @@ export function ModeToggle({
               <Button
                 variant="outline"
                 size="sm"
-                shape="pill"
                 disabled={blocked}
                 onClick={() => {
                   if (!blocked) onReturnToGame();

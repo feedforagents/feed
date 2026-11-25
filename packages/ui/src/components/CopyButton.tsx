@@ -76,7 +76,7 @@ export function CopyButton({
         aria-busy={copying || ariaBusy}
         onClick={() => void handlePress()}
         onBlur={handleBlur}
-        className={cn(tone === "primary" && copied && "bg-ok text-primary-foreground hover:bg-ok", className)}
+        className={cn(tone === "primary" && copied && "bg-ok-solid text-ok-solid-foreground hover:bg-ok-solid", className)}
         {...props}
       >
         {copying ? <Spinner size="sm" aria-hidden /> : failed && tone === "quiet" ? <AlertCircle aria-hidden className="size-4 text-destructive" /> : copied ? <Check aria-hidden className="size-4" /> : <Clipboard aria-hidden className="size-4" />}

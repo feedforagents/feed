@@ -128,10 +128,10 @@ export function NotificationRow({
 
         {notification.kind === "GroupInvite" && notification.invitePending ? (
           <div className="flex items-center gap-2 pt-1">
-            <Button size="sm" shape="pill" loading={loading} disabled={blocked} onClick={() => !blocked && onAcceptInvite?.(notification.id)}>
+            <Button size="sm" loading={loading} disabled={blocked} onClick={() => !blocked && onAcceptInvite?.(notification.id)}>
               Accept
             </Button>
-            <Button variant="outline" size="sm" shape="pill" disabled={blocked} onClick={() => !blocked && onDeclineInvite?.(notification.id)}>
+            <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onDeclineInvite?.(notification.id)}>
               Decline
             </Button>
           </div>
