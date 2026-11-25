@@ -2,6 +2,7 @@
 // spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"
 import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { reconnectRealtime } from "../src/web/store.ts";
 import { loadChatMessages } from "../src/web/store-world.ts";
 import type { AppChatSummary, ViewerSession } from "../src/web/types.ts";
 
@@ -102,4 +103,76 @@ it("does not mark read when the room loads with no messages (spec/social/messagi
   await loadChatMessages("chat-1");
   expect(getStoreSnapshot().chatMessages).toEqual([]);
   expect(readPosts).toEqual([]);
+});
+
+it("clears the list badge when a chat.message SSE event reloads the open room (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  let serverUnread = 1;
+  let chatsResponse: Response | null = null;
+  let resolveChatsRequested: (() => void) | null = null;
+  let resolveChatsResponse: ((response: Response) => void) | null = null;
+  const chatsRequested = new Promise<void>((resolve) => {
+    resolveChatsRequested = resolve;
+  });
+  const sseTarget = new EventTarget() as EventTarget & { close: () => void };
+  sseTarget.close = () => {};
+  function StubEventSource() {
+    return sseTarget;
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const url = new URL(raw, "http://localhost");
+      if (url.pathname === "/api/chats" && (init?.method ?? "GET") === "GET") {
+        const unreadAtRequest = serverUnread;
+        chatsResponse = Response.json({
+          chats: [
+            {
+              id: "chat-1",
+              kind: "direct",
+              unreadCount: unreadAtRequest,
+              members: [{ memberId: "bob", handle: "bob", displayName: "Bob" }],
+            },
+          ],
+        });
+        resolveChatsRequested?.();
+        return new Promise((resolve) => {
+          resolveChatsResponse = resolve;
+        });
+      }
+      if (url.pathname === "/api/chats/invites" && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(Response.json({ invites: [] }));
+      }
+      if (url.pathname === "/api/chats/chat-1/messages" && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(Response.json({ messages: roomMessages }));
+      }
+      if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
+        serverUnread = 0;
+        readPosts.push(url.pathname);
+        return Promise.resolve(
+          Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
+        );
+      }
+      return Promise.resolve(Response.json({}, { status: 404 }));
+    }),
+  );
+  setStoreState({ route: "Chats", chats: [seedChat(0)], selectedChatId: "chat-1" });
+  reconnectRealtime();
+  sseTarget.dispatchEvent(
+    new MessageEvent("chat.message", { data: JSON.stringify({ chatId: "chat-1" }) }),
+  );
+  await chatsRequested;
+  expect(chatsResponse).not.toBeNull();
+  resolveChatsResponse?.(chatsResponse);
+  for (let round = 0; round < 50 && readPosts.length === 0; round += 1) {
+    await Promise.resolve();
+  }
+  for (let round = 0; round < 10; round += 1) {
+    await Promise.resolve();
+  }
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["hello"]);
+  expect(readPosts).toEqual(["/api/chats/chat-1/read"]);
+  expect(getStoreSnapshot().chats.find((c) => c.id === "chat-1")?.unreadCount).toBe(0);
+  vi.unstubAllGlobals();
 });
