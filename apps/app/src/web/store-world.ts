@@ -995,8 +995,7 @@ export async function loadChatMessages(chatId: string): Promise<void> {
   });
   if (res.ok) {
     setStoreState({ selectedChatId: chatId, chatMessages: res.data });
-    const chat = getStoreSnapshot().chats.find((c) => c.id === chatId);
-    if (chat && chat.unreadCount > 0) {
+    if (res.data.length > 0) {
       void markChatRead(chatId);
     }
   }
