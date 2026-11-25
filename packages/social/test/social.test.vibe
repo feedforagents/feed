@@ -1244,6 +1244,44 @@ it.effect(
 )
 
 it.effect(
+  'clearNotifications without ids deletes only notifications visible in the current mode (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player", 10_000, "social")
+    try seedAccount("bob", "bob", "Bob Trader")
+    const now = try Clock.currentTimeMillis
+    try queryStore(
+      "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ('r42-social-1', 'alice', 'follow', 'bob', NULL, NULL, 'New follower', 'Bob followed you', false, NULL, $1)",
+      [now]
+    )
+    try queryStore(
+      "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ('r42-market-1', 'alice', 'market_resolved', NULL, NULL, 'seed-market-1', 'Market settled', 'Resolved YES', true, NULL, $1)",
+      [now + 1]
+    )
+    try queryStore(
+      "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ('r42-pnl-1', 'alice', 'pnl_digest', NULL, NULL, NULL, 'Daily P&L', 'Your daily summary', true, NULL, $1)",
+      [now + 2]
+    )
+
+    const visibleBefore = try listNotifications("alice", 50, "social")
+    const cleared = try clearNotifications("alice")
+    const gameAfter = try listNotifications("alice", 50, "game")
+    const socialAfter = try listNotifications("alice", 50, "social")
+
+    try check(() => assert.deepStrictEqual({
+      visibleBefore: visibleBefore.map((n) => n.id),
+      clearedCount: cleared.clearedCount,
+      gameAfter: gameAfter.map((n) => n.id),
+      socialAfter: socialAfter.map((n) => n.id)
+    }, {
+      visibleBefore: ["r42-social-1"],
+      clearedCount: 1,
+      gameAfter: ["r42-pnl-1", "r42-market-1"],
+      socialAfter: []
+    }))
+  })
+)
+
+it.effect(
   'hydrates actor/org media, resolves org collisions, thread ancestors, market badges, and chat unread state (spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
   () => withSocialWorld(effect {
     try seedAccount("alice", "alice", "Alice Player", 10_000, "game")
