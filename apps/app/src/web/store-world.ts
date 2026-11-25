@@ -108,14 +108,15 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
 function cleanedPostLists(
   cur: StoreState,
   cleanList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost>,
+  cleanProfileList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost> = cleanList,
 ): Pick<StoreState, "feedPosts" | "explore" | "profileBundle" | "profileReplies"> {
   return {
     feedPosts: cleanList(cur.feedPosts),
     explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
     profileBundle: cur.profileBundle
-      ? { ...cur.profileBundle, posts: cleanList(cur.profileBundle.posts) }
+      ? { ...cur.profileBundle, posts: cleanProfileList(cur.profileBundle.posts) }
       : null,
-    profileReplies: cleanList(cur.profileReplies),
+    profileReplies: cleanProfileList(cur.profileReplies),
   };
 }
 
@@ -153,9 +154,13 @@ export function removePostAcrossStore(
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
   const isBlockedHandle = (value: string): boolean => value.toLowerCase() === normalized;
+  const reposterHandle = (p: AppPost): string | undefined => p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+  const isBlockedReposter = (p: AppPost): boolean => {
+    const reposter = reposterHandle(p);
+    return reposter !== undefined && isBlockedHandle(reposter);
+  };
   const cleanPost = (p: AppPost): AppPost => {
-    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
-    const stripRepost = reposter !== undefined && isBlockedHandle(reposter);
+    const stripRepost = isBlockedReposter(p);
     const stripQuote = p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle);
     if (!stripRepost && !stripQuote) return p;
     return {
@@ -170,9 +175,14 @@ function filterAuthorOutOfFeeds(handle: string): void {
   const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
     list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);
   const cur = getStoreSnapshot();
+  const profileOwnerBlocked = cur.profileBundle !== null && isBlockedHandle(cur.profileBundle.summary.handle);
+  const cleanProfileList = profileOwnerBlocked
+    ? (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
+        list.filter((p) => !isBlockedHandle(p.card.authorHandle) && !isBlockedReposter(p)).map(cleanPost)
+    : cleanList;
   const thread = cur.activeThread;
   setStoreState({
-    ...cleanedPostLists(cur, cleanList),
+    ...cleanedPostLists(cur, cleanList, cleanProfileList),
     marketSocialPosts: cleanList(cur.marketSocialPosts),
     activeThread: thread
       ? isBlockedHandle(thread.post.card.authorHandle)
