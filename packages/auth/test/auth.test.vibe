@@ -46,7 +46,8 @@ import {
   verifyAccessToken,
   verifyEmailMagicLink,
   verifyPhoneCode,
-  type AuthRuntimeConfig
+  type AuthRuntimeConfig,
+  type CloudflareEmailMessage
 } from "../src/index.vibe"
 import { insertCloudAccountTx } from "../src/phone-auth.vibe"
 
@@ -1084,6 +1085,39 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
       "SELECT member_id, role FROM feed_chat_members WHERE chat_id = 'grp-transfer'"
     )
 
+    const dispatchedMessages: Array<CloudflareEmailMessage> = []
+    const cloudflareConfig: AuthRuntimeConfig = {
+      ...localnetConfig,
+      emailMode: "cloudflare",
+      emailFrom: "Feed <login@feed.fun>",
+      emailPublicOrigin: "https://feed.fun",
+      cloudflareEmailSender: {
+        send: async (message) => {
+          dispatchedMessages.push(message)
+          return { messageId: "cf-msg-1" }
+        }
+      }
+    }
+    const cfSent = try requestEmailMagicLink({
+      email: "cfuser@example.com",
+      config: cloudflareConfig
+    })
+    const cfMissingBinding = try refusedCode(requestEmailMagicLink({
+      email: "cfmissing@example.com",
+      config: { ...cloudflareConfig, cloudflareEmailSender: undefined }
+    }))
+    const cfBindingFailure = try refusedCode(requestEmailMagicLink({
+      email: "cffail@example.com",
+      config: {
+        ...cloudflareConfig,
+        cloudflareEmailSender: {
+          send: async () => {
+            throw new Error("downstream send_email error")
+          }
+        }
+      }
+    }))
+
     try check(() => assert.deepStrictEqual(
       {
         validation: [invalidEmail, disposableEmail, disabledMode, rapidResend, supersededRefusal, expiredRefusal, replayRefusal],
@@ -1125,6 +1159,19 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           deletedAccountRow[0]?.phone_hash,
           remainingChats.map((row) => [toText(row.id), toText(row.created_by)]),
           transferredOwner.map((row) => [toText(row.member_id), toText(row.role)])
+        ],
+        cloudflareEmailBinding: [
+          cfSent.emailMasked,
+          cfSent.devToken === undefined,
+          cfSent.devMagicLinkUrl === undefined,
+          dispatchedMessages.length,
+          dispatchedMessages[0]?.from,
+          dispatchedMessages[0]?.to,
+          dispatchedMessages[0]?.subject,
+          Boolean(dispatchedMessages[0]?.html?.includes("https://feed.fun/auth/email?token=")),
+          Boolean(dispatchedMessages[0]?.text?.includes("https://feed.fun/auth/email?token=")),
+          cfMissingBinding,
+          cfBindingFailure
         ]
       },
       {
@@ -1151,6 +1198,19 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           null,
           [["grp-transfer", phoneOnlyUser.account.accountId]],
           [[phoneOnlyUser.account.accountId, "owner"]]
+        ],
+        cloudflareEmailBinding: [
+          "c***@example.com",
+          true,
+          true,
+          1,
+          { name: "Feed", email: "login@feed.fun" },
+          "cfuser@example.com",
+          "Sign in to Feed",
+          true,
+          true,
+          "email_provider_unavailable",
+          "email_provider_unavailable"
         ]
       }
     ))

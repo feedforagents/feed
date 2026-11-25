@@ -8,7 +8,6 @@ import {
   toText,
   type Tx
 } from "@repo/db"
-import { HttpClientRequest } from "effect/http"
 import { SignJWT, jwtVerify } from "jose"
 import {
   canCompleteEmailOnboarding,
@@ -37,7 +36,6 @@ import {
   sha256Hex
 } from "./crypto.vibe"
 import { AuthFailure, RateLimited } from "./errors.vibe"
-import { executeHttpJson } from "./http.vibe"
 import {
   ONBOARDING_TOKEN_TTL_SECONDS,
   STARTING_GRANT_CENTS,
@@ -57,6 +55,7 @@ import {
   type AccountProfile,
   type AuthRuntimeConfig,
   type AuthenticatedAccountResult,
+  type CloudflareEmailAddress,
   type EmailMode
 } from "./phone-auth.vibe"
 import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
@@ -217,10 +216,10 @@ export effect function hashEmail(digestKey: string, normalized: string): string!
   return try hmacSha256Hex(digestKey, `email:${normalized}`)
 }
 
-export function resolveEmailMode(config: Pick<AuthRuntimeConfig, "emailMode" | "resendApiKey" | "smsMode">): EmailMode {
+export function resolveEmailMode(config: Pick<AuthRuntimeConfig, "emailMode" | "cloudflareEmailSender" | "smsMode">): EmailMode {
   if (config.emailMode !== undefined) return config.emailMode
   if (config.smsMode === "loopback") return "loopback"
-  return (config.resendApiKey?.trim() ?? "") !== "" ? "resend" : "disabled"
+  return config.cloudflareEmailSender !== undefined ? "cloudflare" : "disabled"
 }
 
 function sanitizeRedirectTo(raw: string | undefined): string | null {
@@ -256,7 +255,7 @@ function pruneLoopbackMagicLinks(now: number): void {
 
 export function getLoopbackMagicLink(
   email: string,
-  config?: Pick<AuthRuntimeConfig, "emailMode" | "resendApiKey" | "smsMode">
+  config?: Pick<AuthRuntimeConfig, "emailMode" | "cloudflareEmailSender" | "smsMode">
 ): { readonly token: string; readonly magicLinkUrl: string } | undefined {
   if (config !== undefined && resolveEmailMode(config) !== "loopback") return undefined
   const envMode = readEmailEnvVar("EMAIL_MODE")
@@ -332,15 +331,23 @@ function buildMagicLinkEmailBodies(
   return { subject, html, text }
 }
 
-effect function sendResendEmail(input: {
+function parseEmailFromAddress(raw: string): string | CloudflareEmailAddress {
+  const trimmed = raw.trim()
+  const match = /^(.+?)\s*<([^<>\s]+@[^<>\s]+)>$/.exec(trimmed)
+  if (match === null) return trimmed
+  const name = match[1].trim().replace(/^["']|["']$/g, "")
+  const email = match[2].trim()
+  return name !== "" ? { name, email } : email
+}
+
+effect function sendCloudflareEmail(input: {
   readonly toEmail: string
-  readonly magicLinkId: string
   readonly magicLinkUrl: string
   readonly purpose: "sign_in" | "link_email"
   readonly config: AuthRuntimeConfig
-}): void!(AuthFailure | RateLimited) {
-  const apiKey = input.config.resendApiKey?.trim() ?? ""
-  if (apiKey === "") {
+}): void!AuthFailure {
+  const sender = input.config.cloudflareEmailSender
+  if (sender === undefined) {
     throw new AuthFailure({
       code: "email_provider_unavailable",
       message: "Email delivery service is not configured.",
@@ -349,33 +356,20 @@ effect function sendResendEmail(input: {
   }
   const emailFrom = input.config.emailFrom?.trim() || "Feed <login@feed.fun>"
   const { subject, html, text } = buildMagicLinkEmailBodies(input.magicLinkUrl, input.purpose)
-  const payload = JSON.stringify({
-    from: emailFrom,
-    to: [input.toEmail],
-    subject,
-    html,
-    text
-  })
-  const request = HttpClientRequest.post("https://api.resend.com/emails").pipe(
-    HttpClientRequest.setHeader("authorization", `Bearer ${apiKey}`),
-    HttpClientRequest.setHeader("idempotency-key", input.magicLinkId),
-    HttpClientRequest.bodyText(payload, "application/json")
-  )
-  const response = try executeHttpJson(request, "email_provider_unavailable", "Unable to send sign-in email.")
-  if (response.status === 429) {
-    throw new RateLimited({
-      message: "Too many email sign-in requests.",
-      retryAfterSeconds: 60,
-      action: "email_send"
-    })
-  }
-  if (response.status < 200 || response.status >= 300) {
-    throw new AuthFailure({
+  try Effect.tryPromise({
+    try: () => sender.send({
+      from: parseEmailFromAddress(emailFrom),
+      to: input.toEmail,
+      subject,
+      html,
+      text
+    }),
+    catch: () => new AuthFailure({
       code: "email_provider_unavailable",
       message: "Unable to send sign-in email.",
       status: 502
     })
-  }
+  })
 }
 
 effect function ensureEmailUnusedByOtherInTx(tx: Tx, emailHash: string, accountId: string): void!(AuthFailure | StoreFailure) {
@@ -517,10 +511,9 @@ effect function sendEmailMagicLinkInternal(input: {
   })
   const baseOrigin = (input.config.emailPublicOrigin?.trim() || input.config.publicAppUrl).replace(/\/+$/, "")
   const magicLinkUrl = `${baseOrigin}/auth/email?token=${encodeURIComponent(magicToken)}`
-  if (emailMode === "resend") {
-    try sendResendEmail({
+  if (emailMode === "cloudflare") {
+    try sendCloudflareEmail({
       toEmail: normalizedEmail,
-      magicLinkId: challengeId,
       magicLinkUrl,
       purpose: input.purpose,
       config: input.config

@@ -1,5 +1,10 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"
-import { DEFAULT_ALLOWED_COUNTRIES, type AuthRuntimeConfig, type EmailMode } from "@repo/auth"
+import {
+  DEFAULT_ALLOWED_COUNTRIES,
+  type AuthRuntimeConfig,
+  type CloudflareEmailSender,
+  type EmailMode
+} from "@repo/auth"
 
 type DeploymentEnvironment = "localnet" | "staging" | "production"
 
@@ -109,9 +114,14 @@ export function stringEnvRecord(raw: Readonly<Record<string, unknown>>): Record<
   return record
 }
 
+export interface AppServerBindings {
+  readonly emailSender?: CloudflareEmailSender | undefined
+}
+
 export function parseAppServerConfig(
   env: Readonly<Record<string, string | undefined>>,
-  fallbackOrigin?: string
+  fallbackOrigin?: string,
+  bindings?: AppServerBindings
 ): AppServerConfig {
   const port = parsePort(env.PORT)
   const host = trimmed(env.HOST) ?? "127.0.0.1"
@@ -127,16 +137,16 @@ export function parseAppServerConfig(
       : deploymentEnv === "localnet"
         ? "loopback"
         : "twilio"
-  const resendApiKey = trimmed(env.RESEND_API_KEY)
+  const cloudflareEmailSender = bindings?.emailSender
   const rawEmailMode = trimmed(env.EMAIL_MODE)?.toLowerCase()
   const emailMode: EmailMode = deploymentEnv !== "localnet" && rawEmailMode === "loopback"
     ? "disabled"
-    : rawEmailMode === "loopback" || rawEmailMode === "resend" || rawEmailMode === "disabled"
+    : rawEmailMode === "loopback" || rawEmailMode === "cloudflare" || rawEmailMode === "disabled"
       ? rawEmailMode
       : deploymentEnv === "localnet"
         ? "loopback"
-        : resendApiKey !== undefined
-          ? "resend"
+        : cloudflareEmailSender !== undefined
+          ? "cloudflare"
           : "disabled"
   const emailFrom = trimmed(env.EMAIL_FROM) ?? "Feed <login@feed.fun>"
   const emailPublicOrigin = trimmed(env.EMAIL_PUBLIC_ORIGIN)
@@ -165,7 +175,7 @@ export function parseAppServerConfig(
       oauthSigningSecret,
       smsMode,
       emailMode,
-      resendApiKey,
+      cloudflareEmailSender,
       emailFrom,
       emailPublicOrigin,
       twilioAccountSid: trimmed(env.TWILIO_ACCOUNT_SID),

@@ -1,4 +1,5 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+import { type CloudflareEmailSender } from "@repo/auth"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, workerDbStore, type StoreFailure, type Tx } from "@repo/db/worker"
 import { RealtimeBus, realtimeBusLayer } from "@repo/social"
 import { assertAppServerConfig, parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
@@ -34,13 +35,13 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
   readonly HYPERDRIVE?: WorkerHyperdrive | undefined
   readonly DATABASE_URL?: string | undefined
   readonly ASSETS?: WorkerAssets | undefined
+  readonly EMAIL?: CloudflareEmailSender | undefined
   readonly DEPLOYMENT_ENV?: string | undefined
   readonly PUBLIC_APP_URL?: string | undefined
   readonly PUBLIC_API_URL?: string | undefined
   readonly SMS_MODE?: string | undefined
   readonly SMS_ALLOWED_COUNTRIES?: string | undefined
   readonly EMAIL_MODE?: string | undefined
-  readonly RESEND_API_KEY?: string | undefined
   readonly EMAIL_FROM?: string | undefined
   readonly EMAIL_PUBLIC_ORIGIN?: string | undefined
   readonly AUTH_DIGEST_KEY?: string | undefined
@@ -204,7 +205,7 @@ export default {
       return env.ASSETS.fetch(request)
     }
     try {
-      const config = parseAppServerConfig(stringEnvRecord(env), url.origin)
+      const config = parseAppServerConfig(stringEnvRecord(env), url.origin, { emailSender: env.EMAIL })
       await Effect.runPromise(assertAppServerConfig(config))
       const { layer: appLayer, connectionString } = await workerRuntimeLayer(env)
       const handled = await Effect.runPromise(

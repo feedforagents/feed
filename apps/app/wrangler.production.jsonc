@@ -43,6 +43,11 @@
       "bucket_name": "feed-uploads-production"
     }
   ],
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
   "triggers": {
     "crons": ["* * * * *"]
   },
@@ -57,7 +62,7 @@
     "PUBLIC_APP_URL": "https://feed.fun",
     "PUBLIC_API_URL": "https://feed.fun",
     "SMS_MODE": "twilio",
-    "EMAIL_MODE": "resend",
+    "EMAIL_MODE": "cloudflare",
     "EMAIL_FROM": "Feed <login@feed.fun>",
     "EMAIL_PUBLIC_ORIGIN": "https://feed.fun",
     "SURPLUS_BASE_URL": "https://api.surplusintelligence.ai/v1",

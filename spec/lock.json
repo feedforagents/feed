@@ -410,7 +410,7 @@
     },
     "spec/auth/email.md": {
       "@document": [
-        "59e5b05999df"
+        "e1bbf7f2b637"
       ],
       "## Story: Request and consume a single-use email magic link safely": [
         "dab74afbff13"

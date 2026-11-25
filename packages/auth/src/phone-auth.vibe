@@ -69,16 +69,33 @@ import { executeHttpJson } from "./http.vibe"
 import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
 
 export type SmsMode = "loopback" | "twilio"
-export type EmailMode = "loopback" | "resend" | "disabled"
+export type EmailMode = "loopback" | "cloudflare" | "disabled"
 export type PlayMode = "game" | "social"
 export type FeedEnvironment = CloudEnvironment | "localnet"
+
+export interface CloudflareEmailAddress {
+  readonly name: string
+  readonly email: string
+}
+
+export interface CloudflareEmailMessage {
+  readonly from: string | CloudflareEmailAddress
+  readonly to: string | ReadonlyArray<string>
+  readonly subject: string
+  readonly html?: string | undefined
+  readonly text?: string | undefined
+}
+
+export interface CloudflareEmailSender {
+  send(message: CloudflareEmailMessage): Promise<{ readonly messageId?: string } | void>
+}
 
 export interface AuthRuntimeConfig {
   readonly digestKey: string
   readonly oauthSigningSecret: string
   readonly smsMode: SmsMode
   readonly emailMode?: EmailMode | undefined
-  readonly resendApiKey?: string | undefined
+  readonly cloudflareEmailSender?: CloudflareEmailSender | undefined
   readonly emailFrom?: string | undefined
   readonly emailPublicOrigin?: string | undefined
   readonly twilioAccountSid?: string | undefined

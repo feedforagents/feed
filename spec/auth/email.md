@@ -1,6 +1,6 @@
 # Email magic link authentication and account lifecycle
 
-Feed supports **first-party passwordless Email Magic Link authentication** alongside mobile phone SMS verification. Users enter an email address, receive a 15-minute single-use magic link via Resend, confirm 18+ and pick a username on first sign-up for the one-time `100 pts` grant, link or change an email address on an existing account, sign out everywhere, or delete their account with a 30-day email cooldown. Raw email addresses and magic link tokens are modeled with `SecretEmail` and `SecretMagicToken` (`SPEC.md#secrets`), leaving only a keyed HMAC `emailHash` and `declassifyEmailMasked` in public views.
+Feed supports **first-party passwordless Email Magic Link authentication** alongside mobile phone SMS verification. Users enter an email address, receive a 15-minute single-use magic link via Cloudflare Email Service, confirm 18+ and pick a username on first sign-up for the one-time `100 pts` grant, link or change an email address on an existing account, sign out everywhere, or delete their account with a 30-day email cooldown. Raw email addresses and magic link tokens are modeled with `SecretEmail` and `SecretMagicToken` (`SPEC.md#secrets`), leaving only a keyed HMAC `emailHash` and `declassifyEmailMasked` in public views.
 
 ## Story: Request and consume a single-use email magic link safely
 
