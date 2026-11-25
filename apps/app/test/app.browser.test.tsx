@@ -151,14 +151,19 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
   ],
 };
 
-function installMockNetwork() {
-  let signedIn = false;
+function installMockNetwork(options: {
+  signedInViewer?: { displayName: string; bio: string; balanceCents: number };
+  userRoutes?: (path: string, init?: RequestInit) => Promise<Response> | undefined;
+} = {}) {
+  let signedIn = options.signedInViewer != null;
   let uiMode: "game" | "social" = "game";
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
+    const userRoute = options.userRoutes?.(path, init);
+    if (userRoute) return userRoute;
     if (path === "/api/auth/reviewer/login") {
       signedIn = true;
       return json({ ok: true });
@@ -176,13 +181,13 @@ function installMockNetwork() {
           ? {
               accountId: "acct-player-1",
               handle: "alice",
-              displayName: "Alice Trader",
-              bio: "Trading with 100 pts",
+              displayName: options.signedInViewer?.displayName ?? "Alice Trader",
+              bio: options.signedInViewer?.bio ?? "Trading with 100 pts",
               avatarUrl: null,
               bannerUrl: null,
               phoneLast2: "01",
               uiMode,
-              balanceCents: 10500,
+              balanceCents: options.signedInViewer?.balanceCents ?? 10500,
               startingGrantCents: 10000,
               isAdmin: false,
               isReviewer: true,
@@ -299,6 +304,13 @@ function installMockNetwork() {
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
+async function mountApp() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+}
+
 beforeAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -317,10 +329,7 @@ afterAll(() => {
 
 it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
@@ -390,74 +399,47 @@ function r39FollowRow(id: string, handle: string, displayName: string, viewerFol
 
 it('Follow toggles in the follow list update the profile header counts (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
   const following = new Set<string>(["carol"]);
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, window.location.origin);
-    const path = url.pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: true,
-        viewer: {
-          accountId: "acct-player-1",
-          handle: "alice",
-          displayName: "Alice Aardvark",
-          bio: "",
-          avatarUrl: null,
-          bannerUrl: null,
-          phoneLast2: "01",
-          uiMode: "game",
-          balanceCents: 10000,
-          startingGrantCents: 10000,
-          isAdmin: false,
-          isReviewer: true,
-          agentGrant: null,
-        },
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-        devSmsCodeEnabled: true,
-      });
-    }
-    if (path === "/api/users/alice") {
-      return json({
-        profile: { id: "acct-player-1", handle: "alice", displayName: "Alice Aardvark", kind: "user", postsCount: 0, followersCount: 1, followingCount: following.size },
-        posts: [],
-        positions: {},
-        nextCursor: null,
-      });
-    }
-    if (path === "/api/users/alice/following") {
-      return json({ items: [...following].map((handle) => r39FollowRow(`acc-${handle}`, handle, "Carol Analyst", true)) });
-    }
-    if (path === "/api/users/alice/followers") {
-      return json({ items: [r39FollowRow("acc-dave", "dave", "Dave Viewer", following.has("dave"))] });
-    }
-    const followMatch = path.match(/^\/api\/users\/([^/]+)\/follow$/);
-    if (followMatch) {
-      if (init?.method === "DELETE") following.delete(followMatch[1]);
-      else following.add(followMatch[1]);
-      return json({ ok: true });
-    }
-    if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
-    if (path === "/api/markets") return json({ predictions: SAMPLE_MARKETS.predictions, perps: [] });
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
-    if (path === "/api/leaderboard") return json(SAMPLE_LEADERBOARD_PLAYERS);
-    if (path === "/api/notifications") return json({ items: [], unreadCount: 0 });
-    if (path === "/api/chats") return json({ chats: [] });
-    if (path === "/api/chats/invites") return json({ invites: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {}
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  installMockNetwork({
+    signedInViewer: { displayName: "Alice Aardvark", bio: "", balanceCents: 10000 },
+    userRoutes: (path, init) => {
+      const json = (body: unknown) => Promise.resolve(Response.json(body));
+      if (path === "/api/users/alice") {
+        return json({
+          profile: { id: "acct-player-1", handle: "alice", displayName: "Alice Aardvark", kind: "user", postsCount: 0, followersCount: 1, followingCount: following.size },
+          posts: [],
+          positions: {},
+          nextCursor: null,
+        });
+      }
+      if (path === "/api/users/bob") {
+        return json({
+          profile: { id: "acc-bob", handle: "bob", displayName: "Bob Baker", kind: "user", postsCount: 0, followersCount: 2, followingCount: 7 },
+          posts: [],
+          positions: {},
+          nextCursor: null,
+        });
+      }
+      if (path === "/api/users/alice/following") {
+        return json({ items: [...following].map((handle) => r39FollowRow(`acc-${handle}`, handle, "Carol Analyst", true)) });
+      }
+      if (path === "/api/users/bob/following") {
+        return json({ items: [r39FollowRow("acc-carol", "carol", "Carol Analyst", following.has("carol"))] });
+      }
+      if (path === "/api/users/alice/followers") {
+        return json({ items: [r39FollowRow("acc-dave", "dave", "Dave Viewer", following.has("dave"))] });
+      }
+      const followMatch = path.match(/^\/api\/users\/([^/]+)\/follow$/);
+      if (followMatch) {
+        if (init?.method === "DELETE") following.delete(followMatch[1]);
+        else following.add(followMatch[1]);
+        return json({ ok: true });
+      }
+      if (path === "/api/markets") return json({ predictions: SAMPLE_MARKETS.predictions, perps: [] });
+      if (path === "/api/leaderboard") return json(SAMPLE_LEADERBOARD_PLAYERS);
+      return undefined;
+    },
+  });
+  await mountApp();
 
   await act(() => storeActions.navigate("/u/alice"));
   await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
@@ -479,4 +461,15 @@ it('Follow toggles in the follow list update the profile header counts (spec/soc
   expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(1);
   await act(() => userEvent.click(dialog.getByRole("button", { name: "Close" })));
   await expect.element(page.getByRole("button", { name: "1 Following" })).toBeInTheDocument();
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Baker").first()).toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "7 Following" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("button", { name: "7 Following" })));
+  await expect.element(dialog.getByText("Carol Analyst")).toBeInTheDocument();
+  await act(() => userEvent.click(dialog.getByRole("button", { name: "Follow", exact: true })));
+  await expect.element(dialog.getByRole("button", { name: "Following", exact: true })).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(7);
+  await act(() => userEvent.click(dialog.getByRole("button", { name: "Close" })));
+  await expect.element(page.getByRole("button", { name: "7 Following" })).toBeInTheDocument();
 });
