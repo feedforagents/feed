@@ -57,6 +57,7 @@ import {
   leaveGroupChat,
   likePost,
   listArticles,
+  listArticlesForMarket,
   listBlockedAccounts,
   listChats,
   listFeedPosts,
@@ -835,7 +836,6 @@ effect function executePublicMarketTool(
       const kind = asOptionalString(args.kind)
       const tradesLimit = clampCount(asOptionalInt(args.tradesLimit), 20, 100)
       const historyLimit = clampCount(asOptionalInt(args.historyLimit), 50, 200)
-      const articles = try listArticles(50, viewer.playMode)
       if (kind === "perp") {
         const perp = try getPerpMarket(marketId.toUpperCase())
         const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perp.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
@@ -855,6 +855,7 @@ effect function executePublicMarketTool(
         return undefined
       }
       if (maybePred !== undefined && kind !== "perp") {
+      const relatedArticles = try listArticlesForMarket(maybePred.id, viewer.playMode)
         const relatedPosts = try listFeedPosts({ tab: "latest", marketId: maybePred.id, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
         const recentTrades = try listMarketTrades("prediction", maybePred.id, tradesLimit)
         const priceHistory = try getMarketPriceHistory("prediction", maybePred.id, historyLimit)
@@ -870,7 +871,7 @@ effect function executePublicMarketTool(
           recentTrades: recentTrades.map(formatMarketTradeForMcp),
           priceHistory: priceHistory.map(formatPriceHistoryPointForMcp),
           relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
-          relatedArticles: articles.filter((a) => a.relatedMarketId === maybePred.id),
+          relatedArticles,
           resolutionArticle
         }
       }
