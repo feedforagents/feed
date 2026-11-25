@@ -408,12 +408,12 @@ it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, 
 
   const marketsButton = page.getByRole("button", { name: "Markets", exact: true }).first();
   await act(() => userEvent.click(marketsButton));
-  await expect.element(page.getByText("Markets & Trading")).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Markets", exact: true }).first()).toBeInTheDocument();
   await vi.waitFor(() => {
     expect(window.location.pathname).toBe("/markets");
   });
 
-  const modeSwitch = page.getByRole("switch", { name: "Social mode" });
+  const modeSwitch = page.getByRole("switch", { name: "Social mode" }).first();
   await act(() => userEvent.click(modeSwitch));
   await vi.waitFor(() => {
     expect(window.location.pathname).toBe("/");
@@ -432,7 +432,7 @@ it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, 
   expect(replaceState).toHaveBeenCalledTimes(1);
   expect(getStoreSnapshot().route).toBe("Home");
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
-  await expect.element(page.getByText("Markets & Trading")).not.toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Markets", exact: true }).first()).not.toBeInTheDocument();
 
   const poppedAgain = new Promise<void>((resolve) => {
     window.addEventListener("popstate", () => resolve(), { once: true });
