@@ -1315,7 +1315,6 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
   const limit = clampLimit(input.limit, 15, 50)
   const viewerId = normalizeOptionalText(input.viewerId) ?? undefined
   const likePattern = `%${escapeLikePattern(queryText)}%`
-  // A sole hashtag is a tag lookup; free-text queries keep substring matching.
   const firstTag = extractHashtags(queryText)[0]
   const tag = firstTag !== undefined && queryText.toLowerCase() === `#${firstTag}` ? firstTag : null
   const postPattern = tag === null ? likePattern : `(^|[^a-zA-Z0-9_])#${tag}([^a-zA-Z0-9_]|$)`
