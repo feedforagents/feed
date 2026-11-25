@@ -78,6 +78,21 @@ const SAMPLE_MARKETS = {
         noPriceBps: 4800,
         estimatedValueCents: 1028,
       },
+      {
+        marketId: "seed-market-1",
+        question: "Will OpenAGI ship Strawberry-9000 before Friday?",
+        marketStatus: "open",
+        holderId: "acct-player-1",
+        holderKind: "user",
+        side: "no",
+        shares: 2000,
+        costBasisCents: 986,
+        settledAt: null,
+        payoutCents: 0,
+        yesPriceBps: 5200,
+        noPriceBps: 4800,
+        estimatedValueCents: 960,
+      },
     ],
     perpPositions: [],
   },
@@ -378,6 +393,7 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   await act(() => userEvent.click(walletButton));
   await expect.element(page.getByText("Size 19.78 shares")).toBeInTheDocument();
   await expect.element(page.getByText("Entry 51%")).toBeInTheDocument();
+  await expect.element(page.getByText("Entry 49%")).toBeInTheDocument();
   expect(document.body.textContent).not.toContain("Entry 10 pts");
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
