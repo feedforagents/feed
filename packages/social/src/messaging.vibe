@@ -218,7 +218,7 @@ effect function loadChatHeaderTx(
   if (kind === undefined) {
     throw new SocialFailure({ code: "TeamChatRetired", message: "Unsupported or retired chat kind" })
   }
-  return { kind, createdBy: toText(chatRow.created_by) ?? "", name: toText(chatRow.name) }
+  return { kind, createdBy: toText(chatRow.created_by) ?? "", name: toText(chatRow.name) ?? null }
 }
 
 effect function loadChatMembersTx(tx: Tx, chatId: string): ReadonlyArray<Row>!StoreFailure {
@@ -1029,10 +1029,10 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): { r
     }
     const already = memberRows.some((m) => toText(m.member_id) === target.id)
     if (already) {
-return { result: { chatId: input.chatId, memberId: target.id, added: true }, events: [] as FeedRealtimeEvent[] }
+    return { result: { chatId: input.chatId, memberId: target.id, added: true }, events: [] as FeedRealtimeEvent[] }
     }
     const targetAccount: SpecAccount = {
-      id: target.id,
+          id: target.id,
       role: target.kind === "npc" ? "NpcActor" : "HumanUser"
     }
     const specAccounts: SpecAccount[] = [
