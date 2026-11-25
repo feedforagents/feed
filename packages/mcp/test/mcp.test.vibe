@@ -1089,3 +1089,29 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     })
   }
 }))
+
+it.effect(
+  'search returns articles older than the 50 newest (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+        ["buried-article-1", "Buried Quibberton scoop", "Quibberton summary", "Quibberton body", "the-new-york-taimes", null, now - 1_000_000]
+      )
+      for (let i = 1; i <= 60; i += 1) {
+        try tx.query(
+          "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+          [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
+        )
+      }
+    })
+    const searchRes = try callMcpTool(201, "search", { query: "Quibberton", kind: "articles", limit: 10 }, authConfig)
+    const searchPayload = unwrapToolPayload(searchRes)
+    const articles = (searchPayload.articles ?? []) as ReadonlyArray<{ readonly id: string }>
+    try check(() => {
+      assert.strictEqual(articles.some((a) => a.id === "buried-article-1"), true)
+      assert.strictEqual(articles.length, 1)
+    })
+  }))
