@@ -79,6 +79,7 @@ export async function loadSkillsHosts(): Promise<void> {
 
 export async function hydrateAuth(): Promise<void> {
   const prevViewerId = getStoreSnapshot().viewer?.accountId ?? null;
+  const prevUiMode = getStoreSnapshot().viewer?.uiMode ?? null;
   const res = await requestJson("/api/auth/me", { parse: decodeAuthMe });
   if (!res.ok) {
     setStoreState({ authLoaded: true });
@@ -117,6 +118,8 @@ export async function hydrateAuth(): Promise<void> {
     });
     if (prevViewerId !== viewer.accountId) {
       notifyAuthChanged();
+    } else if (prevUiMode !== viewer.uiMode) {
+      await loadNotifications();
     }
     return;
   }

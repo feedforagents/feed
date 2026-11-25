@@ -310,10 +310,6 @@ export function isNotificationVisibleInMode(n: AppNotification, mode: UiMode): b
   return mode !== "SocialMode" || (!n.isGameOnly && n.item.kind !== "MarketResolved" && n.item.kind !== "PnLDigest");
 }
 
-export function visibleUnreadNotificationCount(notifications: readonly AppNotification[], mode: UiMode): number {
-  return notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length;
-}
-
 export interface AppNotificationsPayload {
   readonly items: ReadonlyArray<AppNotification>;
   readonly unreadCount: number;

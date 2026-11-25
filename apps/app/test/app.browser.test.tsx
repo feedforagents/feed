@@ -1,13 +1,14 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
+import type { Root } from "react-dom/client";
+import { expect, it } from "vitest";
 import { page, userEvent } from "vitest/browser";
-import { App } from "../src/web/App.tsx";
+import { installAppTestLifecycle, installMockNetwork, mountApp } from "./app-test-helpers.tsx";
 
 const opened: Root[] = [];
-const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
-const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+
+let signedIn = false;
+let uiMode: "game" | "social" = "game";
 
 const SAMPLE_POSTS = [
   {
@@ -149,176 +150,143 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
   ],
 };
 
-function installMockNetwork() {
-  let signedIn = false;
-  let uiMode: "game" | "social" = "game";
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, window.location.origin);
-    const path = url.pathname;
-    if (path === "/api/auth/reviewer/login") {
-      signedIn = true;
-      return json({ ok: true });
-    }
-    if (path === "/api/auth/mode") {
-      const bodyStr = typeof init?.body === "string" ? init.body : "";
-      if (bodyStr.includes('"social"')) uiMode = "social";
-      if (bodyStr.includes('"game"')) uiMode = "game";
-      return json({ ok: true, uiMode });
-    }
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: signedIn,
-        viewer: signedIn
-          ? {
-              accountId: "acct-player-1",
-              handle: "alice",
-              displayName: "Alice Trader",
-              bio: "Trading with 100 pts",
-              avatarUrl: null,
-              bannerUrl: null,
-              phoneLast2: "01",
-              uiMode,
-              balanceCents: 10500,
-              startingGrantCents: 10000,
-              isAdmin: false,
-              isReviewer: true,
-              agentGrant: null,
-            }
-          : null,
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-        devSmsCodeEnabled: true,
-      });
-    }
-    if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
-    if (path === "/api/trending") return json({ trending: [] });
-    if (path === "/api/articles") return json({ articles: [] });
-    if (path === "/api/markets") return json(signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] });
-    if (path === "/api/world/status") {
-      return json({
-        currentDay: 3,
-        currentHour: 14,
-        phase: "active",
-        gameRunning: true,
-        lastTickAt: Date.now(),
-        activeMarketsCount: 1,
-        totalPostsCount: 1,
-        activeActorsCount: 5,
-      });
-    }
-    if (path.endsWith("/history")) {
-      return json({
-        range: "1D",
-        points: [
-          { timestamp: Date.now() - 3_600_000, recordedAt: Date.now() - 3_600_000, priceCents: 46, yesPriceBps: 4600, volumeCents: 1000 },
-          { timestamp: Date.now(), recordedAt: Date.now(), priceCents: 50, yesPriceBps: 5000, volumeCents: 2500 },
-        ],
-      });
-    }
-    if (path.endsWith("/trades")) {
-      return json({
-        trades: [
-          {
-            id: "trade-1",
-            traderId: "ailon-musk",
-            traderName: "AIlon Musk",
-            traderDisplayName: "AIlon Musk",
-            traderHandle: "ailonmusk",
-            traderAvatarUrl: null,
-            isNpc: true,
-            marketKind: "prediction",
-            marketRef: "seed-market-1",
-            side: "buy_yes",
-            sharesOrSize: 2000,
-            priceCents: 50,
-            notionalCents: 1000,
-            feeCents: 1,
-            createdAt: Date.now() - 30_000,
-          },
-        ],
-      });
-    }
-    if (path === "/api/markets/positions/closed") return json({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
-    if (path === "/api/economy/me/pnl-history") {
-      return json({
-        range: "ALL",
-        points: [
-          { timestamp: Date.now() - 3_600_000, pnlCents: 0, cumulativePnlCents: 0, deltaCents: 0, kind: "baseline" },
-          { timestamp: Date.now(), pnlCents: 1528, cumulativePnlCents: 1528, deltaCents: 1528, kind: "mark_to_market" },
-        ],
-        currentNetProfitCents: 1528,
-      });
-    }
-    if (path === "/api/economy/me") {
-      return json({
-        economy: {
-          accountId: "acct-player-1",
-          balanceCents: 10500,
-          positionValueCents: 1028,
-          equityCents: 11528,
-          startingGrantCents: 10000,
-          totalFeesPaidCents: 10,
-          netProfitCents: 1528,
-        },
-        ledger: [
-          {
-            id: "led-1",
-            kind: "starting_grant",
-            deltaCents: 10000,
-            balanceAfterCents: 10000,
-            refId: null,
-            createdAt: Date.now() - 3_600_000,
-          },
-        ],
-      });
-    }
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
-    if (path === "/api/leaderboard") {
-      return json(url.searchParams.get("scope") === "characters" ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
-    }
-    if (path === "/api/leaderboard/me") {
-      return json({ position: { rank: 1, page: 1, totalCount: 1, totalPages: 1, entry: SAMPLE_LEADERBOARD_PLAYERS.currentUser } });
-    }
-    if (path === "/api/chats") return json({ chats: [] });
-    if (path === "/api/chats/invites") return json({ invites: [] });
-    if (path === "/api/notifications") return json({ items: [], unreadCount: 0 });
-    if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-
-  class StubEventSource extends EventTarget {
-    close() {}
+function respond(path: string, url: URL, init?: RequestInit): unknown {
+  if (path === "/api/auth/reviewer/login") {
+    signedIn = true;
+    return ({ ok: true });
   }
-  vi.stubGlobal("EventSource", StubEventSource);
+  if (path === "/api/auth/mode") {
+    const bodyStr = typeof init?.body === "string" ? init.body : "";
+    if (bodyStr.includes('"social"')) uiMode = "social";
+    if (bodyStr.includes('"game"')) uiMode = "game";
+    return ({ ok: true, uiMode });
+  }
+  if (path === "/api/auth/me") {
+    return ({
+      authenticated: signedIn,
+      viewer: signedIn
+        ? {
+            accountId: "acct-player-1",
+            handle: "alice",
+            displayName: "Alice Trader",
+            bio: "Trading with 100 pts",
+            avatarUrl: null,
+            bannerUrl: null,
+            phoneLast2: "01",
+            uiMode,
+            balanceCents: 10500,
+            startingGrantCents: 10000,
+            isAdmin: false,
+            isReviewer: true,
+            agentGrant: null,
+          }
+        : null,
+      acceptedCountries: ["+1", "+44"],
+      publicAppUrl: window.location.origin,
+      devSmsCodeEnabled: true,
+    });
+  }
+  if (path === "/api/feed" || path === "/api/posts") return ({ items: SAMPLE_POSTS, nextCursor: null });
+  if (path === "/api/posts/browser-post-1") return ({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
+  if (path === "/api/trending") return ({ trending: [] });
+  if (path === "/api/articles") return ({ articles: [] });
+  if (path === "/api/markets") return (signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] });
+  if (path === "/api/world/status") {
+    return ({
+      currentDay: 3,
+      currentHour: 14,
+      phase: "active",
+      gameRunning: true,
+      lastTickAt: Date.now(),
+      activeMarketsCount: 1,
+      totalPostsCount: 1,
+      activeActorsCount: 5,
+    });
+  }
+  if (path.endsWith("/history")) {
+    return ({
+      range: "1D",
+      points: [
+        { timestamp: Date.now() - 3_600_000, recordedAt: Date.now() - 3_600_000, priceCents: 46, yesPriceBps: 4600, volumeCents: 1000 },
+        { timestamp: Date.now(), recordedAt: Date.now(), priceCents: 50, yesPriceBps: 5000, volumeCents: 2500 },
+      ],
+    });
+  }
+  if (path.endsWith("/trades")) {
+    return ({
+      trades: [
+        {
+          id: "trade-1",
+          traderId: "ailon-musk",
+          traderName: "AIlon Musk",
+          traderDisplayName: "AIlon Musk",
+          traderHandle: "ailonmusk",
+          traderAvatarUrl: null,
+          isNpc: true,
+          marketKind: "prediction",
+          marketRef: "seed-market-1",
+          side: "buy_yes",
+          sharesOrSize: 2000,
+          priceCents: 50,
+          notionalCents: 1000,
+          feeCents: 1,
+          createdAt: Date.now() - 30_000,
+        },
+      ],
+    });
+  }
+  if (path === "/api/markets/positions/closed") return ({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
+  if (path === "/api/economy/me/pnl-history") {
+    return ({
+      range: "ALL",
+      points: [
+        { timestamp: Date.now() - 3_600_000, pnlCents: 0, cumulativePnlCents: 0, deltaCents: 0, kind: "baseline" },
+        { timestamp: Date.now(), pnlCents: 1528, cumulativePnlCents: 1528, deltaCents: 1528, kind: "mark_to_market" },
+      ],
+      currentNetProfitCents: 1528,
+    });
+  }
+  if (path === "/api/economy/me") {
+    return ({
+      economy: {
+        accountId: "acct-player-1",
+        balanceCents: 10500,
+        positionValueCents: 1028,
+        equityCents: 11528,
+        startingGrantCents: 10000,
+        totalFeesPaidCents: 10,
+        netProfitCents: 1528,
+      },
+      ledger: [
+        {
+          id: "led-1",
+          kind: "starting_grant",
+          deltaCents: 10000,
+          balanceAfterCents: 10000,
+          refId: null,
+          createdAt: Date.now() - 3_600_000,
+        },
+      ],
+    });
+  }
+  if (path === "/api/explore") return ({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+  if (path === "/api/leaderboard") {
+    return (url.searchParams.get("scope") === "characters" ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
+  }
+  if (path === "/api/leaderboard/me") {
+    return ({ position: { rank: 1, page: 1, totalCount: 1, totalPages: 1, entry: SAMPLE_LEADERBOARD_PLAYERS.currentUser } });
+  }
+  return undefined;
 }
 
-beforeAll(() => {
-  environment.IS_REACT_ACT_ENVIRONMENT = true;
-});
-
-afterEach(async () => {
-  for (const root of opened.splice(0)) {
-    await act(() => Promise.resolve(root.unmount()));
-  }
-  vi.unstubAllGlobals();
-  window.history.replaceState(null, "", "/");
-});
-
-afterAll(() => {
-  environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+installAppTestLifecycle(opened, () => {
+  signedIn = false;
+  uiMode = "game";
 });
 
 it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  installMockNetwork(respond);
+  await mountApp(opened);
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();

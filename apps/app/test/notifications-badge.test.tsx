@@ -1,103 +1,87 @@
 // @vitest-environment happy-dom
 // spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeAll, expect, it, vi } from "vitest";
-import { App } from "../src/web/App.tsx";
+import type { Root } from "react-dom/client";
+import { expect, it } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { eventSources, flush, installAppTestLifecycle, installMockNetwork, mountApp } from "./app-test-helpers.tsx";
 
-const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
-const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
 const opened: Root[] = [];
 
-beforeAll(() => {
-  environment.IS_REACT_ACT_ENVIRONMENT = true;
-});
-
-afterEach(async () => {
-  for (const root of opened.splice(0)) {
-    await act(() => Promise.resolve(root.unmount()));
-  }
-  vi.unstubAllGlobals();
+installAppTestLifecycle(opened, () => {
+  mockState.uiMode = "game";
+  mockState.notificationsOverride = null;
   setStoreState({ viewer: null, notifications: [], unreadNotifications: 0, route: "Home" });
-  window.history.replaceState(null, "", "/");
-  environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-function installMockNetwork(): void {
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, window.location.origin);
-    const path = url.pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: true,
-        viewer: {
-          accountId: "acct-player-1",
-          handle: "alice",
-          displayName: "Alice Trader",
-          bio: "",
-          avatarUrl: null,
-          bannerUrl: null,
-          phoneLast2: "01",
-          uiMode: "social",
-          balanceCents: 10500,
-          startingGrantCents: 10000,
-          isAdmin: false,
-          isReviewer: true,
-          agentGrant: null,
-        },
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-        devSmsCodeEnabled: true,
-      });
-    }
-    if (path === "/api/notifications") {
-      return json({
-        notifications: [
-          { id: "notif-follow", kind: "follow", actorHandle: "bob", actorName: "Bob", title: "Bob followed you", read: false, createdAt: Date.now() - 60_000 },
-          { id: "notif-market", kind: "market_resolved", marketId: "seed-market-1", title: "Market resolved", read: false, createdAt: Date.now() - 30_000 },
-        ],
-        unreadCount: 2,
-      });
-    }
-    if (path === "/api/feed" || path === "/api/posts") return json({ items: [], nextCursor: null });
-    if (path === "/api/trending") return json({ trending: [] });
-    if (path === "/api/articles") return json({ articles: [] });
-    if (path === "/api/markets") return json({ predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } });
-    if (path === "/api/world/status") {
-      return json({
-        currentDay: 3,
-        currentHour: 14,
-        phase: "active",
-        gameRunning: true,
-        lastTickAt: Date.now(),
-        activeMarketsCount: 0,
-        totalPostsCount: 0,
-        activeActorsCount: 5,
-      });
-    }
-    if (path === "/api/chats") return json({ chats: [] });
-    if (path === "/api/chats/invites") return json({ invites: [] });
-    if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
+const viewer = (uiMode: "game" | "social") => ({
+  accountId: "acct-player-1",
+  handle: "alice",
+  displayName: "Alice Trader",
+  bio: "",
+  avatarUrl: null,
+  bannerUrl: null,
+  phoneLast2: "01",
+  uiMode,
+  balanceCents: 10500,
+  startingGrantCents: 10000,
+  isAdmin: false,
+  isReviewer: true,
+  agentGrant: null,
+});
 
-  class StubEventSource extends EventTarget {
-    close(): void {}
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-}
+const gameNotifications = {
+  notifications: [
+    { id: "notif-follow", kind: "follow", actorHandle: "bob", actorName: "Bob", title: "Bob followed you", read: false, createdAt: Date.now() - 60_000 },
+    { id: "notif-market", kind: "market_resolved", marketId: "seed-market-1", title: "Market resolved", read: false, createdAt: Date.now() - 30_000 },
+    { id: "notif-follow-read", kind: "follow", actorHandle: "bob", actorName: "Bob", title: "Bob followed you", read: true, createdAt: Date.now() - 120_000 },
+  ],
+  unreadCount: 2,
+};
 
-async function flush(): Promise<void> {
-  for (let i = 0; i < 30; i += 1) {
-    await act(async () => {
-      await Promise.resolve();
-    });
+const socialNotifications = {
+  notifications: [
+    { id: "notif-follow", kind: "follow", actorHandle: "bob", actorName: "Bob", title: "Bob followed you", read: false, createdAt: Date.now() - 60_000 },
+    { id: "notif-follow-read", kind: "follow", actorHandle: "bob", actorName: "Bob", title: "Bob followed you", read: true, createdAt: Date.now() - 120_000 },
+  ],
+  unreadCount: 1,
+};
+
+const mockState = {
+  uiMode: "game" as "game" | "social",
+  notificationsOverride: null as { notifications: unknown[]; unreadCount: number } | null,
+};
+
+function respond(path: string): unknown {
+  if (path === "/api/auth/me") {
+    return {
+      authenticated: true,
+      viewer: viewer(mockState.uiMode),
+      acceptedCountries: ["+1", "+44"],
+      publicAppUrl: window.location.origin,
+      devSmsCodeEnabled: true,
+    };
   }
+  if (path === "/api/notifications") {
+    return mockState.notificationsOverride ?? (mockState.uiMode === "game" ? gameNotifications : socialNotifications);
+  }
+  if (path === "/api/feed" || path === "/api/posts") return { items: [], nextCursor: null };
+  if (path === "/api/trending") return { trending: [] };
+  if (path === "/api/articles") return { articles: [] };
+  if (path === "/api/markets") return { predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } };
+  if (path === "/api/world/status") {
+    return {
+      currentDay: 3,
+      currentHour: 14,
+      phase: "active",
+      gameRunning: true,
+      lastTickAt: Date.now(),
+      activeMarketsCount: 0,
+      totalPostsCount: 0,
+      activeActorsCount: 5,
+    };
+  }
+  return undefined;
 }
 
 function notificationBadgeText(container: HTMLElement): string | null {
@@ -115,23 +99,59 @@ function unreadRowCount(container: HTMLElement): number {
   return [...container.querySelectorAll("span.sr-only")].filter((span) => span.textContent === "Unread").length;
 }
 
-it('notification badge counts only visible unread rows after an external switch to Social mode (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-  installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+async function emitSse(type: string): Promise<void> {
+  act(() => {
+    eventSources.at(-1)?.dispatchEvent(new MessageEvent(type, { data: {} }));
+  });
+  await flush();
+}
+
+it('notification badge follows a mode change through a refetch and shows the server total past one page (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
+  installMockNetwork(respond);
+  const { container } = await mountApp(opened);
   await flush();
 
-  const s = getStoreSnapshot();
-  expect(s.viewer?.uiMode).toBe("social");
-  expect(s.notifications).toHaveLength(2);
-  expect(s.unreadNotifications).toBe(2);
+  const before = getStoreSnapshot();
+  expect(before.viewer?.uiMode).toBe("game");
+  expect(before.notifications).toHaveLength(3);
+  expect(before.unreadNotifications).toBe(2);
+  expect(notificationBadgeText(container)).toBe("2");
 
   await act(() => Promise.resolve(setStoreState({ route: "Notifications" })));
   await flush();
 
   expect(container.querySelector("h1")?.textContent).toBe("Notifications");
+  expect(container.textContent).toContain("Market resolved");
+  expect(unreadRowCount(container)).toBe(2);
+  expect(notificationBadgeText(container)).toBe("2");
+
+  mockState.uiMode = "social";
+  await emitSse("world.tick");
+
+  const after = getStoreSnapshot();
+  expect(after.viewer?.uiMode).toBe("social");
+  expect(after.notifications).toHaveLength(2);
+  expect(after.unreadNotifications).toBe(1);
+  expect(container.textContent).not.toContain("Market resolved");
   expect(unreadRowCount(container)).toBe(1);
   expect(notificationBadgeText(container)).toBe("1");
+
+  mockState.notificationsOverride = {
+    notifications: Array.from({ length: 50 }, (_, i) => ({
+      id: `notif-follow-${i}`,
+      kind: "follow",
+      actorHandle: "bob",
+      actorName: "Bob",
+      title: "Bob followed you",
+      read: false,
+      createdAt: Date.now() - 60_000 - i,
+    })),
+    unreadCount: 150,
+  };
+  await emitSse("notification.created");
+
+  const paged = getStoreSnapshot();
+  expect(paged.notifications).toHaveLength(50);
+  expect(paged.unreadNotifications).toBe(150);
+  expect(notificationBadgeText(container)).toBe("99+");
 });
