@@ -631,7 +631,7 @@ export effect function sendChatMessage(input: SendChatMessageInput): ChatMessage
         messageId,
         senderId: sender.id,
         senderKind: input.senderKind,
-        createdAt: now,
+        createdAt: messageCreatedAt,
         recipientIds
       }
     ]
