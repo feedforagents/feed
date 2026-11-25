@@ -10,12 +10,12 @@
       ],
       "Domain / Navigation routes, feed tabs, and UI mode": [
         "e94af45be6d8",
-        "ba439f4bd62c"
+        "1f1219a44535"
       ],
       "Domain / Surface visibility and delayed visitor banner derivation": [
         "0f20211b0397",
         "fd05ecd18e4a",
-        "707fe5f42163"
+        "67caf6fa8fe7"
       ],
       "## Story: Browse public world content without a login wall": [
         "a776298fbaf0"
@@ -23,37 +23,37 @@
       "Story: Browse public world content without a login wall / Visitors browse public targets and scroll before seeing a delayed sign-in banner": [
         "e3b0c44298fc",
         "715e9056d294",
-        "51a60c7396bf"
+        "d2a787f558e7"
       ],
       "Story: Browse public world content without a login wall / Route navigation respects public visibility, mode hiding, and auth gates": [
         "e3b0c44298fc",
         "8d434e8fc5d8",
-        "51a60c7396bf"
+        "d2a787f558e7"
       ],
       "## Story: Switch between Game mode and Social mode": [
         "521ed7288af7"
       ],
       "Story: Switch between Game mode and Social mode / Mode switching updates surface visibility and redirects away from Markets": [
         "1668a03b0a08",
-        "e2fc6667e31b",
-        "707fe5f42163"
+        "b44902896212",
+        "67caf6fa8fe7"
       ],
       "Story: Switch between Game mode and Social mode / Navigation and mode visibility invariants": [
         "e3b0c44298fc",
         "e6351dcc3b1e",
-        "51a60c7396bf"
+        "d2a787f558e7"
       ]
     },
     "spec/app/onboarding.md": {
       "@document": [
-        "564b46ce2199"
+        "88ac22b1a1cb"
       ],
       "## Domain": [
         "e3b0c44298fc"
       ],
       "Domain / Gated actions, JoinSheet doors, and agent hosts": [
         "e3b0c44298fc",
-        "383d12640814"
+        "758c6bbf9881"
       ],
       "## Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer": [
         "f6929e259dc9"
@@ -61,7 +61,7 @@
       "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer / Triggering a gated action opens the JoinSheet while logged out or executes immediately when signed in": [
         "e3b0c44298fc",
         "e2f6638d14c2",
-        "3c189057789d"
+        "3288597fdb67"
       ],
       "## Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link": [
         "b2917968ab1b"
@@ -69,27 +69,32 @@
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Phone door enforces country allowlist, non-VoIP check, 18+ attestation, and one-time 100 pts grant": [
         "e3b0c44298fc",
         "2e475aa582c4",
-        "3c189057789d"
+        "3288597fdb67"
       ],
-      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / AI Agent door launches SKILL.md prompt and hands off to phone verification": [
-        "2def154a56ec",
-        "43a422904858",
-        "3c189057789d"
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Email magic link door verifies a single-use token, enforces 18+ attestation, and awards 100 pts once": [
+        "e3b0c44298fc",
+        "43ed1ae2cc8b",
+        "3288597fdb67"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / AI Agent door launches SKILL.md prompt and hands off to phone or email verification": [
+        "5c615f174905",
+        "9af18c13ffcd",
+        "3288597fdb67"
       ],
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Reviewer sign-in link allows password auth strictly for operator-flagged reviewer accounts": [
         "e3b0c44298fc",
         "2012f42f2471",
-        "3c189057789d"
+        "3288597fdb67"
       ],
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Onboarding invariants and reachability checks": [
         "e3b0c44298fc",
-        "9425d1612119",
-        "3c189057789d"
+        "688dd7a966ae",
+        "3288597fdb67"
       ],
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Discovered by the proof: Pending gated action has a positive target": [
         "44402cc18753",
         "33d163779ae8",
-        "3c189057789d"
+        "3288597fdb67"
       ]
     },
     "spec/engine/spendBudget.md": {
@@ -240,12 +245,12 @@
       "Domain / Journey state across web navigation, onboarding, economy, and world engine": [
         "e3b0c44298fc",
         "898cfa1ee84b",
-        "c2a013dd1a9d"
+        "140f70b106c8"
       ],
       "Domain / Equity and profit leaderboard calculation": [
         "51c5ad54e5ab",
         "c7e07fabc186",
-        "0bfd5393d4c7"
+        "007356ab73e7"
       ],
       "## Story: Walk the full Feed gameplay loop from visitor to settlement": [
         "ebc0ef3872f6"
@@ -253,27 +258,27 @@
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Visitor browses, hits a gated action, verifies phone, and receives 100 pts": [
         "e3b0c44298fc",
         "829776bd57ce",
-        "056363c76c51"
+        "dc0dbe344006"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Signed-in player connects one AI agent, posts socially, and trades predictions and 20x perps": [
         "b0a024ef7f70",
         "7bc577bf90c7",
-        "f686aadfe4ce"
+        "4239fc2a9816"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Bounded NPC tick moves spot index price and sends alpha invite; market settles 1 pt per winning share": [
         "e3b0c44298fc",
         "92c9e48a52f9",
-        "5058d304fca4"
+        "8827baff0700"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / End-to-end journey invariants and witness path": [
         "e3b0c44298fc",
         "9dae8028c0c7",
-        "56cd126b5db3"
+        "addec263f3bf"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Discovered by the proof: Spend budget attempt bounds remain valid": [
         "fb72600468d4",
         "11c922b86a87",
-        "d200c06feab8"
+        "8004e978347e"
       ]
     },
     "spec/shared/money.md": {
@@ -332,7 +337,7 @@
       "Domain / Application shell state and single-agent grant tracking": [
         "b99345ef504c",
         "e30a402998e9",
-        "575643927cc5"
+        "8bb545cfd29c"
       ],
       "## Story: Browse, switch modes, and sign in through the JoinSheet": [
         "c33fe2a8cb4c"
@@ -340,12 +345,12 @@
       "Story: Browse, switch modes, and sign in through the JoinSheet / Public navigation, feed tabs, mode switching, and visitor banners": [
         "e3b0c44298fc",
         "ac744f4b6620",
-        "62cf8c54060e"
+        "360a0543abd2"
       ],
       "Story: Browse, switch modes, and sign in through the JoinSheet / Deferred gated actions and JoinSheet sign-in stay synchronized with navigation auth state": [
         "e3b0c44298fc",
-        "9f858347fcdb",
-        "bf8ecc025111"
+        "4a91f0315fbc",
+        "8d21d2664e02"
       ],
       "## Story: Connect and revoke the account's single AI agent": [
         "dcf29e650bd4"
@@ -353,17 +358,17 @@
       "Story: Connect and revoke the account's single AI agent / Connecting a new agent atomically revokes any prior grant": [
         "e3b0c44298fc",
         "853b8fba2e2a",
-        "2d04e51aa7a3"
+        "6232bcd23e6b"
       ],
       "Story: Connect and revoke the account's single AI agent / Root web application invariants and goals": [
         "e3b0c44298fc",
         "05f63b6804d5",
-        "5eb5cd496769"
+        "d8ff87226ef7"
       ],
       "Story: Connect and revoke the account's single AI agent / Discovered by the proof: Onboarding pending gated action has a positive target": [
         "bf4a7b08ccc9",
         "d6e9f010985c",
-        "1eba0617c4a0"
+        "252b6d4095d7"
       ]
     },
     "spec/auth/agentGrant.md": {
@@ -403,9 +408,57 @@
         "c9fb74397a60"
       ]
     },
+    "spec/auth/email.md": {
+      "@document": [
+        "59e5b05999df"
+      ],
+      "## Story: Request and consume a single-use email magic link safely": [
+        "dab74afbff13"
+      ],
+      "Story: Request and consume a single-use email magic link safely / Only valid non-disposable emails, Turnstile-verified requests, and rate-limited addresses receive a magic link": [
+        "32f991bffbbd",
+        "9a9f1e14e93e"
+      ],
+      "Story: Request and consume a single-use email magic link safely / Magic links are single-use, expire in 15 minutes, and purge pending secrets on consume or expiry": [
+        "30903f963e46",
+        "f9a8221e6095",
+        "8139ddb5cfd2"
+      ],
+      "## Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown": [
+        "f8b5ed9db36f"
+      ],
+      "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown / Email onboarding requires username, 18+ attestation, and Terms, and issues 100 pts once per verified email": [
+        "b11cd0713c62",
+        "c32fbd2ac2dd",
+        "8139ddb5cfd2"
+      ],
+      "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown / Linking or changing an email requires an active non-reviewer account, an unused address, and recent sign-in or first link": [
+        "e3b0c44298fc",
+        "9b680a21fb26",
+        "8139ddb5cfd2"
+      ],
+      "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown / Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days": [
+        "dd37273d89f5",
+        "44770f2c80ef",
+        "2d086b131cf6"
+      ],
+      "## Story: Enforce inductive email-auth invariants and verify reachable milestones": [
+        "e3b0c44298fc"
+      ],
+      "Story: Enforce inductive email-auth invariants and verify reachable milestones / Active accounts, single-use links, one-time grants, cooldown release, and secret clearing hold inductively": [
+        "e3b0c44298fc",
+        "c4baf8f0c16a",
+        "f57f0003762a"
+      ],
+      "Story: Enforce inductive email-auth invariants and verify reachable milestones / Simulation samples and witness journeys cover onboarding, linking, expiry, deletion cooldown, and sign-out": [
+        "e3b0c44298fc",
+        "50199ad18284",
+        "8139ddb5cfd2"
+      ]
+    },
     "spec/auth/index.md": {
       "@document": [
-        "47d8d8179370"
+        "fab87ed71490"
       ]
     },
     "spec/auth/oauth.md": {
@@ -632,7 +685,7 @@
     },
     "spec/index.md": {
       "@document": [
-        "40081d9d1047"
+        "5f48e93c2be4"
       ]
     },
     "spec/markets/economy.md": {
