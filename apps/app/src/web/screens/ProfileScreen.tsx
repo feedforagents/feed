@@ -345,9 +345,8 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
         onFollowingClick={() => { void storeActions.loadFollowList(bundle.summary.handle, "following"); }}
       />
 
-      {bundle.actorMeta && (bundle.actorMeta.tier || bundle.actorMeta.affiliations.length > 0) ? (
+      {bundle.actorMeta && bundle.actorMeta.affiliations.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5 text-xs">
-          {bundle.actorMeta.tier ? <Badge variant="secondary">{bundle.actorMeta.tier}</Badge> : null}
           {bundle.actorMeta.affiliations.map((aff) => (
             <Badge key={aff} variant="outline">{aff}</Badge>
           ))}

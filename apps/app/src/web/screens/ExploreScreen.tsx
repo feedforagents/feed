@@ -312,7 +312,8 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
           <div className="relative flex-1">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-3.5 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              type="search"
+              type="text"
+              enterKeyHint="search"
               aria-label="Search Feed"
               placeholder={isGame ? "Search posts, @people, #tags, or $tickers" : "Search posts, @people, or #tags"}
               value={draftQuery}
@@ -462,7 +463,9 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
                     <p className={`truncate text-base font-bold ${item.financial ? "font-mono text-primary" : "text-foreground"}`}>
                       {item.title}
                     </p>
-                    {item.subtitle ? <p className="text-xs text-muted-foreground">{item.subtitle}</p> : null}
+                    {item.subtitle ? (
+                      <p className="text-xs text-muted-foreground">{item.subtitle.replace(/\b1 posts\b/giu, "1 post")}</p>
+                    ) : null}
                   </div>
                   {item.metric && isGame ? (
                     <span className="shrink-0 font-mono text-sm font-semibold text-primary tabular-nums">{item.metric}</span>

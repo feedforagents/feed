@@ -195,6 +195,32 @@ export interface AssetTradesFeedProps {
   className?: string;
 }
 
+export interface PerpServerQuote {
+  /** Server-quoted execution fill price in `pts`. */
+  fillPricePts: number;
+  /** Server-quoted price impact percentage. */
+  impactPct: number;
+  /** Optional server-quoted liquidation price in `pts`. */
+  liquidationPricePts?: number;
+  /** Optional server-quoted fee in `pts`. */
+  feePts?: number;
+  /** Optional server-quoted total required margin and fee in `pts`. */
+  totalRequiredPts?: number;
+  /** Optional order side this quote applies to. */
+  side?: "long" | "short";
+  /** Optional margin in `pts` this quote applies to. */
+  marginPts?: number;
+  /** Optional leverage multiplier this quote applies to. */
+  leverage?: number;
+}
+
+export interface PerpPreviewOrderInput {
+  ticker: string;
+  side: "long" | "short";
+  marginPts: number;
+  leverage: number;
+}
+
 export interface PerpOrderPanelProps {
   /** Active perpetual contract metadata. */
   market: TerminalPerpMarket;
@@ -202,6 +228,10 @@ export interface PerpOrderPanelProps {
   balancePts: number;
   /** Existing open position on this ticker, if any. */
   existingPosition?: ExistingPerpPosition | null;
+  /** Optional live server execution quote feeding Est. Entry and Price Impact directly into the summary. */
+  serverQuote?: PerpServerQuote | null;
+  /** Requests a refreshed server quote when order parameters change. */
+  onPreviewPerpOrder?: (order: PerpPreviewOrderInput) => void;
   /** Opens a new perp position. */
   onOpenPerp: (order: PerpOpenOrderInput) => void;
   /** Rebalances an existing perp position (`add`, `reduce`, or `flip`). */
@@ -262,6 +292,10 @@ export type MarketsTradingTerminalProps = Omit<ComponentProps<"div">, "children"
   perpPositions?: readonly ExistingPerpPosition[];
   /** Open prediction holdings (used for Sell Max & Positions sidebar). */
   predictionPositions?: readonly ExistingPredictionHolding[];
+  /** Optional live server execution quote for perpetual order preview. */
+  serverQuote?: PerpServerQuote | null;
+  /** Requests a refreshed server quote when perpetual order inputs change. */
+  onPreviewPerpOrder?: (order: PerpPreviewOrderInput) => void;
   /** Submits a fresh perp open order. */
   onOpenPerp?: (order: PerpOpenOrderInput) => void;
   /** Submits a perp rebalance (`add`, `reduce`, or `flip`) order. */
@@ -388,6 +422,63 @@ export function AssetTradesFeed({
         </li>
       ))}
     </ul>
+  );
+}
+
+function OrderPolarityToggle<T extends string>({
+  ariaLabel,
+  value,
+  onChange,
+  disabled,
+  positiveOption,
+  negativeOption,
+}: {
+  ariaLabel: string;
+  value: T;
+  onChange: (next: T) => void;
+  disabled?: boolean;
+  positiveOption: { value: T; label: string };
+  negativeOption: { value: T; label: string };
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={ariaLabel}
+      className="grid w-full grid-cols-2 gap-1 rounded-md border border-input bg-muted p-1"
+    >
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === positiveOption.value}
+        disabled={disabled}
+        onClick={() => onChange(positiveOption.value)}
+        className={cn(
+          focusRing,
+          "h-9 w-full rounded-sm px-3 text-sm transition-colors duration-fast disabled:pointer-events-none disabled:opacity-50",
+          value === positiveOption.value
+            ? "bg-ok font-semibold text-background shadow-sm"
+            : "bg-transparent font-medium text-muted-foreground hover:text-foreground",
+        )}
+      >
+        {positiveOption.label}
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === negativeOption.value}
+        disabled={disabled}
+        onClick={() => onChange(negativeOption.value)}
+        className={cn(
+          focusRing,
+          "h-9 w-full rounded-sm px-3 text-sm transition-colors duration-fast disabled:pointer-events-none disabled:opacity-50",
+          value === negativeOption.value
+            ? "bg-danger-solid font-semibold text-danger-solid-foreground shadow-sm"
+            : "bg-transparent font-medium text-muted-foreground hover:text-foreground",
+        )}
+      >
+        {negativeOption.label}
+      </button>
+    </div>
   );
 }
 
@@ -616,6 +707,7 @@ function RebalancePerpForm({
         onValueChange={(next) => {
           if (next === "add" || next === "reduce" || next === "close" || next === "flip") setMode(next);
         }}
+        className="grid w-full grid-cols-4"
         options={[
           { value: "add", label: "Add" },
           { value: "reduce", label: "Reduce" },
@@ -730,11 +822,68 @@ function RebalancePerpForm({
   );
 }
 
+function PerpOrderSummary({
+  validMargin,
+  notionalPts,
+  liveQuote,
+  estEntryPrice,
+  impactPct,
+  liqPrice,
+  liqDistPct,
+  feeBps,
+  estimatedFeePts,
+  totalRequiredPts,
+}: {
+  validMargin: boolean;
+  notionalPts: number;
+  liveQuote: boolean;
+  estEntryPrice: number;
+  impactPct: number;
+  liqPrice: number;
+  liqDistPct: number;
+  feeBps: number;
+  estimatedFeePts: number;
+  totalRequiredPts: number;
+}) {
+  return (
+    <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-3 font-mono text-xs tabular-nums">
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">Notional Size</dt>
+        <dd className="font-semibold text-foreground">{validMargin ? formatPts(notionalPts) : "—"}</dd>
+      </div>
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">{liveQuote ? "Est. Entry (Live)" : "Est. Entry"}</dt>
+        <dd className="font-semibold text-foreground">{formatPricePts(estEntryPrice)}</dd>
+      </div>
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">Price Impact</dt>
+        <dd className={cn(impactPct >= 2 ? "text-warn" : "text-foreground")}>{impactPct.toFixed(2)}%</dd>
+      </div>
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">Est. Liquidation</dt>
+        <dd className={cn(liqDistPct < 10 ? "font-semibold text-warn" : "text-foreground")}>
+          {formatPricePts(liqPrice)} ({liqDistPct.toFixed(1)}%)
+        </dd>
+      </div>
+      <div className="flex justify-between">
+        <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
+        <dd className="text-foreground">{validMargin ? formatPts(estimatedFeePts) : "—"}</dd>
+      </div>
+      <div className="flex justify-between border-t border-border pt-1.5">
+        <dt className="text-muted-foreground">Total Required</dt>
+        <dd className="font-bold text-foreground">{validMargin ? formatPts(totalRequiredPts) : "—"}</dd>
+      </div>
+    </dl>
+  );
+}
+
 /** Perpetual order ticket supporting fresh Long/Short entries and intuitive Add/Reduce/Close/Flip rebalancing. */
 export function PerpOrderPanel({
   market,
   balancePts,
   existingPosition,
+  serverQuote,
+  onPreviewPerpOrder,
   onOpenPerp,
   onRebalancePerp,
   onClosePerp,
@@ -778,20 +927,66 @@ export function PerpOrderPanel({
   const marginPts = Number(marginText);
   const validMargin = Number.isFinite(marginPts) && marginPts > 0;
   const notionalPts = validMargin ? marginPts * leverage : 0;
-  const estimatedFeePts = calcFeePts(notionalPts, feeBps);
-  const totalRequiredPts = validMargin ? marginPts + estimatedFeePts : 0;
+  const activeQuote =
+    serverQuote &&
+    (serverQuote.side === undefined || serverQuote.side === side) &&
+    (serverQuote.leverage === undefined || serverQuote.leverage === leverage) &&
+    (serverQuote.marginPts === undefined || (validMargin && Math.abs(serverQuote.marginPts - marginPts) < 0.01))
+      ? serverQuote
+      : null;
+  const estimatedFeePts =
+    activeQuote?.feePts !== undefined ? activeQuote.feePts : calcFeePts(notionalPts, feeBps);
+  const totalRequiredPts =
+    activeQuote?.totalRequiredPts !== undefined
+      ? activeQuote.totalRequiredPts
+      : validMargin
+        ? marginPts + estimatedFeePts
+        : 0;
   const openInterestBase = Math.max(market.openInterest ?? 50_000, 1_000);
-  const markImpactPct = validMargin ? Math.min(15, (notionalPts / openInterestBase) * 5) : 0;
-  const estEntryPrice =
-    side === "long" ? market.currentPrice * (1 + markImpactPct / 100) : market.currentPrice * (1 - markImpactPct / 100);
-  const liqPrice = calcLiquidationPrice(estEntryPrice, side, leverage);
+  const clientImpactPct = validMargin ? Math.min(15, (notionalPts / openInterestBase) * 5) : 0;
+  const impactPct = activeQuote ? activeQuote.impactPct : clientImpactPct;
+  const clientEstEntryPrice =
+    side === "long" ? market.currentPrice * (1 + clientImpactPct / 100) : market.currentPrice * (1 - clientImpactPct / 100);
+  const estEntryPrice = activeQuote ? activeQuote.fillPricePts : clientEstEntryPrice;
+  const liqPrice =
+    activeQuote?.liquidationPricePts !== undefined
+      ? activeQuote.liquidationPricePts
+      : calcLiquidationPrice(estEntryPrice, side, leverage);
   const liqDistPct = calcLiquidationDistancePct(estEntryPrice, liqPrice, side);
   const belowMinNotional = validMargin && notionalPts < MIN_PERP_NOTIONAL_PTS;
   const insufficientBalance = validMargin && totalRequiredPts > balancePts;
 
+  const requestPreview = (nextSide: "long" | "short", nextMargin: number, nextLeverage: number) => {
+    if (!onPreviewPerpOrder || !Number.isFinite(nextMargin) || nextMargin <= 0) return;
+    onPreviewPerpOrder({
+      ticker: market.ticker,
+      side: nextSide,
+      marginPts: nextMargin,
+      leverage: nextLeverage,
+    });
+  };
+
+  const handleSideChange = (nextSide: "long" | "short") => {
+    setSide(nextSide);
+    if (validMargin) requestPreview(nextSide, marginPts, leverage);
+  };
+
+  const handleMarginChange = (nextText: string) => {
+    setMarginText(nextText);
+    const parsed = Number(nextText);
+    if (Number.isFinite(parsed) && parsed > 0) requestPreview(side, parsed, leverage);
+  };
+
+  const handleLeverageChange = (nextLeverage: number) => {
+    setLeverage(nextLeverage);
+    if (validMargin) requestPreview(side, marginPts, nextLeverage);
+  };
+
   const applyMarginPreset = (ratio: number) => {
     const maxMargin = Math.max(0, balancePts / (1 + (leverage * feeBps) / 10_000));
-    setMarginText((maxMargin * ratio).toFixed(2));
+    const nextVal = Number((maxMargin * ratio).toFixed(2));
+    setMarginText(nextVal.toFixed(2));
+    if (nextVal > 0) requestPreview(side, nextVal, leverage);
   };
 
   const executeOpen = () => {
@@ -828,15 +1023,13 @@ export function PerpOrderPanel({
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <SegmentedControl
-            aria-label="Perp direction"
+          <OrderPolarityToggle
+            ariaLabel="Perp direction"
             value={side}
             disabled={submitting}
-            onValueChange={(next) => setSide(next === "short" ? "short" : "long")}
-            options={[
-              { value: "long", label: "Long" },
-              { value: "short", label: "Short" },
-            ]}
+            onChange={handleSideChange}
+            positiveOption={{ value: "long", label: "Long" }}
+            negativeOption={{ value: "short", label: "Short" }}
           />
 
           <div className="flex flex-col gap-2">
@@ -849,7 +1042,7 @@ export function PerpOrderPanel({
               value={marginText}
               disabled={submitting}
               invalid={!validMargin && marginText !== ""}
-              onChange={(event) => setMarginText(event.target.value)}
+              onChange={(event) => handleMarginChange(event.target.value)}
               className="font-mono tabular-nums"
             />
             <div className="grid grid-cols-4 gap-1.5">
@@ -884,7 +1077,7 @@ export function PerpOrderPanel({
               step={1}
               value={leverage}
               disabled={submitting}
-              onChange={(event) => setLeverage(Number(event.target.value))}
+              onChange={(event) => handleLeverageChange(Number(event.target.value))}
               className="w-full accent-primary disabled:opacity-50"
             />
             <div className="grid grid-cols-5 gap-1">
@@ -895,7 +1088,7 @@ export function PerpOrderPanel({
                   variant={leverage === chip ? "primary" : "outline"}
                   size="sm"
                   disabled={submitting}
-                  onClick={() => setLeverage(chip)}
+                  onClick={() => handleLeverageChange(chip)}
                   className="px-2 font-mono text-xs tabular-nums"
                 >
                   {chip}x
@@ -904,34 +1097,18 @@ export function PerpOrderPanel({
             </div>
           </div>
 
-          <dl className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-3 font-mono text-xs tabular-nums">
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">Notional Size</dt>
-              <dd className="font-semibold text-foreground">{validMargin ? formatPts(notionalPts) : "—"}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">Est. Entry</dt>
-              <dd className="text-foreground">{formatPricePts(estEntryPrice)}</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">Mark Impact</dt>
-              <dd className={cn(markImpactPct >= 2 ? "text-warn" : "text-foreground")}>{markImpactPct.toFixed(2)}%</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">Est. Liquidation</dt>
-              <dd className={cn(liqDistPct < 10 ? "font-semibold text-warn" : "text-foreground")}>
-                {formatPricePts(liqPrice)} ({liqDistPct.toFixed(1)}%)
-              </dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
-              <dd className="text-foreground">{validMargin ? formatPts(estimatedFeePts) : "—"}</dd>
-            </div>
-            <div className="flex justify-between border-t border-border pt-1.5">
-              <dt className="text-muted-foreground">Total Required</dt>
-              <dd className="font-bold text-foreground">{validMargin ? formatPts(totalRequiredPts) : "—"}</dd>
-            </div>
-          </dl>
+          <PerpOrderSummary
+            validMargin={validMargin}
+            notionalPts={notionalPts}
+            liveQuote={activeQuote !== null}
+            estEntryPrice={estEntryPrice}
+            impactPct={impactPct}
+            liqPrice={liqPrice}
+            liqDistPct={liqDistPct}
+            feeBps={feeBps}
+            estimatedFeePts={estimatedFeePts}
+            totalRequiredPts={totalRequiredPts}
+          />
 
           {belowMinNotional ? <Alert variant="warn">Minimum notional size is {formatPts(MIN_PERP_NOTIONAL_PTS)}.</Alert> : null}
           {insufficientBalance ? <Alert variant="destructive">Insufficient balance ({formatPts(balancePts)} available).</Alert> : null}
@@ -1050,26 +1227,22 @@ export function PredictionOrderPanel({
 
       <CardContent>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <SegmentedControl
-            aria-label="Prediction action"
+          <OrderPolarityToggle
+            ariaLabel="Prediction action"
             value={action}
             disabled={submitting}
-            onValueChange={(next) => setAction(next === "sell" ? "sell" : "buy")}
-            options={[
-              { value: "buy", label: "Buy" },
-              { value: "sell", label: "Sell" },
-            ]}
+            onChange={setAction}
+            positiveOption={{ value: "buy", label: "Buy" }}
+            negativeOption={{ value: "sell", label: "Sell" }}
           />
 
-          <SegmentedControl
-            aria-label="Outcome side"
+          <OrderPolarityToggle
+            ariaLabel="Outcome side"
             value={side}
             disabled={submitting}
-            onValueChange={(next) => setSide(next === "NO" ? "NO" : "YES")}
-            options={[
-              { value: "YES", label: `YES ${market.yesOddsPct.toFixed(0)}%` },
-              { value: "NO", label: `NO ${(100 - market.yesOddsPct).toFixed(0)}%` },
-            ]}
+            onChange={setSide}
+            positiveOption={{ value: "YES", label: `YES ${market.yesOddsPct.toFixed(0)}%` }}
+            negativeOption={{ value: "NO", label: `NO ${(100 - market.yesOddsPct).toFixed(0)}%` }}
           />
 
           <div className="flex flex-col gap-2">
@@ -1321,8 +1494,8 @@ function TerminalHeader({
             <div className="flex min-w-0 flex-col">
               <div className="flex items-center gap-2">
                 <h1 className="font-mono text-base font-bold text-foreground">${market.data.ticker}</h1>
-                <Badge variant={market.data.changePercent24h >= 0 ? "ok" : "destructive"} className="font-mono tabular-nums">
-                  {market.data.changePercent24h >= 0 ? "+" : ""}
+                <Badge variant={market.data.changePercent24h >= 0 ? "ok" : "destructive"} className="font-mono whitespace-nowrap tabular-nums">
+                  24h {market.data.changePercent24h >= 0 ? "+" : ""}
                   {market.data.changePercent24h.toFixed(2)}%
                 </Badge>
               </div>
@@ -1379,6 +1552,8 @@ export function MarketsTradingTerminal({
   socialFeed,
   perpPositions = [],
   predictionPositions = [],
+  serverQuote,
+  onPreviewPerpOrder,
   onOpenPerp,
   onRebalancePerp,
   onClosePerp,
@@ -1417,6 +1592,8 @@ export function MarketsTradingTerminal({
         market={market.data}
         balancePts={balancePts}
         existingPosition={activePerpPosition}
+        serverQuote={serverQuote}
+        onPreviewPerpOrder={onPreviewPerpOrder}
         onOpenPerp={(order) => onOpenPerp?.(order)}
         onRebalancePerp={onRebalancePerp}
         onClosePerp={onClosePerp}
@@ -1483,7 +1660,7 @@ export function MarketsTradingTerminal({
         onToggleFullscreen={() => setFullscreen((prev) => !prev)}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col pb-24 lg:flex-row">
+      <div className="flex min-h-0 flex-1 flex-col pb-32 md:pb-24 lg:flex-row lg:pb-0">
         <div className="flex min-w-0 flex-1 flex-col lg:border-r lg:border-border">
           <Tabs
             value={mobileTab}
@@ -1578,7 +1755,12 @@ export function MarketsTradingTerminal({
         ) : null}
       </div>
 
-      <div className="sticky bottom-0 z-20 border-t border-border bg-background/95 p-3 backdrop-blur-sm lg:hidden">
+      <div
+        className={cn(
+          "sticky z-20 border-t border-border bg-background/95 p-3 backdrop-blur-sm lg:hidden",
+          fullscreen ? "bottom-0" : "bottom-[calc(3.5rem+env(safe-area-inset-bottom))] md:bottom-0",
+        )}
+      >
         <Sheet open={mobileSheetOpen} onOpenChange={setMobileSheetOpen}>
           <SheetTrigger asChild>
             <Button variant="primary" shape="pill" className="w-full">

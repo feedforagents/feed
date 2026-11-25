@@ -155,7 +155,7 @@ function PostOverflowMenu({
           disabled={disabled}
           aria-label="More post actions"
           onClick={(e) => e.stopPropagation()}
-          className={cn(focusRing, inactive, "ml-auto -mr-1.5 rounded-full p-1.5 text-muted-foreground transition-colors duration-fast hover:bg-accent hover:text-foreground")}
+          className={cn(focusRing, inactive, "ml-auto -mr-1.5 shrink-0 rounded-full p-1.5 text-muted-foreground transition-colors duration-fast hover:bg-accent hover:text-foreground")}
         >
           <MoreHorizontal aria-hidden className="size-4" />
         </button>
@@ -492,8 +492,8 @@ export function PostCard({
         )}
 
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-sm">
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1 text-sm">
               {onAuthorClick ? (
                 <button
                   type="button"
@@ -504,23 +504,22 @@ export function PostCard({
                   }}
                   className={cn(focusRing, inactive, "inline-flex min-w-0 items-center gap-1 rounded-sm font-bold text-foreground hover:underline")}
                 >
-                  <span className="truncate">{post.authorDisplayName}</span>
+                  <span className="min-w-0 truncate">{post.authorDisplayName}</span>
                   {post.isNpcParody ? <VerifiedBadge size="sm" /> : null}
-                  <span className="truncate font-normal text-muted-foreground">@{post.authorHandle}</span>
+                  <span className="min-w-0 truncate font-normal text-muted-foreground">@{post.authorHandle}</span>
                 </button>
               ) : (
                 <span className="inline-flex min-w-0 items-center gap-1">
-                  <span className="truncate font-bold text-foreground">{post.authorDisplayName}</span>
+                  <span className="min-w-0 truncate font-bold text-foreground">{post.authorDisplayName}</span>
                   {post.isNpcParody ? <VerifiedBadge size="sm" /> : null}
-                  <span className="truncate text-muted-foreground">@{post.authorHandle}</span>
+                  <span className="min-w-0 truncate text-muted-foreground">@{post.authorHandle}</span>
                 </span>
               )}
-              <span aria-hidden className="text-muted-foreground">
-                ·
-              </span>
-              <span className="text-muted-foreground">{post.createdAt}</span>
+              <span className="shrink-0 whitespace-nowrap text-muted-foreground">· {post.createdAt}</span>
               {post.viaClientName ? (
-                <span className="text-xs text-muted-foreground">· via {post.viaClientName}</span>
+                <span className="hidden shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:inline">
+                  · via {post.viaClientName}
+                </span>
               ) : null}
             </div>
             <PostOverflowMenu

@@ -1,7 +1,6 @@
 import type { ComponentProps } from "react";
 import { Bot } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
-import { formatPts } from "../lib/hosts.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
@@ -102,6 +101,15 @@ const columnToMetric: Partial<Record<LeaderboardSortColumn, LeaderboardMetric>> 
   volume: "volume",
 };
 
+export const formatLeaderboardPts = (pts: number, signed = false): string => {
+  const formatted = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(pts));
+  if (signed) return `${pts > 0 ? "+" : pts < 0 ? "-" : ""}${formatted} pts`;
+  return `${pts < 0 ? "-" : ""}${formatted} pts`;
+};
+
 const formatReturnPct = (value: number): string => {
   const normalized = Math.abs(value) < 0.05 ? 0 : value;
   const prefix = normalized > 0 ? "+" : "";
@@ -126,7 +134,7 @@ function PinnedCurrentUserBar({
         <span className="text-muted-foreground">@{row.handle}</span>
         <Badge variant="info">YOU</Badge>
         <span className={cn("font-mono font-semibold tabular-nums", row.netProfitPts >= 0 ? "text-ok" : "text-destructive")}>
-          {formatPts(row.netProfitPts, true)}
+          {formatLeaderboardPts(row.netProfitPts, true)}
         </span>
         {roi !== undefined ? (
           <span className={cn("font-mono tabular-nums", roi >= 0 ? "text-ok" : "text-destructive")}>
@@ -211,7 +219,14 @@ export function LeaderboardTable({
           />
           {totalCount !== undefined ? (
             <span className="font-mono text-xs text-muted-foreground tabular-nums">
-              {totalCount} {scope === "characters" ? "characters" : "players"}
+              {totalCount}{" "}
+              {scope === "characters"
+                ? totalCount === 1
+                  ? "character"
+                  : "characters"
+                : totalCount === 1
+                  ? "player"
+                  : "players"}
             </span>
           ) : null}
         </div>
@@ -300,7 +315,7 @@ export function LeaderboardTable({
                       )}
                     </TableCell>
                     <TableCell className={cn("px-2.5 py-2.5 text-right font-mono font-semibold whitespace-nowrap tabular-nums", positive ? "text-ok" : "text-destructive")}>
-                      {formatPts(row.netProfitPts, true)}
+                      {formatLeaderboardPts(row.netProfitPts, true)}
                     </TableCell>
                     <TableCell
                       className={cn(
@@ -312,7 +327,7 @@ export function LeaderboardTable({
                     </TableCell>
                     {showEquity ? (
                       <TableCell className="hidden px-2.5 py-2.5 text-right font-mono whitespace-nowrap tabular-nums 2xl:table-cell">
-                        {row.equityPts !== undefined ? formatPts(row.equityPts) : "—"}
+                        {row.equityPts !== undefined ? formatLeaderboardPts(row.equityPts) : "—"}
                       </TableCell>
                     ) : null}
                     <TableCell className="px-2.5 py-2.5 text-right font-mono whitespace-nowrap tabular-nums">{row.winRatePct}%</TableCell>
@@ -321,7 +336,7 @@ export function LeaderboardTable({
                         {row.tradeCount !== undefined ? row.tradeCount : "—"}
                       </TableCell>
                     ) : null}
-                    <TableCell className="hidden px-2.5 py-2.5 text-right font-mono whitespace-nowrap text-muted-foreground tabular-nums 2xl:table-cell">{formatPts(row.volumePts)}</TableCell>
+                    <TableCell className="hidden px-2.5 py-2.5 text-right font-mono whitespace-nowrap text-muted-foreground tabular-nums 2xl:table-cell">{formatLeaderboardPts(row.volumePts)}</TableCell>
                     {showFollow ? (
                       <TableCell className="shrink-0 px-2.5 py-2.5 text-right whitespace-nowrap">
                         {isViewer ? null : (

@@ -26,6 +26,10 @@ export interface TrendingItem {
 export type AppShellProps = Omit<ComponentProps<"div">, "children"> & {
   /** Active navigation route highlighted in both desktop rail and mobile bottom bar. */
   route: AppNavRoute;
+  /** Optional override for the highlighted nav item; pass `null` on detail pages so no primary tab is force-highlighted. */
+  activeRoute?: AppNavRoute | null;
+  /** Optional mobile header title overriding the route label. */
+  headerTitle?: string;
   /** Current presentation mode (`SocialMode` hides Markets, Leaderboard, balances, and financial movers). */
   mode: UiMode;
   /** Whether a player session is active; hides auth-only destinations when false. */
@@ -80,12 +84,12 @@ const navConfig: { id: AppNavRoute; label: string; href: string; icon?: NavIcon;
   { id: "Home", label: "Home", href: "/", mobile: true },
   { id: "Explore", label: "Explore", href: "/explore", icon: Compass, mobile: true },
   { id: "Markets", label: "Markets", href: "/markets", icon: LineChart, gameOnly: true, mobile: true },
-  { id: "Leaderboard", label: "Leaderboard", href: "/leaderboard", icon: Trophy, gameOnly: true, mobile: true },
+  { id: "Leaderboard", label: "Leaderboard", href: "/leaderboard", icon: Trophy, gameOnly: true },
   { id: "Chats", label: "Chats", href: "/chats", icon: MessageSquare, authOnly: true, mobile: true },
   { id: "Notifications", label: "Notifications", href: "/notifications", icon: Bell, authOnly: true, mobile: true },
   { id: "Profile", label: "Profile", href: "/profile", icon: User, authOnly: true },
   { id: "Settings", label: "Settings", href: "/settings", icon: Settings, authOnly: true },
-  { id: "HowToPlay", label: "How to Play", href: "/how-to-play", icon: HelpCircle, mobile: true },
+  { id: "HowToPlay", label: "How to Play", href: "/how-to-play", icon: HelpCircle },
 ];
 
 type NavItemConfig = (typeof navConfig)[number];
@@ -110,20 +114,20 @@ function UnreadDot({ count }: { readonly count: number }) {
 
 function NavItemButton({
   item,
-  route,
+  activeRoute,
   disabled,
   onNavigate,
   variant,
   count = 0,
 }: {
   readonly item: NavItemConfig;
-  readonly route: AppNavRoute;
+  readonly activeRoute: AppNavRoute | null;
   readonly disabled: boolean;
   readonly onNavigate?: (route: AppNavRoute) => void;
   readonly variant: "rail" | "mobile";
   readonly count?: number;
 }) {
-  const active = route === item.id;
+  const active = activeRoute === item.id;
   const isRail = variant === "rail";
 
   return (
@@ -208,7 +212,11 @@ function DefaultTrendingRail({
             >
               <span className="min-w-0">
                 <span className="block truncate text-sm font-semibold text-foreground">{item.title}</span>
-                {item.subtitle ? <span className="block truncate text-xs text-muted-foreground">{item.subtitle}</span> : null}
+                {item.subtitle ? (
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {item.subtitle.replace(/\b1 posts\b/giu, "1 post")}
+                  </span>
+                ) : null}
               </span>
               {item.metric && !isSocial ? <span className="shrink-0 font-mono text-xs font-semibold text-primary tabular-nums">{item.metric}</span> : null}
             </button>
@@ -222,6 +230,8 @@ function DefaultTrendingRail({
 /** Responsive X-style three-column Feed shell with collapsible left rail, sticky right rail, mobile bottom bar, and SocialMode filtering. */
 export function AppShell({
   route,
+  activeRoute,
+  headerTitle,
   mode,
   signedIn,
   layout = "social",
@@ -250,8 +260,10 @@ export function AppShell({
 }: AppShellProps) {
   const isSocial = mode === "SocialMode";
   const isWide = layout === "wide";
+  const highlightedRoute = activeRoute === undefined ? route : activeRoute;
+  const resolvedTitle = headerTitle ?? navConfig.find((item) => item.id === route)?.label ?? route;
   const visibleItems = navConfig.filter((item) => (!item.authOnly || signedIn) && (!item.gameOnly || !isSocial));
-  const mobileItems = visibleItems.filter((item) => item.mobile).slice(0, 6);
+  const mobileItems = visibleItems.filter((item) => item.mobile).slice(0, 5);
   const visibleTrending = trendingItems.filter((item) => !isSocial || !item.financial);
   const resolvedRightRail = rightRailSlot ?? rightRail;
   const badgeCount = (id: AppNavRoute) => (id === "Notifications" ? unreadNotifications : id === "Chats" ? unreadChats : 0);
@@ -274,7 +286,7 @@ export function AppShell({
                 <NavItemButton
                   key={item.id}
                   item={item}
-                  route={route}
+                  activeRoute={highlightedRoute}
                   disabled={disabled}
                   onNavigate={onNavigate}
                   variant="rail"
@@ -316,7 +328,7 @@ export function AppShell({
                   {brand ?? <BrandMark variant="icon" className="size-6 text-feed-brand" />}
                 </span>
               ) : null}
-              <h1 className="truncate text-base font-bold text-foreground">{navConfig.find((item) => item.id === route)?.label ?? route}</h1>
+              <h1 className="truncate text-base font-bold text-foreground">{resolvedTitle}</h1>
             </div>
             <div className="flex items-center gap-2">
               {signedIn && !isSocial && balancePts ? (
@@ -329,9 +341,9 @@ export function AppShell({
                 <Button
                   size="icon"
                   shape="pill"
-                  variant={route === "Settings" ? "secondary" : "ghost"}
+                  variant={highlightedRoute === "Settings" ? "secondary" : "ghost"}
                   aria-label="Settings"
-                  aria-current={route === "Settings" ? "page" : undefined}
+                  aria-current={highlightedRoute === "Settings" ? "page" : undefined}
                   disabled={disabled}
                   onClick={() => !disabled && onNavigate?.("Settings")}
                   className="md:hidden"
@@ -376,7 +388,7 @@ export function AppShell({
           <NavItemButton
             key={item.id}
             item={item}
-            route={route}
+            activeRoute={highlightedRoute}
             disabled={disabled}
             onNavigate={onNavigate}
             variant="mobile"

@@ -67,6 +67,12 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
     const yesPct = Math.min(98, Math.max(2, Math.round(market.yesOddsPct)));
     const noPct = 100 - yesPct;
     const status = phaseMeta[market.phase];
+    const isResolved = market.phase === "Resolved" || market.phase === "Cancelled" || Boolean(market.resolvedOutcome);
+    const resolvedLabel = market.resolvedOutcome
+      ? `Resolved: ${market.resolvedOutcome}`
+      : market.phase === "Cancelled"
+        ? "Resolved: CANCELLED"
+        : "Resolved";
 
     return (
       <Card className={cn("gap-4 rounded-xl p-5 transition-colors duration-fast", selected && "border-feed-brand", className)} {...props}>
@@ -105,15 +111,25 @@ export function MarketCard({ market, selected = false, onSelect, disabled = fals
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
             <span>Pool {market.liquidityPts}</span>
             {market.volume24hPts ? <span className="font-mono tabular-nums">24h Vol {market.volume24hPts}</span> : null}
-            {market.resolvedOutcome ? <span className="font-semibold text-foreground">Outcome: {market.resolvedOutcome}</span> : null}
+            {!onSelect && isResolved ? <span className="font-semibold text-foreground">{resolvedLabel}</span> : null}
           </div>
         </CardContent>
 
         {onSelect ? (
           <CardFooter className="justify-between">
-            <span className="text-xs text-muted-foreground">1 pt / winning share</span>
-            <Button variant={selected ? "primary" : "outline"} size="sm" shape="pill" disabled={disabled} onClick={() => !disabled && onSelect(market.id)}>
-              Trade YES / NO
+            {isResolved ? (
+              <span className="text-xs font-semibold text-foreground">{resolvedLabel}</span>
+            ) : (
+              <span className="text-xs text-muted-foreground">1 pt / winning share</span>
+            )}
+            <Button
+              variant={selected && !isResolved ? "primary" : "outline"}
+              size="sm"
+              shape="pill"
+              disabled={disabled}
+              onClick={() => !disabled && onSelect(market.id)}
+            >
+              {isResolved ? "View market" : "Trade YES / NO"}
             </Button>
           </CardFooter>
         ) : null}

@@ -510,7 +510,7 @@ export function bootStore(): void {
     if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {
       tasks.push(loadWorldStatus());
     }
-    if (afterAuth.route !== "Explore") {
+    if (afterAuth.route !== "Explore" || afterAuth.activeArticleId) {
       tasks.push(loadTrending());
     }
     if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {

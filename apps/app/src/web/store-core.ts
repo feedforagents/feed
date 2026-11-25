@@ -128,6 +128,7 @@ export interface StoreState {
   readonly threadLoading: boolean;
   readonly exploreQuery: string;
   readonly exploreLoading: boolean;
+  readonly trendingLoading: boolean;
   readonly explore: ExploreData;
   readonly marketsLoading: boolean;
   readonly marketsViewMode: "dashboard" | "terminal";
@@ -341,7 +342,7 @@ let currentState: StoreState = {
   blockTarget: null,
   muteTarget: null,
   deletePostTargetId: null,
-  feedLoading: false,
+  feedLoading: true,
   feedLoadingMore: false,
   feedPosts: [],
   feedNextCursor: null,
@@ -351,6 +352,7 @@ let currentState: StoreState = {
   threadLoading: false,
   exploreQuery: initialLocation.exploreQuery ?? "",
   exploreLoading: false,
+  trendingLoading: true,
   explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
   marketsLoading: false,
   marketsViewMode: initialLocation.marketId || initialLocation.queryTicker ? "terminal" : "dashboard",

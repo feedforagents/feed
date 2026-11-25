@@ -34,6 +34,8 @@ export interface LightweightChartPriceLine {
   title?: string;
   /** Semantic color token role for the line. */
   tone?: LightweightChartTone;
+  /** Shows the price badge on the right axis when true (defaults to true). */
+  axisLabelVisible?: boolean;
 }
 
 export type LightweightChartSeriesSpec =
@@ -81,6 +83,8 @@ export type LightweightChartBaseProps = Omit<ComponentProps<"div">, "children"> 
   minValue?: number;
   /** Optional fixed upper bound for the price scale. */
   maxValue?: number;
+  /** Optional vertical margin ratios for the right price scale. */
+  scaleMargins?: { top: number; bottom: number };
   /** Formats axis and crosshair numeric values. */
   formatPrice?: (value: number) => string;
   /** Optional leading header content rendered alongside the time range selector. */
@@ -204,6 +208,7 @@ function buildChartOptions(
   height: number,
   showPriceScale: boolean,
   showTimeScale: boolean,
+  scaleMargins: { top: number; bottom: number },
   formatPrice?: (value: number) => string,
 ): DeepPartial<ChartOptions> {
   return {
@@ -237,7 +242,7 @@ function buildChartOptions(
     rightPriceScale: {
       visible: showPriceScale,
       borderVisible: false,
-      scaleMargins: { top: 0.1, bottom: 0.1 },
+      scaleMargins,
       textColor: palette.text,
     },
     timeScale: {
@@ -289,6 +294,8 @@ export function TimeRangeSelector({ value, onChange, disabled = false, className
   );
 }
 
+const DEFAULT_SCALE_MARGINS = { top: 0.1, bottom: 0.1 };
+
 /** TradingView Lightweight Charts v5 wrapper using React 19 ref cleanups and live semantic CSS token colors. */
 export function LightweightChartBase({
   series,
@@ -301,6 +308,7 @@ export function LightweightChartBase({
   showTimeScale = true,
   minValue,
   maxValue,
+  scaleMargins = DEFAULT_SCALE_MARGINS,
   formatPrice,
   headerLeft,
   footer,
@@ -325,7 +333,7 @@ export function LightweightChartBase({
 
       const chart = createChart(
         container,
-        buildChartOptions(palette, initialWidth, initialHeight, showPriceScale, showTimeScale, formatPrice),
+        buildChartOptions(palette, initialWidth, initialHeight, showPriceScale, showTimeScale, scaleMargins, formatPrice),
       );
 
       const autoscaleInfoProvider =
@@ -398,7 +406,7 @@ export function LightweightChartBase({
             color: lineTone.solid,
             lineWidth: 1,
             lineStyle: LineStyle.Dashed,
-            axisLabelVisible: true,
+            axisLabelVisible: spec.priceLine.axisLabelVisible ?? true,
             title: spec.priceLine.title ?? "",
           });
         }
@@ -446,7 +454,7 @@ export function LightweightChartBase({
               const nextPalette = resolvePalette(root);
               const w = container.clientWidth || initialWidth;
               const h = fillHeight ? container.clientHeight || height : height;
-              chart.applyOptions(buildChartOptions(nextPalette, w, h, showPriceScale, showTimeScale, formatPrice));
+              chart.applyOptions(buildChartOptions(nextPalette, w, h, showPriceScale, showTimeScale, scaleMargins, formatPrice));
             })
           : null;
       themeObserver?.observe(root, { attributes: true, attributeFilter: ["class", "data-theme"] });
@@ -461,7 +469,7 @@ export function LightweightChartBase({
         container.replaceChildren();
       };
     },
-    [series, hasAnyPoints, fillHeight, height, showPriceScale, showTimeScale, minValue, maxValue, formatPrice, onCrosshairPoint],
+    [series, hasAnyPoints, fillHeight, height, showPriceScale, showTimeScale, minValue, maxValue, scaleMargins, formatPrice, onCrosshairPoint],
   );
 
   const showToolbar = Boolean(headerLeft || (timeRange && onTimeRangeChange));

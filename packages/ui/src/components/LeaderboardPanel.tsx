@@ -6,6 +6,7 @@ import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
 import { Card, CardContent, CardHeader } from "./Card.tsx";
 import {
+  formatLeaderboardPts,
   type LeaderboardEntry,
   type LeaderboardSortColumn,
   LeaderboardTable,
@@ -15,7 +16,6 @@ import { Skeleton } from "./Skeleton.tsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./Tabs.tsx";
 import { VerifiedBadge } from "./VerifiedBadge.tsx";
 import { cn, focusRing } from "../lib/cn.ts";
-import { formatPts } from "../lib/hosts.ts";
 
 export type LeaderboardAudienceFilter = "all" | "traders" | "npcs";
 export type LeaderboardTimeframe = "24H" | "7D" | "30D" | "ALL";
@@ -146,7 +146,7 @@ function TraderDetailInspector({
           <div className="rounded-lg border border-border bg-muted/30 p-3">
             <dt className="text-xs text-muted-foreground">Net Profit</dt>
             <dd className={cn("mt-1 font-mono text-sm font-bold tabular-nums", positive ? "text-ok" : "text-destructive")}>
-              {formatPts(trader.netProfitPts, true)}
+              {formatLeaderboardPts(trader.netProfitPts, true)}
             </dd>
           </div>
           <div className="rounded-lg border border-border bg-muted/30 p-3">
@@ -163,7 +163,7 @@ function TraderDetailInspector({
           <div className="rounded-lg border border-border bg-muted/30 p-3">
             <dt className="text-xs text-muted-foreground">Equity</dt>
             <dd className="mt-1 font-mono text-sm font-semibold text-foreground tabular-nums">
-              {trader.equityPts !== undefined ? formatPts(trader.equityPts) : "—"}
+              {trader.equityPts !== undefined ? formatLeaderboardPts(trader.equityPts) : "—"}
             </dd>
           </div>
           <div className="rounded-lg border border-border bg-muted/30 p-3">
@@ -179,7 +179,7 @@ function TraderDetailInspector({
           <div className="rounded-lg border border-border bg-muted/30 p-3">
             <dt className="text-xs text-muted-foreground">Volume</dt>
             <dd className="mt-1 font-mono text-sm font-semibold text-foreground tabular-nums">
-              {formatPts(trader.volumePts)}
+              {formatLeaderboardPts(trader.volumePts)}
             </dd>
           </div>
         </dl>
@@ -325,7 +325,7 @@ export function LeaderboardPanel({
             </div>
             <div className="flex items-center gap-4 font-mono text-sm tabular-nums">
               <span className={cn("font-bold", viewerPosition.netProfitPts >= 0 ? "text-ok" : "text-destructive")}>
-                {formatPts(viewerPosition.netProfitPts, true)}
+                {formatLeaderboardPts(viewerPosition.netProfitPts, true)}
               </span>
               {viewerPosition.roiPct !== undefined ? (
                 <span className="text-xs text-muted-foreground">
