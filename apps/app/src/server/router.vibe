@@ -177,6 +177,21 @@ function jsonResponse(
   return makeResponse(JSON.stringify(body), { status, headers })
 }
 
+function withRefreshedSessionCookie(response: Response, session: SessionIdentity | null): Response {
+  const refreshedCookie = session?.refreshedSessionCookieHeader
+  if (refreshedCookie === undefined || response.headers.has("set-cookie")) {
+    return response
+  }
+  const copiedHeaders: Record<string, string> = {}
+  for (const [name, value] of response.headers.entries()) {
+    copiedHeaders[name] = value
+  }
+  return makeResponse(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: makeHeaders(copiedHeaders, [refreshedCookie])
+  })
+}
 function clearCookieHeaders(publicAppUrl: string): ReadonlyArray<string> {
   const base = "Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
   const headers = [`feed-session=; ${base}`]
@@ -1526,7 +1541,10 @@ export effect function resolveOptionalRouteResponse(
   request: Request,
   config: AppServerConfig
 ): (Response | undefined)!!(Store | RealtimeBus) {
-  return routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
+  const session = optionalSession(request, config) catch () => null
+  const response = routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
+  if (response === undefined) return undefined
+  return withRefreshedSessionCookie(response, session)
 }
 
 export effect function runScheduledTicks(cycle: number): void!!(Store | RealtimeBus) {
