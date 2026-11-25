@@ -1,8 +1,8 @@
 // spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes"; spec/engine/worldClock.md, "Story: Guard perpetual funding cutover across 8-hour UTC periods"; spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"
 import { readEnv } from "@elizaos/core"
-import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
-import { accruePerpFunding, liquidateEligiblePositions, type MarketFailure } from "@repo/markets"
-import { organizations } from "@repo/pack-default"
+import { SPOT_BASE_SCALE, Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
+import { accruePerpFunding, executeNpcSpotTrade, liquidateEligiblePositions, snapshotMarketPrices, type MarketFailure } from "@repo/markets"
+import { correlations, manifest, organizations } from "@repo/pack-default"
 import { createPost, type SocialFailure } from "@repo/social"
 import { HttpClientRequest } from "effect/http"
 import {
@@ -31,6 +31,7 @@ import {
   ensureWorldStateTx,
   executeHttpWithTimeout,
   hashString,
+  isRuntimeNpcActor,
   maybePublishFeedEvent,
   minuteIndexOf,
   newEngineId,
@@ -39,7 +40,7 @@ import {
   resolveClockNow,
   sanitizeText,
 } from "./shared.vibe"
-import { getDailySpendStatus } from "./spend-budget.vibe"
+import { getDailySpendStatus, reconcileStaleUncertainSpend } from "./spend-budget.vibe"
 
 export interface EngineAdminBudgetStatus {
   readonly dailyBudgetCents: number
@@ -68,6 +69,7 @@ export interface MinuteTickResult {
   readonly newlyExpired: number
   readonly liquidatedCount: number
   readonly fundingAccrued: boolean
+  readonly spotTradesSimulated: number
 }
 
 export interface FastForwardResult {
@@ -85,17 +87,110 @@ export interface RssRefreshResult {
   readonly insertedCount: number
 }
 
-function resolveClockMode(): ClockMode {
+export interface RssFeedHeadlineItem {
+  readonly title: string
+  readonly sourceUrl: string
+}
+
+export const DEFAULT_RSS_URLS: ReadonlyArray<string> = [
+  "https://hnrss.org/frontpage",
+  "https://feeds.arstechnica.com/arstechnica/technology-lab",
+  "https://techcrunch.com/feed/",
+  "https://www.theverge.com/rss/index.xml",
+  "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+  "https://www.coindesk.com/arc/outboundfeeds/rss/",
+  "https://www.sciencedaily.com/rss/top/technology.xml",
+  "https://feeds.npr.org/1004/rss.xml",
+]
+
+const JOB_LOCK_NAMESPACE = 2525100
+const activeLocalJobLocks = new Set<string>()
+const majorOrgSet = new Set(manifest.orgPriorities.major)
+
+export function resolveClockMode(): ClockMode {
   const modeEnv = readEnv("FEED_CLOCK_MODE")?.trim().toLowerCase()
   if (modeEnv === "realtime") return "ClockRealtime"
   if (modeEnv === "simulated") return "ClockSimulated"
-  return readEnv("NODE_ENV")?.trim().toLowerCase() === "production" ? "ClockRealtime" : "ClockSimulated"
+  const deployEnv = readEnv("DEPLOYMENT_ENV")?.trim().toLowerCase()
+  const nodeEnv = readEnv("NODE_ENV")?.trim().toLowerCase()
+  return deployEnv === "production" || nodeEnv === "production" ? "ClockRealtime" : "ClockSimulated"
+}
+
+function jobLockKey(jobName: string): number {
+  const hashed = hashString(`feed:job:${jobName}`) & 0x7fffffff
+  return hashed === 0 ? 1 : hashed
+}
+
+function formatErrorMessage(err: unknown): string {
+  if (err instanceof EngineFailure) return `${err.code}: ${err.message}`
+  if (err instanceof Error) return err.message
+  if (typeof err === "object" && err !== null && "message" in err && typeof err.message === "string") {
+    return err.message
+  }
+  return String(err)
 }
 
 effect function guardCoreRoute(route: RouteName): void!EngineFailure {
   if (isRetiredRoute(route) || !isCoreRoute(route)) {
     throw new EngineFailure({ code: "INVALID_ARGUMENT", message: `Route ${route} is retired and cannot execute.` })
   }
+}
+
+effect function readGameRunning(nowMs: number): boolean!StoreFailure!Store {
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    try ensureWorldStateTx(tx, nowMs)
+    const rows = try tx.query("SELECT game_running FROM feed_world_state WHERE singleton = true")
+    return rows[0]?.game_running !== false
+  })
+}
+
+effect function withJobLockAndErrorHealth<A, E>(
+  jobName: string,
+  resolvedNow: number,
+  startWall: number,
+  onLockBusy: () => A,
+  runBody: () => A!E!Store,
+): A!(E | StoreFailure)!Store {
+  const store = try Store
+  const lockId = jobLockKey(jobName)
+  const useSessionAdvisoryLock = store.location.kind !== "pg"
+  if (activeLocalJobLocks.has(jobName)) {
+    const endWall = try Clock.currentTimeMillis
+    try recordTickHealth(jobName, resolvedNow, "skipped", "Job already running in worker", 0, null, endWall - startWall)
+    return onLockBusy()
+  }
+  activeLocalJobLocks.add(jobName)
+  return try scoped(effect {
+    const pgLocked = try acquireRelease(
+      effect {
+        if (!useSessionAdvisoryLock) return true
+        const rows = try store.transaction(effect (tx: Tx) =>
+          try tx.query("SELECT pg_try_advisory_lock($1, $2) AS locked", [JOB_LOCK_NAMESPACE, lockId]),
+        )
+        return rows[0]?.locked === true
+      },
+      (acquired) =>
+        effect {
+          activeLocalJobLocks.delete(jobName)
+          if (useSessionAdvisoryLock && acquired) {
+            store.transaction(effect (tx: Tx) =>
+              try tx.query("SELECT pg_advisory_unlock($1, $2)", [JOB_LOCK_NAMESPACE, lockId]),
+            ) catch effect () => undefined
+          }
+        },
+    )
+    if (!pgLocked) {
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth(jobName, resolvedNow, "skipped", "Advisory lock held by concurrent job", 0, null, endWall - startWall)
+      return onLockBusy()
+    }
+    return runBody() catch effect (err: E) => {
+      const endWall = try Clock.currentTimeMillis
+      recordTickHealth(jobName, resolvedNow, "error", formatErrorMessage(err), 0, null, endWall - startWall) catch effect () => undefined
+      throw err
+    }
+  })
 }
 
 effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
@@ -145,39 +240,175 @@ effect function checkAndAccrueFunding(nowMs: number, cutoverPeriod: number): boo
   return true
 }
 
+effect function simulateCorrelatedSpotActivity(nowMs: number): number!StoreFailure!Store {
+  const store = try Store
+  const snap = try store.transaction(effect (tx: Tx) => {
+    const pools = try tx.query(
+      `SELECT ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents
+       FROM feed_spot_pools
+       WHERE base_reserve > 0 AND quote_reserve_cents > 0
+       ORDER BY ticker ASC`,
+    )
+    const actorRows = (try tx.query(
+      `SELECT id, name, username, balance_cents
+       FROM feed_actors
+       WHERE id NOT LIKE 'test-%' AND balance_cents >= 50000
+       ORDER BY id ASC`,
+    )).filter((r) => isRuntimeNpcActor(toText(r.id) ?? "", toText(r.name), toText(r.username)))
+    const holdingRows = try tx.query(
+      `SELECT actor_id, ticker, base_units
+       FROM feed_npc_spot_holdings
+       WHERE base_units > 0`,
+    )
+    return { pools, actorRows, holdingRows }
+  })
+  if (snap.pools.length === 0 || snap.actorRows.length === 0) return 0
+  const poolByOrg = new Map<string, { readonly ticker: string; readonly orgId: string; readonly indexPriceCents: number }>()
+  const poolList: Array<{ readonly ticker: string; readonly orgId: string; readonly indexPriceCents: number }> = []
+  for (const row of snap.pools) {
+    const ticker = toText(row.ticker) ?? ""
+    const orgId = toText(row.organization_id) ?? ""
+    const indexPriceCents = Math.max(1, toInt(row.index_price_cents))
+    if (ticker.length === 0) continue
+    const item = { ticker, orgId, indexPriceCents }
+    poolList.push(item)
+    if (orgId.length > 0) poolByOrg.set(orgId, item)
+  }
+  if (poolList.length === 0) return 0
+  const holdingsByTicker = new Map<string, Array<{ readonly actorId: string; readonly baseUnits: number }>>()
+  for (const row of snap.holdingRows) {
+    const actorId = toText(row.actor_id) ?? ""
+    const ticker = toText(row.ticker) ?? ""
+    const baseUnits = Math.max(0, toInt(row.base_units))
+    if (!actorId || !ticker || baseUnits <= 0 || !isRuntimeNpcActor(actorId)) continue
+    const list = holdingsByTicker.get(ticker) ?? []
+    list.push({ actorId, baseUnits })
+    holdingsByTicker.set(ticker, list)
+  }
+  const majorPools = poolList.filter((p) => majorOrgSet.has(p.orgId))
+  const minuteIdx = minuteIndexOf(nowMs)
+  const primaryPool =
+    majorPools.length > 0 && minuteIdx % 2 === 0
+      ? majorPools[hashString(`spot-major:${minuteIdx}`) % majorPools.length]!
+      : poolList[hashString(`spot-all:${minuteIdx}`) % poolList.length]!
+  const baseSeed = hashString(`spot-sim:${minuteIdx}:${primaryPool.ticker}`)
+  const primarySide: "buy" | "sell" = baseSeed % 2 === 0 ? "buy" : "sell"
+  const primaryQuoteCents = 3_000 + (baseSeed % 10) * 1_000
+
+  const plannedTrades: Array<{ readonly ticker: string; readonly indexPriceCents: number; readonly side: "buy" | "sell"; readonly quoteCents: number; readonly salt: string }> = [
+    { ticker: primaryPool.ticker, indexPriceCents: primaryPool.indexPriceCents, side: primarySide, quoteCents: primaryQuoteCents, salt: "primary" },
+  ]
+  const relatedLinks = correlations.filter(
+    (c) => (c.orgId === primaryPool.orgId || c.relatedOrgId === primaryPool.orgId) && Math.abs(c.strength) >= 0.1,
+  )
+  let correlatedAdded = 0
+  for (const link of relatedLinks) {
+    if (correlatedAdded >= 2) break
+    const targetOrgId = link.orgId === primaryPool.orgId ? link.relatedOrgId : link.orgId
+    const targetPool = poolByOrg.get(targetOrgId)
+    if (!targetPool || targetPool.ticker === primaryPool.ticker) continue
+    const corrSide: "buy" | "sell" = link.strength >= 0 ? primarySide : primarySide === "buy" ? "sell" : "buy"
+    const corrQuoteCents = Math.max(1_500, Math.min(10_000, Math.round(primaryQuoteCents * Math.abs(link.strength) * 2.5)))
+    plannedTrades.push({
+      ticker: targetPool.ticker,
+      indexPriceCents: targetPool.indexPriceCents,
+      side: corrSide,
+      quoteCents: corrQuoteCents,
+      salt: `corr-${correlatedAdded}`,
+    })
+    correlatedAdded += 1
+  }
+
+  let simulatedCount = 0
+  for (const trade of plannedTrades) {
+    const neededUnits = Math.max(1, Math.ceil((trade.quoteCents * SPOT_BASE_SCALE) / Math.max(1, trade.indexPriceCents)))
+    let effectiveSide = trade.side
+    let actorId = ""
+    if (effectiveSide === "sell") {
+      const holders = (holdingsByTicker.get(trade.ticker) ?? []).filter((h) => h.baseUnits >= neededUnits * 2)
+      if (holders.length > 0) {
+        actorId = holders[hashString(`seller:${minuteIdx}:${trade.salt}:${trade.ticker}`) % holders.length]!.actorId
+      } else {
+        effectiveSide = "buy"
+      }
+    }
+    if (actorId.length === 0) {
+      const buyerRow = snap.actorRows[hashString(`buyer:${minuteIdx}:${trade.salt}:${trade.ticker}`) % snap.actorRows.length]!
+      actorId = toText(buyerRow.id) ?? ""
+    }
+    if (actorId.length === 0) continue
+    const receipt = executeNpcSpotTrade({
+      actorId,
+      ticker: trade.ticker,
+      side: effectiveSide,
+      quoteCents: trade.quoteCents,
+    }) catch effect () => null
+    if (receipt !== null) {
+      simulatedCount += 1
+      try maybePublishFeedEvent({
+        type: "market.spot",
+        actorId,
+        ticker: trade.ticker,
+        side: effectiveSide,
+        quoteCents: trade.quoteCents,
+      })
+    }
+  }
+  return simulatedCount
+}
+
 export effect function runMinuteTick(nowMs?: number): MinuteTickResult!(EngineFailure | StoreFailure | MarketFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteGameTick")
   const resolvedNow = try resolveClockNow(nowMs)
-  const store = try Store
-  const world = try store.transaction(effect (tx: Tx) => try advanceWorldClockTx(tx, resolvedNow))
-  if (!world.gameRunning) {
-    const endWall = try Clock.currentTimeMillis
-    try recordTickHealth("minute-tick", world.nowMs, "skipped", null, 0, null, endWall - startWall)
-    return {
-      nowMs: world.nowMs,
+  return try withJobLockAndErrorHealth(
+    "minute-tick",
+    resolvedNow,
+    startWall,
+    () => ({
+      nowMs: resolvedNow,
       skipped: true,
       flippedWindows: 0,
       newlyExpired: 0,
       liquidatedCount: 0,
       fundingAccrued: false,
-    }
-  }
-  const phaseRes = try advanceNarrativePhases(world.nowMs)
-  const liquidated = liquidateEligiblePositions() catch effect () => null
-  const liquidatedCount = liquidated === null ? 0 : liquidated.liquidatedCount
-  const fundingAccrued = checkAndAccrueFunding(world.nowMs, world.fundingCutoverPeriod) catch effect () => false
-  const stats = try pendingResolutionStats()
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("minute-tick", world.nowMs, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
-  return {
-    nowMs: world.nowMs,
-    skipped: false,
-    flippedWindows: phaseRes.flippedWindows,
-    newlyExpired: phaseRes.newlyExpired,
-    liquidatedCount,
-    fundingAccrued,
-  }
+      spotTradesSimulated: 0,
+    }),
+    effect () => {
+      const store = try Store
+      const world = try store.transaction(effect (tx: Tx) => try advanceWorldClockTx(tx, resolvedNow))
+      if (!world.gameRunning) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("minute-tick", world.nowMs, "skipped", null, 0, null, endWall - startWall)
+        return {
+          nowMs: world.nowMs,
+          skipped: true,
+          flippedWindows: 0,
+          newlyExpired: 0,
+          liquidatedCount: 0,
+          fundingAccrued: false,
+          spotTradesSimulated: 0,
+        }
+      }
+      reconcileStaleUncertainSpend(world.nowMs) catch effect () => null
+      const phaseRes = try advanceNarrativePhases(world.nowMs)
+      const liquidated = liquidateEligiblePositions() catch effect () => null
+      const liquidatedCount = liquidated === null ? 0 : liquidated.liquidatedCount
+      const spotTradesSimulated = simulateCorrelatedSpotActivity(world.nowMs) catch effect () => 0
+      const stats = try pendingResolutionStats()
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("minute-tick", world.nowMs, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
+      return {
+        nowMs: world.nowMs,
+        skipped: false,
+        flippedWindows: phaseRes.flippedWindows,
+        newlyExpired: phaseRes.newlyExpired,
+        liquidatedCount,
+        fundingAccrued: false,
+        spotTradesSimulated,
+      }
+    },
+  )
 }
 
 export effect function runGameTick(nowMs?: number): {
@@ -187,23 +418,48 @@ export effect function runGameTick(nowMs?: number): {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteGameTick")
   const resolvedNow = try resolveClockNow(nowMs)
-  const minute = try runMinuteTick(resolvedNow)
-  const store = try Store
-  const vacantCount = try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `SELECT COUNT(DISTINCT slot_index) AS occupied
-       FROM feed_prediction_markets
-       WHERE slot_index IS NOT NULL AND status IN ('open', 'expired', 'awaiting_proof', 'manual_hold')`,
-    )
-    return Math.max(0, 10 - toInt(rows[0]?.occupied))
-  })
-  const seededMarketIds = vacantCount > 0 ? try ensureRollingMarketSlots(minute.nowMs) : []
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("game-tick", minute.nowMs, minute.skipped ? "skipped" : "ok", null, 0, null, endWall - startWall)
-  return { minute, seededMarketIds }
+  return try withJobLockAndErrorHealth(
+    "game-tick",
+    resolvedNow,
+    startWall,
+    () => ({
+      minute: {
+        nowMs: resolvedNow,
+        skipped: true,
+        flippedWindows: 0,
+        newlyExpired: 0,
+        liquidatedCount: 0,
+        fundingAccrued: false,
+        spotTradesSimulated: 0,
+      },
+      seededMarketIds: [],
+    }),
+    effect () => {
+      const minute = try runMinuteTick(resolvedNow)
+      if (minute.skipped) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("game-tick", minute.nowMs, "skipped", null, 0, null, endWall - startWall)
+        return { minute, seededMarketIds: [] }
+      }
+      const store = try Store
+      const vacantCount = try store.transaction(effect (tx: Tx) => {
+        const rows = try tx.query(
+          `SELECT COUNT(DISTINCT slot_index) AS occupied
+           FROM feed_prediction_markets
+           WHERE slot_index IS NOT NULL AND status IN ('open', 'expired', 'awaiting_proof', 'manual_hold')`,
+        )
+        return Math.max(0, 10 - toInt(rows[0]?.occupied))
+      })
+      const seededMarketIds = vacantCount > 0 ? try ensureRollingMarketSlots(minute.nowMs) : []
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("game-tick", minute.nowMs, "ok", null, 0, null, endWall - startWall)
+      return { minute, seededMarketIds }
+    },
+  )
 }
 
 export effect function runMarketsTick(nowMs?: number): {
+  readonly skipped: boolean
   readonly flippedWindows: number
   readonly newlyExpired: number
   readonly cluesPublished: number
@@ -212,163 +468,287 @@ export effect function runMarketsTick(nowMs?: number): {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteMarketsTick")
   const resolvedNow = try resolveClockNow(nowMs)
-  const phaseRes = try advanceNarrativePhases(resolvedNow)
-  const cluesPublished = try publishPhaseClues(resolvedNow)
-  const seededMarketIds = try ensureRollingMarketSlots(resolvedNow)
-  const stats = try pendingResolutionStats()
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("markets-tick", resolvedNow, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
-  return {
-    flippedWindows: phaseRes.flippedWindows,
-    newlyExpired: phaseRes.newlyExpired,
-    cluesPublished,
-    seededMarketIds,
-  }
+  return try withJobLockAndErrorHealth(
+    "markets-tick",
+    resolvedNow,
+    startWall,
+    () => ({ skipped: true, flippedWindows: 0, newlyExpired: 0, cluesPublished: 0, seededMarketIds: [] }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("markets-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, flippedWindows: 0, newlyExpired: 0, cluesPublished: 0, seededMarketIds: [] }
+      }
+      const phaseRes = try advanceNarrativePhases(resolvedNow)
+      const cluesPublished = try publishPhaseClues(resolvedNow)
+      const seededMarketIds = try ensureRollingMarketSlots(resolvedNow)
+      snapshotMarketPrices(resolvedNow) catch effect () => ({ perpCount: 0, predictionCount: 0 })
+      const stats = try pendingResolutionStats()
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("markets-tick", resolvedNow, "ok", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
+      return {
+        skipped: false,
+        flippedWindows: phaseRes.flippedWindows,
+        newlyExpired: phaseRes.newlyExpired,
+        cluesPublished,
+        seededMarketIds,
+      }
+    },
+  )
 }
 
 export effect function runMarketsRecovery(nowMs?: number): RecoveryRunResult!(EngineFailure | StoreFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteMarketsRecovery")
   const resolvedNow = try resolveClockNow(nowMs)
-  const recovery = try recoverExpiredMarkets(resolvedNow)
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("markets-recovery", resolvedNow, "ok", null, recovery.pendingCount, recovery.oldestPendingAt, endWall - startWall)
-  return recovery
+  return try withJobLockAndErrorHealth(
+    "markets-recovery",
+    resolvedNow,
+    startWall,
+    () => ({ processed: 0, resolved: 0, manualHolds: 0, retried: 0, pendingCount: 0, oldestPendingAt: null }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const stats = try pendingResolutionStats()
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("markets-recovery", resolvedNow, "skipped", null, stats.pendingCount, stats.oldestPendingAt, endWall - startWall)
+        return { processed: 0, resolved: 0, manualHolds: 0, retried: 0, pendingCount: stats.pendingCount, oldestPendingAt: stats.oldestPendingAt }
+      }
+      const recovery = try recoverExpiredMarkets(resolvedNow)
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("markets-recovery", resolvedNow, "ok", null, recovery.pendingCount, recovery.oldestPendingAt, endWall - startWall)
+      return recovery
+    },
+  )
 }
 
 export effect function runNpcTick(nowMs?: number): NpcTickBatchSummary!(EngineFailure | StoreFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteNpcTick")
   const resolvedNow = try resolveClockNow(nowMs)
-  const store = try Store
-  const running = try store.transaction(effect (tx: Tx) => {
-    try ensureWorldStateTx(tx, resolvedNow)
-    const rows = try tx.query("SELECT game_running FROM feed_world_state WHERE singleton = true")
-    return rows[0]?.game_running !== false
-  })
-  if (!running) {
-    const endWall = try Clock.currentTimeMillis
-    try recordTickHealth("npc-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
-    return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: 0, throttledBatchSize: 0 }
-  }
-  const summary = try runBoundedNpcBatch(resolvedNow)
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("npc-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
-  return summary
+  return try withJobLockAndErrorHealth(
+    "npc-tick",
+    resolvedNow,
+    startWall,
+    () => ({ actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: 0, throttledBatchSize: 0 }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("npc-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: 0, throttledBatchSize: 0 }
+      }
+      const summary = try runBoundedNpcBatch(resolvedNow)
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("npc-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
+      return summary
+    },
+  )
 }
 
-export effect function runOrganizationTick(nowMs?: number): { readonly postsCreated: number }!(EngineFailure | StoreFailure | SocialFailure)!Store {
+const STRATIFIED_ORG_TYPES: ReadonlyArray<string> = ["company", "media", "vc", "government", "financial", "organization"]
+
+function orgTypeStyleHint(orgType: string, baseStyle: string): string {
+  switch (orgType) {
+    case "media":
+      return `Breaking newsroom wire (${baseStyle})`
+    case "vc":
+      return `Venture conviction thread & portfolio brag (${baseStyle})`
+    case "government":
+      return `Official regulatory/policy bulletin (${baseStyle})`
+    case "financial":
+      return `Institutional macro & market desk note (${baseStyle})`
+    case "organization":
+      return `Foundation / industry consortium statement (${baseStyle})`
+    default:
+      return `Corporate product/earnings PR (${baseStyle})`
+  }
+}
+
+export effect function runOrganizationTick(nowMs?: number): { readonly skipped: boolean; readonly postsCreated: number }!(EngineFailure | StoreFailure | SocialFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteOrganizationTick")
   const resolvedNow = try resolveClockNow(nowMs)
-  const store = try Store
-  const context = try store.transaction(effect (tx: Tx) => {
-    const orgRows = try tx.query(
-      `SELECT id, name, ticker, description, post_style
-       FROM feed_organizations
-       WHERE can_be_involved = true
-       ORDER BY id ASC`,
-    )
-    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
-    return { orgRows, worldContext: snapshot.worldContext }
-  })
-  if (context.orgRows.length === 0) {
-    const endWall = try Clock.currentTimeMillis
-    try recordTickHealth("organization-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
-    return { postsCreated: 0 }
-  }
-  const idx = hashString(`org:${Math.floor(resolvedNow / (routeCadenceMinutes("RouteOrganizationTick") * 60_000))}`) % context.orgRows.length
-  const org = context.orgRows[idx]!
-  const orgId = toText(org.id) ?? ""
-  const orgName = toText(org.name) ?? orgId
-  const ticker = toText(org.ticker) ?? ""
-  const rendered = renderPrompt("orgPost", {
-    orgName,
-    ticker: ticker || "PRIVATE",
-    postStyle: toText(org.post_style) ?? "confident corporate PR",
-    orgDescription: toText(org.description) ?? orgName,
-    worldContext: context.worldContext,
-  })
-  const completion = try generateCompletion({
-    promptId: "orgPost",
-    system: rendered.system,
-    user: rendered.user,
-    maxTokens: rendered.maxTokens,
-    temperature: rendered.temperature,
-    nowMs: resolvedNow,
-  })
-  try createPost({
-    authorId: orgId,
-    authorKind: "org",
-    content: sanitizeText(completion.text, 275),
-    ...(ticker ? { ticker } : {}),
-  })
-  try maybePublishFeedEvent({ type: "org.posted", organizationId: orgId, ticker })
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("organization-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
-  return { postsCreated: 1 }
+  return try withJobLockAndErrorHealth(
+    "organization-tick",
+    resolvedNow,
+    startWall,
+    () => ({ skipped: true, postsCreated: 0 }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("organization-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, postsCreated: 0 }
+      }
+      const spend = try getDailySpendStatus(resolvedNow)
+      const targetOrgs = spend.batchFraction < 1 ? 2 : 3
+      const store = try Store
+      const context = try store.transaction(effect (tx: Tx) => {
+        const orgRows = try tx.query(
+          `SELECT id, name, ticker, org_type, description, post_style
+           FROM feed_organizations
+           WHERE can_be_involved = true
+           ORDER BY id ASC`,
+        )
+        const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
+        return { orgRows, worldContext: snapshot.worldContext }
+      })
+      if (context.orgRows.length === 0) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("organization-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, postsCreated: 0 }
+      }
+      const bucket = Math.floor(resolvedNow / (routeCadenceMinutes("RouteOrganizationTick") * 60_000))
+      const byType = new Map<string, Array<Readonly<Record<string, unknown>>>>()
+      for (const row of context.orgRows) {
+        const orgType = (toText(row.org_type) ?? "company").toLowerCase()
+        const list = byType.get(orgType) ?? []
+        list.push(row)
+        byType.set(orgType, list)
+      }
+      const availableTypes = STRATIFIED_ORG_TYPES.filter((t) => (byType.get(t)?.length ?? 0) > 0)
+      const selected: Array<Readonly<Record<string, unknown>>> = []
+      const chosenIds = new Set<string>()
+      for (let slot = 0; slot < Math.min(targetOrgs, availableTypes.length); slot += 1) {
+        const typeKey = availableTypes[(bucket + slot) % availableTypes.length]!
+        const pool = byType.get(typeKey) ?? []
+        if (pool.length === 0) continue
+        const pick = pool[hashString(`org:${bucket}:${typeKey}:${slot}`) % pool.length]!
+        const id = toText(pick.id) ?? ""
+        if (id && !chosenIds.has(id)) {
+          selected.push(pick)
+          chosenIds.add(id)
+        }
+      }
+      while (selected.length < Math.min(targetOrgs, context.orgRows.length)) {
+        const fallback = context.orgRows[hashString(`org-fill:${bucket}:${selected.length}`) % context.orgRows.length]!
+        const id = toText(fallback.id) ?? ""
+        if (id && !chosenIds.has(id)) {
+          selected.push(fallback)
+          chosenIds.add(id)
+        } else {
+          break
+        }
+      }
+      let postsCreated = 0
+      for (const org of selected) {
+        const orgId = toText(org.id) ?? ""
+        const orgName = toText(org.name) ?? orgId
+        const ticker = toText(org.ticker) ?? ""
+        const orgType = (toText(org.org_type) ?? "company").toLowerCase()
+        const baseStyle = toText(org.post_style) ?? "confident corporate PR"
+        const rendered = renderPrompt("orgPost", {
+          orgName,
+          ticker: ticker || "PRIVATE",
+          postStyle: orgTypeStyleHint(orgType, baseStyle),
+          orgDescription: toText(org.description) ?? orgName,
+          worldContext: context.worldContext,
+        })
+        const completion = try generateCompletion({
+          promptId: "orgPost",
+          system: rendered.system,
+          user: rendered.user,
+          maxTokens: rendered.maxTokens,
+          temperature: rendered.temperature,
+          nowMs: resolvedNow,
+        })
+        try createPost({
+          authorId: orgId,
+          authorKind: "org",
+          content: sanitizeText(completion.text, 275),
+          ...(ticker ? { ticker } : {}),
+        })
+        try maybePublishFeedEvent({ type: "org.posted", organizationId: orgId, ticker })
+        postsCreated += 1
+      }
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("organization-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
+      return { skipped: false, postsCreated }
+    },
+  )
 }
 
-export effect function runArticleTick(nowMs?: number): { readonly articleId: string | null }!(EngineFailure | StoreFailure | SocialFailure)!Store {
+export effect function runArticleTick(nowMs?: number): { readonly skipped: boolean; readonly articleId: string | null }!(EngineFailure | StoreFailure | SocialFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteArticleTick")
   const resolvedNow = try resolveClockNow(nowMs)
-  const store = try Store
-  const data = try store.transaction(effect (tx: Tx) => {
-    const mediaRows = try tx.query(
-      `SELECT id, name, description
-       FROM feed_organizations
-       ORDER BY (CASE WHEN org_type = 'media' THEN 0 ELSE 1 END), id ASC
-       LIMIT 4`,
-    )
-    const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
-    return { mediaRows, worldContext: snapshot.worldContext }
-  })
-  const fallbackOrg = organizations[0]
-  const chosen = data.mediaRows.length > 0 ? data.mediaRows[hashString(`art:${resolvedNow}`) % data.mediaRows.length]! : null
-  const orgId = toText(chosen?.id) ?? fallbackOrg?.id ?? "feed-wire"
-  const orgName = toText(chosen?.name) ?? fallbackOrg?.name ?? "The Feed Wire"
-  const orgDesc = toText(chosen?.description) ?? fallbackOrg?.description ?? "Feed financial satire wire"
-  const rendered = renderPrompt("feedArticle", {
-    orgName,
-    orgDescription: orgDesc,
-    worldContext: data.worldContext,
-  })
-  const completion = try generateCompletion({
-    promptId: "feedArticle",
-    system: rendered.system,
-    user: rendered.user,
-    maxTokens: rendered.maxTokens,
-    temperature: rendered.temperature,
-    jsonMode: true,
-    nowMs: resolvedNow,
-  })
-  const parsed = parseLlmJsonRecord(completion.text)
-  const title = sanitizeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
-  const summary = sanitizeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
-  const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0
-    ? parsed.body.trim()
-    : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`
-  const articleId = newEngineId("art")
-  try store.transaction(effect (tx: Tx) => {
-    try tx.query(
-      `INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at)
-       VALUES ($1, $2, $3, $4, $5, NULL, false, $6)`,
-      [articleId, title, summary, body, orgId, resolvedNow],
-    )
-  })
-  try createPost({
-    authorId: orgId,
-    authorKind: "org",
-    content: sanitizeText(`${title} — ${summary}`, 275),
-  })
-  try maybePublishFeedEvent({ type: "article.published", articleId, organizationId: orgId })
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("article-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
-  return { articleId }
+  return try withJobLockAndErrorHealth(
+    "article-tick",
+    resolvedNow,
+    startWall,
+    () => ({ skipped: true, articleId: null }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("article-tick", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, articleId: null }
+      }
+      const store = try Store
+      const data = try store.transaction(effect (tx: Tx) => {
+        const mediaRows = try tx.query(
+          `SELECT id, name, description
+           FROM feed_organizations
+           WHERE org_type = 'media'
+           ORDER BY id ASC`,
+        )
+        const fallbackRows = mediaRows.length > 0
+          ? mediaRows
+          : try tx.query("SELECT id, name, description FROM feed_organizations ORDER BY id ASC")
+        const snapshot = try loadPublicWorldSnapshot(tx, resolvedNow)
+        return { mediaRows: fallbackRows, worldContext: snapshot.worldContext }
+      })
+      const fallbackOrg = organizations.find((o) => o.type === "media") ?? organizations[0]
+      const cadenceBucket = Math.floor(resolvedNow / (routeCadenceMinutes("RouteArticleTick") * 60_000))
+      const chosen = data.mediaRows.length > 0 ? data.mediaRows[cadenceBucket % data.mediaRows.length]! : null
+      const orgId = toText(chosen?.id) ?? fallbackOrg?.id ?? "feed-wire"
+      const orgName = toText(chosen?.name) ?? fallbackOrg?.name ?? "The Feed Wire"
+      const orgDesc = toText(chosen?.description) ?? fallbackOrg?.description ?? "Feed financial wire"
+      const rendered = renderPrompt("feedArticle", {
+        orgName,
+        orgDescription: orgDesc,
+        worldContext: data.worldContext,
+      })
+      const completion = try generateCompletion({
+        promptId: "feedArticle",
+        system: rendered.system,
+        user: rendered.user,
+        maxTokens: rendered.maxTokens,
+        temperature: rendered.temperature,
+        jsonMode: true,
+        nowMs: resolvedNow,
+      })
+      const parsed = parseLlmJsonRecord(completion.text)
+      const title = sanitizeText(typeof parsed?.title === "string" ? parsed.title : `${orgName} Market Dispatch`, 180)
+      const summary = sanitizeText(typeof parsed?.summary === "string" ? parsed.summary : "Inside the latest spot and prediction market shifts.", 340)
+      const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0
+        ? parsed.body.trim()
+        : `${orgName} analysts tracked heightened orderflow across rolling Feed markets and leveraged perpetuals.`
+      const articleId = newEngineId("art")
+      try store.transaction(effect (tx: Tx) => {
+        try tx.query(
+          `INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at)
+           VALUES ($1, $2, $3, $4, $5, NULL, false, $6)`,
+          [articleId, title, summary, body, orgId, resolvedNow],
+        )
+      })
+      try createPost({
+        authorId: orgId,
+        authorKind: "org",
+        content: sanitizeText(`${title} — ${summary}`, 275),
+      })
+      try maybePublishFeedEvent({ type: "article.published", articleId, organizationId: orgId })
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("article-tick", resolvedNow, "ok", null, 0, null, endWall - startWall)
+      return { skipped: false, articleId }
+    },
+  )
 }
 
 export effect function runPerpFundingTick(nowMs?: number): {
+  readonly skipped: boolean
   readonly period: number
   readonly accrued: boolean
   readonly cutoverConfigured: boolean
@@ -377,73 +757,95 @@ export effect function runPerpFundingTick(nowMs?: number): {
   try guardCoreRoute("RoutePerpFunding")
   const resolvedNow = try resolveClockNow(nowMs)
   const period = currentFundingPeriod(minuteIndexOf(resolvedNow))
-  const store = try Store
-  const state = try store.transaction(effect (tx: Tx) => {
-    try ensureWorldStateTx(tx, resolvedNow)
-    const rows = try tx.query("SELECT game_running, funding_cutover_period FROM feed_world_state WHERE singleton = true")
-    const gameRunning = rows[0]?.game_running !== false
-    let cutover = Math.max(0, toInt(rows[0]?.funding_cutover_period))
-    if (cutover === 0) {
-      cutover = period
-      try tx.query("UPDATE feed_world_state SET funding_cutover_period = $1, updated_at = $2 WHERE singleton = true", [cutover, resolvedNow])
-      try tx.query("UPDATE feed_perp_markets SET last_funding_period = $1 WHERE last_funding_period < $1", [cutover])
-    }
-    return { gameRunning, cutover }
-  })
-  if (!state.gameRunning) {
-    const endWall = try Clock.currentTimeMillis
-    try recordTickHealth("perp-funding", resolvedNow, "skipped", null, 0, null, endWall - startWall)
-    return { period, accrued: false, cutoverConfigured: state.cutover > 0 }
-  }
-  const accrued = try checkAndAccrueFunding(resolvedNow, state.cutover)
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("perp-funding", resolvedNow, "ok", null, 0, null, endWall - startWall)
-  return { period, accrued, cutoverConfigured: state.cutover > 0 }
+  return try withJobLockAndErrorHealth(
+    "perp-funding",
+    resolvedNow,
+    startWall,
+    () => ({ skipped: true, period, accrued: false, cutoverConfigured: false }),
+    effect () => {
+      const store = try Store
+      const state = try store.transaction(effect (tx: Tx) => {
+        try ensureWorldStateTx(tx, resolvedNow)
+        const rows = try tx.query("SELECT game_running, funding_cutover_period FROM feed_world_state WHERE singleton = true")
+        const gameRunning = rows[0]?.game_running !== false
+        let cutover = Math.max(0, toInt(rows[0]?.funding_cutover_period))
+        if (gameRunning && cutover === 0) {
+          cutover = period + 1
+          try tx.query("UPDATE feed_world_state SET funding_cutover_period = $1, updated_at = $2 WHERE singleton = true", [cutover, resolvedNow])
+          try tx.query("UPDATE feed_perp_markets SET last_funding_period = GREATEST(last_funding_period, $1)", [period])
+        }
+        return { gameRunning, cutover }
+      })
+      if (!state.gameRunning) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("perp-funding", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, period, accrued: false, cutoverConfigured: state.cutover > 0 }
+      }
+      const accrued = try checkAndAccrueFunding(resolvedNow, state.cutover)
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("perp-funding", resolvedNow, "ok", null, 0, null, endWall - startWall)
+      return { skipped: false, period, accrued, cutoverConfigured: state.cutover > 0 }
+    },
+  )
 }
 
-export effect function runWorldFactsTick(nowMs?: number): { readonly factsAdded: number }!(EngineFailure | StoreFailure)!Store {
+export effect function runWorldFactsTick(nowMs?: number): { readonly skipped: boolean; readonly factsAdded: number }!(EngineFailure | StoreFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteWorldFacts")
   const resolvedNow = try resolveClockNow(nowMs)
-  const store = try Store
-  const recentText = try store.transaction(effect (tx: Tx) => {
-    const settled = try tx.query(
-      `SELECT question, resolved_outcome FROM feed_prediction_markets WHERE status = 'resolved' ORDER BY resolved_at DESC NULLS LAST LIMIT 5`,
-    )
-    const posts = try tx.query("SELECT author_id, content FROM feed_posts WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 6")
-    const settledStr = settled.map((r) => `Resolved ${toText(r.resolved_outcome)}: ${toText(r.question)}`).join("\n")
-    const postsStr = posts.map((r) => `@${toText(r.author_id)}: ${sanitizeText(toText(r.content) ?? "", 100)}`).join("\n")
-    return `${settledStr}\n${postsStr}`.trim() || "Initial market trading session active."
-  })
-  const rendered = renderPrompt("worldFactsConsolidation", { recentEvents: recentText })
-  const completion = try generateCompletion({
-    promptId: "worldFactsConsolidation",
-    system: rendered.system,
-    user: rendered.user,
-    maxTokens: rendered.maxTokens,
-    temperature: rendered.temperature,
-    jsonMode: true,
-    nowMs: resolvedNow,
-  })
-  const parsed = parseLlmJsonRecord(completion.text)
-  const items = Array.isArray(parsed?.facts) ? parsed.facts.slice(0, 3) : []
-  let factsAdded = 0
-  try store.transaction(effect (tx: Tx) => {
-    for (const item of items) {
-      const rec = item as Record<string, unknown> | null
-      const factText = sanitizeText(typeof rec?.factText === "string" ? rec.factText : "", 220)
-      if (factText.length === 0) continue
-      const category = sanitizeText(typeof rec?.category === "string" ? rec.category : "markets", 40) || "markets"
-      try tx.query(
-        `INSERT INTO feed_world_facts (id, fact_text, category, created_at) VALUES ($1, $2, $3, $4)`,
-        [newEngineId("fact"), factText, category, resolvedNow],
-      )
-      factsAdded += 1
-    }
-  })
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("world-facts", resolvedNow, "ok", null, 0, null, endWall - startWall)
-  return { factsAdded }
+  return try withJobLockAndErrorHealth(
+    "world-facts",
+    resolvedNow,
+    startWall,
+    () => ({ skipped: true, factsAdded: 0 }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("world-facts", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, factsAdded: 0 }
+      }
+      const store = try Store
+      const recentText = try store.transaction(effect (tx: Tx) => {
+        const settled = try tx.query(
+          `SELECT question, resolved_outcome FROM feed_prediction_markets WHERE status = 'resolved' ORDER BY resolved_at DESC NULLS LAST LIMIT 5`,
+        )
+        const posts = try tx.query("SELECT author_id, content FROM feed_posts WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 6")
+        const settledStr = settled.map((r) => `Resolved ${toText(r.resolved_outcome)}: ${toText(r.question)}`).join("\n")
+        const postsStr = posts.map((r) => `@${toText(r.author_id)}: ${sanitizeText(toText(r.content) ?? "", 100)}`).join("\n")
+        return `${settledStr}\n${postsStr}`.trim() || "Initial market trading session active."
+      })
+      const rendered = renderPrompt("worldFactsConsolidation", { recentEvents: recentText })
+      const completion = try generateCompletion({
+        promptId: "worldFactsConsolidation",
+        system: rendered.system,
+        user: rendered.user,
+        maxTokens: rendered.maxTokens,
+        temperature: rendered.temperature,
+        jsonMode: true,
+        nowMs: resolvedNow,
+      })
+      const parsed = parseLlmJsonRecord(completion.text)
+      const items = Array.isArray(parsed?.facts) ? parsed.facts.slice(0, 3) : []
+      let factsAdded = 0
+      try store.transaction(effect (tx: Tx) => {
+        for (const item of items) {
+          const rec = item as Record<string, unknown> | null
+          const factText = sanitizeText(typeof rec?.factText === "string" ? rec.factText : "", 220)
+          if (factText.length === 0) continue
+          const category = sanitizeText(typeof rec?.category === "string" ? rec.category : "markets", 40) || "markets"
+          try tx.query(
+            `INSERT INTO feed_world_facts (id, fact_text, category, created_at) VALUES ($1, $2, $3, $4)`,
+            [newEngineId("fact"), factText, category, resolvedNow],
+          )
+          factsAdded += 1
+        }
+      })
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("world-facts", resolvedNow, "ok", null, 0, null, endWall - startWall)
+      return { skipped: false, factsAdded }
+    },
+  )
 }
 
 function decodeXmlEntities(raw: string): string {
@@ -457,8 +859,8 @@ function decodeXmlEntities(raw: string): string {
     .replace(/<[^>]+>/g, " ")
 }
 
-function extractRssHeadlinesFromXml(xml: string, sourceUrl: string): ReadonlyArray<{ readonly title: string; readonly sourceUrl: string }> {
-  const out: Array<{ readonly title: string; readonly sourceUrl: string }> = []
+function extractRssHeadlinesFromXml(xml: string, sourceUrl: string): ReadonlyArray<RssFeedHeadlineItem> {
+  const out: Array<RssFeedHeadlineItem> = []
   const blockRegex = /<(?:item|entry)\b[^>]*>([\s\S]*?)<\/(?:item|entry)>/gi
   let match = blockRegex.exec(xml)
   while (match !== null && out.length < 10) {
@@ -474,65 +876,104 @@ function extractRssHeadlinesFromXml(xml: string, sourceUrl: string): ReadonlyArr
   return out
 }
 
+export function interleaveRssFeedItems<T>(buckets: ReadonlyArray<ReadonlyArray<T>>): ReadonlyArray<T> {
+  const nonEmpty = buckets.filter((b) => b.length > 0)
+  if (nonEmpty.length === 0) return []
+  const out: T[] = []
+  let maxLen = 0
+  for (const b of nonEmpty) {
+    if (b.length > maxLen) maxLen = b.length
+  }
+  for (let idx = 0; idx < maxLen; idx += 1) {
+    for (const bucket of nonEmpty) {
+      const item = bucket[idx]
+      if (item !== undefined) out.push(item)
+    }
+  }
+  return out
+}
+
 export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(EngineFailure | StoreFailure)!Store {
   const startWall = try Clock.currentTimeMillis
   try guardCoreRoute("RouteRssRefresh")
   const resolvedNow = try resolveClockNow(nowMs)
-  const cadenceMs = routeCadenceMinutes("RouteRssRefresh") * 60_000
-  const store = try Store
-  const lastRunAt = try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query("SELECT last_run_at FROM feed_tick_health WHERE job_name = 'rss-refresh'")
-    return rows.length > 0 ? toInt(rows[0]?.last_run_at) : 0
-  })
-  if (lastRunAt > 0 && resolvedNow - lastRunAt < cadenceMs) {
-    return { skipped: true, fetchedCount: 0, insertedCount: 0 }
-  }
-  const configuredUrls = (readEnv("FEED_RSS_URLS") ?? "https://hnrss.org/frontpage,https://feeds.arstechnica.com/arstechnica/technology-lab")
-    .split(",")
-    .map((u) => u.trim())
-    .filter((u) => u.startsWith("http"))
-  const collected: Array<{ readonly title: string; readonly sourceUrl: string }> = []
-  for (const url of configuredUrls.slice(0, 3)) {
-    const req = HttpClientRequest.get(url)
-    const response = executeHttpWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
-    if (!response || response.status < 200 || response.status >= 300) continue
-    const xml = (response.text catch effect () => "")
-    if (xml.length > 0) {
-      for (const item of extractRssHeadlinesFromXml(xml, url)) {
-        collected.push(item)
+  return try withJobLockAndErrorHealth(
+    "rss-refresh",
+    resolvedNow,
+    startWall,
+    () => ({ skipped: true, fetchedCount: 0, insertedCount: 0 }),
+    effect () => {
+      const running = try readGameRunning(resolvedNow)
+      if (!running) {
+        const endWall = try Clock.currentTimeMillis
+        try recordTickHealth("rss-refresh", resolvedNow, "skipped", null, 0, null, endWall - startWall)
+        return { skipped: true, fetchedCount: 0, insertedCount: 0 }
       }
-    }
-  }
-  let insertedCount = 0
-  const rosterHint = groundingRosterSummary()
-  for (const item of collected.slice(0, 5)) {
-    const exists = try store.transaction(effect (tx: Tx) => {
-      const rows = try tx.query("SELECT id FROM feed_rss_headlines WHERE title = $1 LIMIT 1", [item.title])
-      return rows.length > 0
-    })
-    if (exists) continue
-    const rendered = renderPrompt("rssParodyRewrite", { headline: item.title, sourceUrl: item.sourceUrl, rosterHint })
-    const completion = generateCompletion({
-      promptId: "rssParodyRewrite",
-      system: rendered.system,
-      user: rendered.user,
-      maxTokens: rendered.maxTokens,
-      temperature: rendered.temperature,
-      nowMs: resolvedNow,
-    }) catch effect () => null
-    const parody = completion ? sanitizeText(completion.text, 180) : item.title
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        `INSERT INTO feed_rss_headlines (id, source_url, title, parody_headline, published_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $5)`,
-        [newEngineId("rss"), item.sourceUrl, item.title, parody, resolvedNow],
-      )
-    })
-    insertedCount += 1
-  }
-  const endWall = try Clock.currentTimeMillis
-  try recordTickHealth("rss-refresh", resolvedNow, "ok", null, 0, null, endWall - startWall)
-  return { skipped: false, fetchedCount: collected.length, insertedCount }
+      const cadenceMs = routeCadenceMinutes("RouteRssRefresh") * 60_000
+      const store = try Store
+      const lastRunAt = try store.transaction(effect (tx: Tx) => {
+        const rows = try tx.query("SELECT last_success_at FROM feed_tick_health WHERE job_name = 'rss-refresh'")
+        return rows.length > 0 ? toInt(rows[0]?.last_success_at) : 0
+      })
+      if (lastRunAt > 0 && resolvedNow - lastRunAt < cadenceMs) {
+        return { skipped: true, fetchedCount: 0, insertedCount: 0 }
+      }
+      const envUrls = readEnv("FEED_RSS_URLS")?.trim()
+      const configuredUrls = (envUrls && envUrls.length > 0 ? envUrls.split(",") : [...DEFAULT_RSS_URLS])
+        .map((u) => u.trim())
+        .filter((u) => u.startsWith("http"))
+      const bucket = Math.floor(resolvedNow / cadenceMs)
+      const feedCount = Math.min(6, configuredUrls.length)
+      const selectedUrls: string[] = []
+      for (let i = 0; i < feedCount; i += 1) {
+        selectedUrls.push(configuredUrls[(bucket + i) % configuredUrls.length]!)
+      }
+      const perFeedBuckets: Array<ReadonlyArray<RssFeedHeadlineItem>> = []
+      for (const url of selectedUrls) {
+        const req = HttpClientRequest.get(url)
+        const response = executeHttpWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
+        if (!response || response.status < 200 || response.status >= 300) continue
+        const xml = response.text catch effect () => ""
+        if (xml.length > 0) {
+          const parsedItems = extractRssHeadlinesFromXml(xml, url)
+          if (parsedItems.length > 0) {
+            perFeedBuckets.push(parsedItems)
+          }
+        }
+      }
+      const interleaved = interleaveRssFeedItems(perFeedBuckets)
+      let insertedCount = 0
+      const rosterHint = groundingRosterSummary()
+      for (const item of interleaved.slice(0, 6)) {
+        const exists = try store.transaction(effect (tx: Tx) => {
+          const rows = try tx.query("SELECT id FROM feed_rss_headlines WHERE title = $1 LIMIT 1", [item.title])
+          return rows.length > 0
+        })
+        if (exists) continue
+        const rendered = renderPrompt("rssParodyRewrite", { headline: item.title, sourceUrl: item.sourceUrl, rosterHint })
+        const completion = generateCompletion({
+          promptId: "rssParodyRewrite",
+          system: rendered.system,
+          user: rendered.user,
+          maxTokens: rendered.maxTokens,
+          temperature: rendered.temperature,
+          nowMs: resolvedNow,
+        }) catch effect () => null
+        const parody = completion ? sanitizeText(completion.text, 180) : item.title
+        try store.transaction(effect (tx: Tx) => {
+          try tx.query(
+            `INSERT INTO feed_rss_headlines (id, source_url, title, parody_headline, published_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $5)`,
+            [newEngineId("rss"), item.sourceUrl, item.title, parody, resolvedNow],
+          )
+        })
+        insertedCount += 1
+      }
+      const endWall = try Clock.currentTimeMillis
+      try recordTickHealth("rss-refresh", resolvedNow, "ok", null, 0, null, endWall - startWall)
+      return { skipped: false, fetchedCount: interleaved.length, insertedCount }
+    },
+  )
 }
 
 export effect function fastForwardSimulatedHours(hours: number): FastForwardResult!(EngineFailure | StoreFailure)!Store {

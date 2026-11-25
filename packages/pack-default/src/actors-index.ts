@@ -190,8 +190,6 @@ import spartain from './actors/spartain.ts';
 import steven_craiwder from './actors/steven-craiwder.ts';
 import sundar_pichai from './actors/sundar-pichai.ts';
 import tailyor_lorenz from './actors/tailyor-lorenz.ts';
-import test_analyst_npc_002 from './actors/test-analyst-npc-002.ts';
-import test_trader_npc_001 from './actors/test-trader-npc-001.ts';
 import threadgai from './actors/threadgai.ts';
 import tim_pail from './actors/tim-pail.ts';
 import tom_braidy from './actors/tom-braidy.ts';
@@ -396,8 +394,6 @@ export const actors: PackActor[] = [
   steven_craiwder,
   sundar_pichai,
   tailyor_lorenz,
-  test_analyst_npc_002,
-  test_trader_npc_001,
   threadgai,
   tim_pail,
   tom_braidy,

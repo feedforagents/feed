@@ -1,4 +1,4 @@
-// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"
+// spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"; spec/mcp/skill.md, "One canonical source renders all discovery documents and `index.json` SHA-256 digests"; spec/mcp/skill.md, "All 9 Join-sheet host launchers degrade to copy-prompt until device-verified"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"
 import { assert, it } from "@effect/vitest"
 import { TestClock } from "effect/testing"
 import { Store, migrateFeedSchema, seedFeedWorld, type Tx } from "@repo/db"
@@ -299,7 +299,7 @@ effect function seedGameNotifications(accountId: string) {
 }
 
 function assertToolCatalogClean(tools: ReadonlyArray<ToolSchemaSummary>): void {
-  assert.strictEqual(tools.length, 49)
+  assert.strictEqual(tools.length, 52)
   for (const tool of tools) {
     assert.isAtMost(tool.name.length, 64)
     assert.match(tool.name, /^[a-zA-Z0-9_-]+$/)
@@ -401,6 +401,10 @@ effect function assertSocialModeRedaction(
   const notifsSocial = unwrapToolPayload(try callMcpTool(33, "get_notifications", { limit: 20 }, authConfig, token))
   const feedSocial = unwrapToolPayload(try callMcpTool(34, "get_home_feed", { tab: "latest", limit: 20 }, authConfig, token))
   const profileSocial = unwrapToolPayload(try callMcpTool(35, "get_profile", { handleOrId: accountHandle }, authConfig, token))
+  const marketsSocial = unwrapToolPayload(try callMcpTool(36, "list_markets", { kind: "all", status: "open", limit: 10 }, authConfig, token))
+  const marketDetailSocial = unwrapToolPayload(try callMcpTool(37, "get_market", { marketId: "seed-market-1" }, authConfig, token))
+  const leaderboardSocial = unwrapToolPayload(try callMcpTool(38, "get_leaderboard", { scope: "players", metric: "net_profit" }, authConfig, token))
+  const previewPerpSocial = unwrapToolPayload(try callMcpTool(39, "preview_perp", { ticker: "NVDAI", side: "long", collateralPts: 5, leverage: 3 }, authConfig, token))
   try check(() => {
     assert.strictEqual(whoamiSocial.playMode, "social")
     assert.strictEqual(whoamiSocial.financialFieldsOmittedInSocialMode, true)
@@ -422,6 +426,7 @@ effect function assertSocialModeRedaction(
     const feedItems = (feedSocial.items ?? []) as ReadonlyArray<{
       readonly marketId: string | null
       readonly ticker: string | null
+      readonly marketBadge: unknown
       readonly cashtags: ReadonlyArray<string>
       readonly showTradeEmbed: boolean
       readonly linkCashtags: boolean
@@ -431,6 +436,7 @@ effect function assertSocialModeRedaction(
     for (const item of feedItems) {
       assert.strictEqual(item.marketId, null)
       assert.strictEqual(item.ticker, null)
+      assert.strictEqual(item.marketBadge, null)
       assert.deepStrictEqual(item.cashtags, [])
       assert.strictEqual(item.showTradeEmbed, false)
       assert.strictEqual(item.linkCashtags, false)
@@ -438,6 +444,23 @@ effect function assertSocialModeRedaction(
     for (const key of ["balancePts", "balanceDisplay", "tradeCount", "openPositionCount"]) {
       assert.strictEqual(Object.hasOwn(profileSocial, key), false)
     }
+    assert.strictEqual(marketsSocial.playMode, "social")
+    assert.strictEqual(marketsSocial.financialFieldsOmittedInSocialMode, true)
+    assert.deepStrictEqual(marketsSocial.predictionMarkets, [])
+    assert.deepStrictEqual(marketsSocial.perpMarkets, [])
+    assert.strictEqual(marketDetailSocial.playMode, "social")
+    assert.strictEqual(marketDetailSocial.financialFieldsOmittedInSocialMode, true)
+    assert.strictEqual(Object.hasOwn(marketDetailSocial, "market"), false)
+    assert.deepStrictEqual(marketDetailSocial.recentTrades, [])
+    assert.deepStrictEqual(marketDetailSocial.priceHistory, [])
+    assert.strictEqual(leaderboardSocial.playMode, "social")
+    assert.strictEqual(leaderboardSocial.financialFieldsOmittedInSocialMode, true)
+    assert.deepStrictEqual(leaderboardSocial.entries, [])
+    assert.strictEqual(leaderboardSocial.currentUser, null)
+    assert.strictEqual(previewPerpSocial.playMode, "social")
+    assert.strictEqual(previewPerpSocial.financialFieldsOmittedInSocialMode, true)
+    assert.strictEqual(Object.hasOwn(previewPerpSocial, "estimatedLiquidationPricePts"), false)
+    assert.strictEqual(Object.hasOwn(previewPerpSocial, "entryMarkPricePts"), false)
   })
 }
 
@@ -486,8 +509,15 @@ it.effect('Serve canonical SKILL.md, well-known discovery index with matching SH
     assert.include(llmsText, `${TEST_ORIGIN}/SKILL.md`)
     assert.include(llmsText, `${TEST_ORIGIN}/.well-known/agent-skills/index.json`)
     assert.include(llmsText, `SHA-256: ${actualHex}`)
+    assert.include(llmsText, "37 protected tools")
     assert.include(howToPlayText, "# How to play Feed")
     assert.include(howToPlayText, "Virtual points have no cash value")
+    const skillText = new TextDecoder().decode(skillBytes)
+    assert.include(skillText, "## Tool surface (52 tools)")
+    assert.include(skillText, "fixed one-time `100 pts` (`$100` virtual capital)")
+    assert.strictEqual(/stripe|purchased_points|purchased points|purchasedCents/i.test(skillText), false)
+    assert.strictEqual(/stripe|purchased_points|purchased points|purchasedCents/i.test(howToPlayText), false)
+    assert.strictEqual(/stripe|purchased_points|purchased points|purchasedCents/i.test(llmsText), false)
     assertHostsPayload(hostsDefault, expectedDigest, false)
     assertHostsPayload(hostsUnverified, expectedDigest, true)
     assertHostsPayload(hostsSelective, expectedDigest, false, new Set(["claude", "openclaw"]))
@@ -506,7 +536,7 @@ effect function withSeededWorld<A, E>(
   }
 }
 
-it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no-phone schemas, and dual 401 challenge on unauthenticated protected call (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30")', () => withSeededWorld(effect (authConfig) => {
+it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no-phone schemas, and dual 401 challenge on unauthenticated protected call (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30")', () => withSeededWorld(effect (authConfig) => {
     const initRes = try callMcp(
       {
         jsonrpc: "2.0",
@@ -539,7 +569,7 @@ it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no
       const listResult = listRes.body.result as { readonly tools?: ReadonlyArray<ToolSchemaSummary> } | undefined
       assertToolCatalogClean(listResult?.tools ?? [])
       const aboutPayload = unwrapToolPayload(aboutRes)
-      assert.deepStrictEqual(aboutPayload.toolsSummary, { publicTools: 15, protectedTools: 34, totalTools: 49 })
+      assert.deepStrictEqual(aboutPayload.toolsSummary, { publicTools: 15, protectedTools: 37, totalTools: 52 })
       const postPayload = unwrapToolPayload(postRes)
       const post = postPayload.post as { readonly id?: string; readonly isParody?: boolean } | undefined
       assert.strictEqual(post?.id, "seed-post-1")
@@ -584,6 +614,15 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
     const createdPayload = unwrapToolPayload(createdRes)
     const createdPost = createdPayload.post as { readonly id: string; readonly viaClientName: string | null }
     const feedPage = try listFeedPosts({ tab: "latest", authorId: alice.account.accountId })
+    const readOnlyMarkets = unwrapToolPayload(try callMcpTool(9, "list_markets", { kind: "perp", limit: 3 }, authConfig))
+    const readOnlyTicker = (((readOnlyMarkets.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>)[0]?.ticker) ?? "NVDAI"
+    const readOnlyPreviewPayload = unwrapToolPayload(try callMcpTool(
+      10,
+      "preview_perp",
+      { ticker: readOnlyTicker, side: "long", collateralPts: 5, leverage: 3 },
+      authConfig,
+      token1.access_token
+    ))
     const forbiddenTradeRes = try callMcpTool(
       12,
       "buy_prediction",
@@ -627,6 +666,10 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
       assert.strictEqual(feedPage.items[0]?.id, createdPost.id)
       assert.strictEqual(feedPage.items[0]?.viaClientName, "Claude Desktop")
       assert.strictEqual(feedPage.items[0]?.linkCashtags, true)
+      assert.strictEqual(readOnlyPreviewPayload.previewOnly, true)
+      assert.strictEqual(readOnlyPreviewPayload.action, "open")
+      assert.strictEqual(readOnlyPreviewPayload.ticker, readOnlyTicker)
+      assert.isAbove(Number(readOnlyPreviewPayload.estimatedLiquidationPricePts), 0)
       assert.strictEqual(pendingDevicePayload.status, "pending")
       assert.strictEqual(forbiddenTradeRes.status, 403)
       assert.include(forbiddenTradeRes.headers.get("www-authenticate") ?? "", 'error="insufficient_scope"')
@@ -704,11 +747,18 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     const createdGroup = unwrapToolPayload(try callMcpTool(101, "create_group", { title: "Parity Squad", memberHandles: [] }, authConfig, aliceToken))
     const groupChat = createdGroup.chat as { readonly id: string }
     const invitedBob = unwrapToolPayload(try callMcpTool(102, "invite_to_group", { chatId: groupChat.id, targetHandleOrId: "bob_parity" }, authConfig, aliceToken))
+    const bobInvites = unwrapToolPayload(try callMcpTool(1021, "list_group_invites", { kind: "user_group" }, authConfig, bobToken))
+    const bobAcceptedInvite = unwrapToolPayload(try callMcpTool(1022, "respond_to_group_invite", { inviteId: String(invitedBob.inviteId ?? ""), accept: true }, authConfig, bobToken))
     const ownerLeaveErr = unwrapToolError(try callMcpTool(103, "leave_group", { chatId: groupChat.id }, authConfig, aliceToken))
     const memberLeft = unwrapToolPayload(try callMcpTool(104, "leave_group", { chatId: groupChat.id }, authConfig, bobToken))
     unwrapToolPayload(try callMcpTool(105, "follow", { handleOrId: "alice_parity" }, authConfig, bobToken))
     unwrapToolPayload(try callMcpTool(106, "follow", { handleOrId: "charlie_parity" }, authConfig, bobToken))
     unwrapToolPayload(try callMcpTool(107, "block", { handleOrId: "charlie_parity" }, authConfig, aliceToken))
+    const aliceBlocks = unwrapToolPayload(try callMcpTool(1071, "get_blocks", { limit: 20 }, authConfig, aliceToken))
+    unwrapToolPayload(try callMcpTool(1072, "mute", { handleOrId: "bob_parity" }, authConfig, aliceToken))
+    const aliceMutes = unwrapToolPayload(try callMcpTool(1073, "get_mutes", { limit: 20 }, authConfig, aliceToken))
+    unwrapToolPayload(try callMcpTool(1074, "unmute", { handleOrId: "bob_parity" }, authConfig, aliceToken))
+    const aliceMutesAfter = unwrapToolPayload(try callMcpTool(1075, "get_mutes", { limit: 20 }, authConfig, aliceToken))
     const inviteBlockedErr = unwrapToolError(try callMcpTool(108, "invite_to_group", { chatId: groupChat.id, targetHandleOrId: "charlie_parity" }, authConfig, aliceToken))
     const bobFollowingSeenByAlice = unwrapToolPayload(try callMcpTool(109, "get_following", { handleOrId: "bob_parity", limit: 20 }, authConfig, aliceToken))
 
@@ -716,6 +766,9 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     unwrapToolPayload(try callMcpTool(111, "create_post", { content: "Parity post checking canonical rate limit" }, authConfig, aliceToken))
     const dmSent = unwrapToolPayload(try callMcpTool(112, "send_dm", { recipientHandleOrId: "bob_parity", content: "Hello Bob via MCP" }, authConfig, aliceToken))
     const dmChatId = String(dmSent.chatId ?? "")
+    const dmMessageId = String(((dmSent.message as { readonly id?: string } | undefined)?.id) ?? "")
+    const reactAdded = unwrapToolPayload(try callMcpTool(1121, "react_to_message", { messageId: dmMessageId, emoji: "🔥" }, authConfig, aliceToken))
+    const reactRemoved = unwrapToolPayload(try callMcpTool(1122, "react_to_message", { messageId: dmMessageId, emoji: "🔥" }, authConfig, aliceToken))
     unwrapToolPayload(try callMcpTool(113, "send_message", { chatId: dmChatId, content: "Second message in DM" }, authConfig, aliceToken))
     const whoamiAfterSocial = unwrapToolPayload(try callMcpTool(114, "whoami", {}, authConfig, aliceToken))
 
@@ -740,17 +793,32 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       authConfig,
       aliceToken
     ))
+    const portfolioAfterBuy = unwrapToolPayload(try callMcpTool(1171, "get_portfolio", {}, authConfig, aliceToken))
     const sellFirst = unwrapToolPayload(try callMcpTool(
       118,
       "sell_prediction",
-      { marketId: "seed-market-1", side: "yes", shares: 100, idempotencyKey: "mcp-sell-idem-1" },
+      { marketId: "seed-market-1", side: "yes", shares: 1.5, idempotencyKey: "mcp-sell-idem-1" },
       authConfig,
       aliceToken
     ))
     const sellReplay = unwrapToolPayload(try callMcpTool(
       119,
       "sell_prediction",
-      { marketId: "seed-market-1", side: "yes", shares: 100, idempotencyKey: "mcp-sell-idem-1" },
+      { marketId: "seed-market-1", side: "yes", shares: 1.5, idempotencyKey: "mcp-sell-idem-1" },
+      authConfig,
+      aliceToken
+    ))
+    const sellByUnits = unwrapToolPayload(try callMcpTool(
+      1191,
+      "sell_prediction",
+      { marketId: "seed-market-1", side: "yes", shareUnits: 100 },
+      authConfig,
+      aliceToken
+    ))
+    const predMarketDetail = unwrapToolPayload(try callMcpTool(
+      1192,
+      "get_market",
+      { marketId: "seed-market-1", tradesLimit: 10, historyLimit: 20 },
       authConfig,
       aliceToken
     ))
@@ -768,18 +836,18 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     const previewValid = unwrapToolPayload(try callMcpTool(
       122,
       "preview_perp",
-      { ticker, side: "long", collateralPts: 5, leverage: 3 },
+      { ticker, side: "long", collateralPts: 10, leverage: 3 },
       authConfig,
       aliceToken
     ))
     const openedPerp = unwrapToolPayload(try callMcpTool(
       123,
       "open_perp",
-      { ticker, side: "long", collateralPts: 5, leverage: 3 },
+      { ticker, side: "long", collateralPts: 10, leverage: 3, maxSlippageBps: 500 },
       authConfig,
       aliceToken
     ))
-    const previewDuplicateErr = unwrapToolError(try callMcpTool(
+    const previewRebalance = unwrapToolPayload(try callMcpTool(
       124,
       "preview_perp",
       { ticker, side: "short", collateralPts: 5, leverage: 2 },
@@ -787,6 +855,13 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       aliceToken
     ))
     const positionId = String(openedPerp.positionId ?? "")
+    const partialClosedPerp = unwrapToolPayload(try callMcpTool(
+      1241,
+      "close_perp",
+      { positionId, closePct: 50, maxSlippageBps: 500 },
+      authConfig,
+      aliceToken
+    ))
     const closedPerp = unwrapToolPayload(try callMcpTool(
       125,
       "close_perp",
@@ -794,18 +869,59 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       authConfig,
       aliceToken
     ))
+    const perpMarketDetail = unwrapToolPayload(try callMcpTool(
+      1251,
+      "get_market",
+      { marketId: ticker, kind: "perp", tradesLimit: 10, historyLimit: 20 },
+      authConfig,
+      aliceToken
+    ))
+    const playersByVolume = unwrapToolPayload(try callMcpTool(
+      1252,
+      "get_leaderboard",
+      { scope: "players", metric: "volume", page: 1, pageSize: 1 },
+      authConfig,
+      aliceToken
+    ))
+    const playersPage2 = unwrapToolPayload(try callMcpTool(
+      1253,
+      "get_leaderboard",
+      { scope: "players", metric: "net_profit", page: 2, pageSize: 1 },
+      authConfig,
+      aliceToken
+    ))
+    const charactersBoard = unwrapToolPayload(try callMcpTool(
+      1254,
+      "get_leaderboard",
+      { scope: "characters", metric: "net_profit", page: 1, pageSize: 5 },
+      authConfig
+    ))
     const whoamiAfterTrades = unwrapToolPayload(try callMcpTool(126, "whoami", {}, authConfig, aliceToken))
 
     try check(() => {
-      assert.strictEqual(invitedBob.added, true)
+      assert.strictEqual(invitedBob.status, "pending")
+      assert.strictEqual(invitedBob.added, false)
+      assert.isString(invitedBob.inviteId)
       assert.strictEqual(invitedBob.handle, "bob_parity")
       assert.strictEqual(invitedBob.memberId, bob.account.accountId)
+      const pendingInvites = (bobInvites.invites ?? []) as ReadonlyArray<{ readonly id: string; readonly chatKind: string }>
+      assert.strictEqual(pendingInvites.some((inv) => inv.id === invitedBob.inviteId && inv.chatKind === "user_group"), true)
+      const acceptedInvite = bobAcceptedInvite.invite as { readonly status?: string } | undefined
+      assert.strictEqual(acceptedInvite?.status, "accepted")
       assert.strictEqual(ownerLeaveErr.error, "Forbidden")
       assert.strictEqual(memberLeft.left, true)
+      const blockedHandles = ((aliceBlocks.items ?? []) as ReadonlyArray<{ readonly handle: string }>).map((entry) => entry.handle)
+      assert.include(blockedHandles, "charlie_parity")
+      const mutedHandles = ((aliceMutes.items ?? []) as ReadonlyArray<{ readonly handle: string }>).map((entry) => entry.handle)
+      assert.include(mutedHandles, "bob_parity")
+      assert.deepStrictEqual(aliceMutesAfter.items, [])
       assert.strictEqual(inviteBlockedErr.error, "Blocked")
       const followingIds = ((bobFollowingSeenByAlice.items ?? []) as ReadonlyArray<{ readonly id: string }>).map((i) => i.id)
       assert.include(followingIds, alice.account.accountId)
       assert.notInclude(followingIds, charlie.account.accountId)
+      assert.strictEqual(reactAdded.added, true)
+      assert.strictEqual(reactAdded.emoji, "🔥")
+      assert.strictEqual(reactRemoved.added, false)
 
       const limitsBefore = whoamiBefore.rateLimits as Readonly<Record<string, { readonly used: number }>>
       const limitsAfterSocial = whoamiAfterSocial.rateLimits as Readonly<Record<string, { readonly used: number }>>
@@ -816,27 +932,97 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       assert.strictEqual(limitsAfterSocial.post?.used, 1)
       assert.strictEqual(limitsAfterSocial.dm?.used, 2)
       assert.strictEqual(limitsAfterSocial.trade?.used, 0)
-      assert.strictEqual(limitsAfterTrades.trade?.used, 7)
+      assert.strictEqual(limitsAfterTrades.trade?.used, 9)
 
       assert.strictEqual(buyReplay.tradeId, buyFirst.tradeId)
       assert.strictEqual(buyReplay.shares, buyFirst.shares)
+      assert.strictEqual(buyReplay.shareUnits, buyFirst.shareUnits)
+      assert.strictEqual(buyFirst.shares, Math.round(Number(buyFirst.shareUnits)) / 100)
+      assert.isAbove(Number(buyFirst.shares), 5)
+      assert.isBelow(Number(buyFirst.shares), 15)
       assert.strictEqual(buyReplay.balanceAfterPts, 95)
+      const portPreds = (portfolioAfterBuy.predictionPositions ?? []) as ReadonlyArray<{
+        readonly marketId: string
+        readonly shares: number
+        readonly shareUnits: number
+      }>
+      assert.strictEqual(portPreds[0]?.shares, buyFirst.shares)
+      assert.strictEqual(portPreds[0]?.shareUnits, buyFirst.shareUnits)
       assert.strictEqual(buyConflictErr.error, "idempotency_conflict")
       assert.strictEqual(buyConflictErr.code, "IDEMPOTENCY_CONFLICT")
+      assert.strictEqual(sellFirst.shares, 1.5)
+      assert.strictEqual(sellFirst.shareUnits, 150)
       assert.strictEqual(sellReplay.tradeId, sellFirst.tradeId)
+      assert.strictEqual(sellReplay.shares, 1.5)
+      assert.strictEqual(sellReplay.shareUnits, 150)
       assert.strictEqual(sellReplay.balanceAfterPts, sellFirst.balanceAfterPts)
+      assert.strictEqual(sellByUnits.shares, 1)
+      assert.strictEqual(sellByUnits.shareUnits, 100)
+
+      const predTrades = (predMarketDetail.recentTrades ?? []) as ReadonlyArray<{
+        readonly shares?: number
+        readonly shareUnits?: number
+      }>
+      assert.isAtLeast(predTrades.length, 3)
+      assert.strictEqual(predTrades.some((t) => t.shares === 1.5 && t.shareUnits === 150), true)
+      assert.strictEqual(predTrades.some((t) => t.shares === 1 && t.shareUnits === 100), true)
+      assert.isAbove(((predMarketDetail.priceHistory ?? []) as ReadonlyArray<unknown>).length, 0)
 
       assert.notStrictEqual(ticker, "")
       assert.strictEqual(previewTooSmallErr.error, "ORDER_TOO_SMALL")
       assert.strictEqual(previewValid.previewOnly, true)
+      assert.strictEqual(previewValid.action, "open")
+      assert.strictEqual(openedPerp.action, "open")
       assert.strictEqual(openedPerp.liquidationPricePts, previewValid.estimatedLiquidationPricePts)
-      assert.strictEqual(previewDuplicateErr.error, "POSITION_ALREADY_OPEN")
+      assert.strictEqual(previewRebalance.previewOnly, true)
+      assert.strictEqual(previewRebalance.action, "reduce")
+      assert.strictEqual(partialClosedPerp.positionId, positionId)
+      assert.strictEqual(partialClosedPerp.isFullClose, false)
+      assert.strictEqual(partialClosedPerp.sizePts, 15)
+      assert.strictEqual(partialClosedPerp.remainingSizePts, 15)
+      assert.strictEqual(partialClosedPerp.remainingSizeCents, 1500)
       assert.strictEqual(closedPerp.positionId, positionId)
+      assert.strictEqual(closedPerp.isFullClose, true)
+      assert.strictEqual(closedPerp.sizePts, 15)
+      assert.strictEqual(closedPerp.remainingSizePts, 0)
+      assert.isAtLeast(((perpMarketDetail.recentTrades ?? []) as ReadonlyArray<unknown>).length, 3)
+      assert.isAbove(((perpMarketDetail.priceHistory ?? []) as ReadonlyArray<unknown>).length, 0)
+
+      assert.strictEqual(playersByVolume.scope, "players")
+      assert.strictEqual(playersByVolume.metric, "volume")
+      assert.strictEqual(playersByVolume.page, 1)
+      assert.strictEqual(playersByVolume.pageSize, 1)
+      assert.isAtLeast(Number(playersByVolume.totalCount), 3)
+      assert.isAtLeast(Number(playersByVolume.totalPages), 3)
+      assert.strictEqual(/purchased/i.test(String(playersByVolume.rankingRule ?? "")), false)
+      const volumeEntries = (playersByVolume.entries ?? []) as ReadonlyArray<{
+        readonly handle: string
+        readonly returnPct: number
+        readonly winRatePct: number
+      }>
+      assert.strictEqual(volumeEntries.length, 1)
+      assert.strictEqual(volumeEntries[0]?.handle, "alice_parity")
+      assert.isNumber(volumeEntries[0]?.returnPct)
+      assert.isNumber(volumeEntries[0]?.winRatePct)
+      const volumeCurrent = playersByVolume.currentUser as { readonly handle?: string; readonly rank?: number } | null
+      assert.strictEqual(volumeCurrent?.handle, "alice_parity")
+      assert.strictEqual(volumeCurrent?.rank, 1)
+
+      assert.strictEqual(playersPage2.page, 2)
+      assert.strictEqual(((playersPage2.entries ?? []) as ReadonlyArray<unknown>).length, 1)
+      const page2Current = playersPage2.currentUser as { readonly accountId?: string } | null
+      assert.strictEqual(page2Current?.accountId, alice.account.accountId)
+
+      assert.strictEqual(charactersBoard.scope, "characters")
+      assert.isAbove(Number(charactersBoard.totalCount), 0)
+      const charEntries = (charactersBoard.entries ?? []) as ReadonlyArray<{ readonly isNpc: boolean }>
+      assert.isAbove(charEntries.length, 0)
+      assert.strictEqual(charEntries[0]?.isNpc, true)
 
       const perpEvents = publishedEvents.filter(
         (ev): ev is Extract<FeedRealtimeEvent, { readonly type: "market.perp" }> => ev.type === "market.perp"
       )
-      assert.strictEqual(perpEvents.length, 2)
+      assert.strictEqual(perpEvents.length, 3)
       assert.deepStrictEqual(
         {
           action: perpEvents[0]?.action,
@@ -852,7 +1038,7 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
           actorId: alice.account.accountId,
           ticker,
           side: "long",
-          sizeCents: 1500,
+          sizeCents: 3000,
           leverage: 3,
           positionId
         }
@@ -879,6 +1065,27 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
         }
       )
       assert.isNumber(perpEvents[1]?.markPriceCents)
+      assert.deepStrictEqual(
+        {
+          action: perpEvents[2]?.action,
+          actorId: perpEvents[2]?.actorId,
+          ticker: perpEvents[2]?.ticker,
+          side: perpEvents[2]?.side,
+          sizeCents: perpEvents[2]?.sizeCents,
+          leverage: perpEvents[2]?.leverage,
+          positionId: perpEvents[2]?.positionId
+        },
+        {
+          action: "close",
+          actorId: alice.account.accountId,
+          ticker,
+          side: "long",
+          sizeCents: 1500,
+          leverage: 3,
+          positionId
+        }
+      )
+      assert.isNumber(perpEvents[2]?.markPriceCents)
     })
   }
 }))

@@ -14,7 +14,7 @@
 #### Specification Areas
 
 - [Shared primitives](./shared/): monetary cent precision and canonical fees, UTC time/slot/cooldown boundaries, and shared per-account rate limits + D-25 NPC spend budgets.
-- [Markets & economy](./markets/): CPMM prediction markets with 1 pt winning redemption, NPC-only spot driving 20x perps with 8h funding, single-currency `pts` economy, Stripe Checkout packs, Washington purchase block, and net-profit leaderboard.
+- [Markets & economy](./markets/): CPMM prediction markets with 1 pt winning redemption, NPC-only spot driving 20x perps with 8h funding, single-currency `pts` economy with a fixed `100 pts` (`$100` virtual capital) starting grant and no buying, selling, or refilling capital, and net-profit leaderboard.
 - [Social](./social/): posts, single-reply model, likes, reposts, quotes, follows, DMs, group chats, alpha-group invites, notifications, moderation, and Game/Social presentation mode.
 - [Auth & accounts](./auth/): phone-only Twilio Verify 6-digit SMS code, VoIP Lookup block, country allowlist, 18+ self-attestation, 30-day deletion cooldown, first-party sessions, and reviewer accounts.
 - [MCP & agent connectivity](./mcp/): remote Streamable HTTP MCP server, OAuth 2.1 + PKCE + CIMD/DCR + RFC 8628 Device Flow, single-grant enforcement, no purchase tool, and shared account rate limits.
