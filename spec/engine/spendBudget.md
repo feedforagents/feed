@@ -206,7 +206,7 @@ pure def confirmSpend(b: BudgetLedger, attemptId: int, actualCents: int): Budget
 
 ### Timeouts and worker restarts mark open reservations uncertain without releasing funds
 
-A failed live call settles at actual cost 0 only when the request was never sent — the connection was refused or the provider address did not resolve, so the provider never saw it and no charge could exist. That holds whether the caller falls back to deterministic text or the failure is surfaced. Every other failed live call stays uncertain until reconciled: a timeout, an HTTP error, or a malformed response may already have been billed, so the bound stays reserved and a later confirm assigns the actual charge.
+A failed live call settles at actual cost 0 only when the request was never sent — the connection was refused or the provider address did not resolve, so the provider never saw it and no charge could exist. That holds whether the caller falls back to deterministic text or the failure is surfaced. Redirects are not followed, so a 3xx answer counts as sent: the provider answered the first request. Every other failed live call stays uncertain until reconciled: a timeout, an HTTP error, or a malformed response may already have been billed, so the bound stays reserved and a later confirm assigns the actual charge. The never-sent rule applies where the transport reports the failure codes (Node); where it does not, the call stays uncertain.
 
 ```quint
 pure def canMarkUncertain(b: BudgetLedger, attemptId: int): bool =
