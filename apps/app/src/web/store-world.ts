@@ -142,15 +142,23 @@ export function removePostAcrossStore(
 
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
-  const keep = (p: AppPost) => p.card.authorHandle.toLowerCase() !== normalized;
+  const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
+    list
+      .filter((p) =>
+        p.card.authorHandle.toLowerCase() !== normalized
+        && (p.card.repostedBy?.handle ?? p.card.repostedByHandle ?? "").toLowerCase() !== normalized)
+      .map((p) =>
+        p.card.quotePost && p.card.quotePost.authorHandle.toLowerCase() === normalized
+          ? { ...p, card: { ...p.card, quotePost: undefined } }
+          : p);
   const cur = getStoreSnapshot();
   setStoreState({
-    feedPosts: cur.feedPosts.filter(keep),
-    explore: { ...cur.explore, posts: cur.explore.posts.filter(keep) },
+    feedPosts: cleanList(cur.feedPosts),
+    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
     activeThread: cur.activeThread
       ? {
           ...cur.activeThread,
-          replies: cur.activeThread.replies.filter(keep),
+          replies: cleanList(cur.activeThread.replies),
         }
       : null,
   });
