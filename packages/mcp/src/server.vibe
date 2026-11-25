@@ -1321,9 +1321,6 @@ effect function parsePerpOrderArgs(args: Record<string, unknown>): {
   const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
   const side = args.side === "short" ? "short" : "long"
   const leverage = asOptionalInt(args.leverage) ?? 1
-  if (typeof args.leverage === "number" && !Number.isInteger(args.leverage)) {
-    throw new InvalidRpcParamsFailure({ message: "leverage must be an integer between 1 and 20." })
-  }
   const collateralCents = ptsToWholeCents(Number(args.collateralPts))
   if (collateralCents === undefined) {
     throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
