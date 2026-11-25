@@ -745,9 +745,7 @@ effect function executePublicSocialTool(
             .map(formatPerpMarketForMcp)
         : []
       const articleMatches = includeArticles
-        ? (try listArticles(50, viewer.playMode))
-            .filter((a) => a.title.toLowerCase().includes(qLower) || a.summary.toLowerCase().includes(qLower) || a.authorOrgName.toLowerCase().includes(qLower))
-            .slice(0, limit)
+        ? (try listArticles(limit, viewer.playMode, query)).slice(0, limit)
         : []
       return {
         query,
