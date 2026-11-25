@@ -595,8 +595,7 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
          VALUES
            ('mkt-expired', NULL, 'Expired still open?', 'desc', 'tech', '15m', 'open', 50000, 50000, 50000, 'YES', 'open', NULL, NULL, NULL, $1, NULL, $2),
            ('mkt-extreme-low', NULL, 'Extreme low market?', 'desc', 'tech', '15m', 'open', 99000, 1000, 100000, 'YES', 'open', NULL, NULL, NULL, $3, NULL, $2),
-           ('mkt-sell-guard', NULL, 'Sell guard market?', 'desc', 'tech', '15m', 'open', 10000, 10000, 20000, 'YES', 'open', NULL, NULL, NULL, $3, NULL, $2),
-          ('mkt-sell-min', NULL, 'Sell minimum market?', 'desc', 'tech', '15m', 'open', 10000, 10000, 20000, 'YES', 'open', NULL, NULL, NULL, $3, NULL, $2)`,
+           ('mkt-sell-guard', NULL, 'Sell guard market?', 'desc', 'tech', '15m', 'open', 10000, 10000, 20000, 'YES', 'open', NULL, NULL, NULL, $3, NULL, $2)`,
         [now - 1_000, now - 60_000, now + 3_600_000]
       )
       try tx.query(
