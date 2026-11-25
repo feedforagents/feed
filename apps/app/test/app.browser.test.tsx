@@ -6,6 +6,7 @@ import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { storeActions } from "../src/web/store.ts";
+
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
@@ -153,6 +154,7 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
 const SAMPLE_CHAT_NOTIFICATION = {
   id: "notif-chat-1",
   kind: "chat_message",
+    chatId: "chat-target",
   title: "New direct message",
   body: "DM hello $NVDAI",
   actorId: "alice",
@@ -161,6 +163,19 @@ const SAMPLE_CHAT_NOTIFICATION = {
   isRead: false,
   isGameOnly: false,
   createdAt: Date.now() - 60_000,
+};
+const SAMPLE_LEFT_CHAT_NOTIFICATION = {
+    id: "notif-chat-2",
+    kind: "chat_message",
+    title: "New chat message",
+    body: "Group hello",
+    actorId: "alice",
+    chatId: null,
+    postId: null,
+    marketId: null,
+    isRead: false,
+    isGameOnly: false,
+    createdAt: Date.now() - 30_000,
 };
 
 const AUTHED_VIEWER = {
@@ -179,7 +194,6 @@ const AUTHED_VIEWER = {
   agentGrant: null,
 };
 
-  
   function installMockNetwork() {
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
@@ -349,16 +363,19 @@ function installAuthedMockNetwork() {
     if (path === "/api/leaderboard") return json({ leaderboard: [] });
     if (path === "/api/economy/packs") return json({ packs: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    if (path === "/api/notifications") return json({ notifications: [SAMPLE_CHAT_NOTIFICATION], unreadCount: 1 });
-    if (path === "/api/chats") return json({ chats: [] });
+        if (path === "/api/notifications") return json({ notifications: [SAMPLE_CHAT_NOTIFICATION, SAMPLE_LEFT_CHAT_NOTIFICATION], unreadCount: 2 });
+        if (path === "/api/chats") return json({ chats: [
+          { id: "chat-other", kind: "direct", title: "Other chat", members: [{ memberId: "carol", handle: "carol", displayName: "Carol" }] },
+          { id: "chat-target", kind: "direct", title: "Target chat", members: [{ memberId: "alice", handle: "alice", displayName: "Alice" }] },
+              ] });
     if (path === "/api/chats/invites") return json({ invites: [] });
     return json({});
   };
   vi.stubGlobal("fetch", fetchMock);
 
-    class StubEventSource extends EventTarget {
-      close() {}
-    }
+        class StubEventSource extends EventTarget {
+              close() {}
+        }
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
@@ -447,22 +464,30 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
 });
 
-it('Chat notifications open Chats (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-  installAuthedMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  it('Chat notifications open the right chat or the list (spec/social/messaging.md)', async () => {
+    installAuthedMockNetwork();
+      const container = document.body.appendChild(document.createElement("div"));
+      const root = createRoot(container);
+      opened.push(root);
+      await act(() => Promise.resolve(root.render(<App />)));
 
-    await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await act(async () => {
+        await storeActions.navigate("/notifications");
+  });
+      await expect.element(page.getByText("New direct message")).toBeInTheDocument();
+      await expect.element(page.getByText("New chat message")).toBeInTheDocument();
 
-    await act(async () => {
-      await storeActions.navigate("/notifications");
-    });
-  await expect.element(page.getByText("New direct message")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("button", { name: "New direct message" }).first()));
+      await expect.element(page.getByRole("heading", { name: "Chats" }).first()).toBeInTheDocument();
+      expect(getStoreSnapshot().route).toBe("Chats");
+      expect(getStoreSnapshot().selectedChatId).toBe("chat-target");
 
-    await act(() => userEvent.click(page.getByRole("button", { name: "New direct message" }).first()));
-  await expect.element(page.getByRole("heading", { name: "Chats" })).toBeInTheDocument();
-  expect(getStoreSnapshot().route).toBe("Chats");
-});
+  await act(async () => {
+        await storeActions.navigate("/notifications");
+  });
+      await expect.element(page.getByText("New chat message")).toBeInTheDocument();
 
+  await act(() => userEvent.click(page.getByRole("button", { name: "New chat message" }).first()));
+      await expect.element(page.getByRole("heading", { name: "Chats" }).first()).toBeInTheDocument();
+      expect(getStoreSnapshot().route).toBe("Chats");
+  });
