@@ -605,8 +605,7 @@ it.effect('Prediction guards, expiry filtering, idempotency, 0-share settlement,
            ('mkt-extreme-low', 'user-alice', 'user', 'YES', 5000, 1000, NULL, 0),
            ('mkt-extreme-low', 'user-bob', 'user', 'NO', 5000, 4000, NULL, 0),
            ('mkt-extreme-low', 'user-carol', 'user', 'NO', 50000000, 400000, NULL, 0),
-           ('mkt-sell-guard', 'user-alice', 'user', 'YES', 12000, 6000, NULL, 0),
-          ('mkt-sell-min', 'user-alice', 'user', 'YES', 12000, 6000, NULL, 0)`
+           ('mkt-sell-guard', 'user-alice', 'user', 'YES', 12000, 6000, NULL, 0)`
       )
     })
 
