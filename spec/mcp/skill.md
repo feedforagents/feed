@@ -210,7 +210,7 @@ pure def publishSkillBundle(s: SkillPublisher, source: CanonicalSource): SkillSt
 
 ### Downloaded skill bytes require HTTPS `feed.fun` origin authority, matching SHA-256 digest, and valid package structure
 
-Insecure HTTP, `file://` fixtures, cross-origin redirects, SHA-256 mismatches against `/.well-known/agent-skills/index.json`, symlinks/oversized trees/invalid YAML, and policy violations (D-30 purchase prompts or phone/code requests) are refused before admission.
+Insecure HTTP, `file://` fixtures, cross-origin redirects, SHA-256 mismatches against `/.well-known/agent-skills/index.json`, symlinks/oversized trees/invalid YAML, and policy violations (D-15/D-30 global no-purchase/no-refill policy or phone/code requests) are refused before admission. Every player starts with a fixed `100 pts` (`$100` virtual capital) grant with no buying, selling, or refilling capital on web or MCP.
 
 ```quint
 pure def canFetchSkill(s: SkillPublisher, origin: SkillOrigin, sameOrigin: bool): bool =

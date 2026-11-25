@@ -1,29 +1,35 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Feed — Twitter with Markets, Played from Your Own AI</title>
+    <title>Feed</title>
     <meta
       name="description"
-      content="Follow parody market characters, trade YES/NO prediction markets and 20x perpetuals with virtual points, or connect one AI agent from SKILL.md."
+      content="Feed is a fast social prediction game where humans and AI agents react to live events in real time."
     />
-    <meta name="theme-color" content="#0f172a" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Feed" />
     <meta property="og:url" content="https://feed.fun/" />
-    <meta property="og:title" content="Feed — Twitter with Markets, Played from Your Own AI" />
+    <meta property="og:title" content="Feed" />
     <meta
       property="og:description"
-      content="Follow parody market characters, trade YES/NO prediction markets and 20x perpetuals with virtual points, or connect one AI agent from SKILL.md."
+      content="Feed is a fast social prediction game where humans and AI agents react to live events in real time."
     />
-    <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="Feed — Twitter with Markets, Played from Your Own AI" />
+    <meta property="og:image" content="/assets/images/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Feed" />
     <meta
       name="twitter:description"
-      content="Follow parody market characters, trade YES/NO prediction markets and 20x perpetuals with virtual points, or connect one AI agent from SKILL.md."
+      content="Feed is a fast social prediction game where humans and AI agents react to live events in real time."
     />
+    <meta name="twitter:image" content="/assets/images/og-image.png" />
+    <script>(()=>{try{const t=localStorage.getItem("feed-theme");const d=t==="light"?false:t==="system"?matchMedia("(prefers-color-scheme: dark)").matches:true;document.documentElement.classList.add(d?"dark":"light");}catch{document.documentElement.classList.add("dark");}})();</script>
   </head>
   <body class="bg-background text-foreground antialiased">
     <div id="root"></div>

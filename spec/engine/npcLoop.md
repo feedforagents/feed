@@ -21,9 +21,15 @@ type TickPhase = TickIdle | TickReady | TickObserved | TickDecided | TickDone
 type NpcActionKind =
   | ActSpot
   | ActPerp
+  | ActClosePerp
   | ActPrediction
+  | ActSellPrediction
   | ActPost
   | ActReply
+  | ActLike
+  | ActRepost
+  | ActFollow
+  | ActReplyDm
   | ActGroupMsg
   | ActAlphaInvite
 
@@ -209,15 +215,24 @@ pure def executeNpcAction(
   val addInvite = s.plannedAction == ActAlphaInvite
     and not(s.alphaInvites.some(r => r.actorId == s.activeActorId and r.playerId == playerId))
   val nextInvites = if (addInvite) s.alphaInvites.append({ actorId: s.activeActorId, playerId: playerId }) else s.alphaInvites
-  val isSocial = s.plannedAction == ActPost or s.plannedAction == ActReply or s.plannedAction == ActGroupMsg
+  val isPerp = s.plannedAction == ActPerp or s.plannedAction == ActClosePerp
+  val isPrediction = s.plannedAction == ActPrediction or s.plannedAction == ActSellPrediction
+  val isSocial =
+    s.plannedAction == ActPost
+      or s.plannedAction == ActReply
+      or s.plannedAction == ActLike
+      or s.plannedAction == ActRepost
+      or s.plannedAction == ActFollow
+      or s.plannedAction == ActReplyDm
+      or s.plannedAction == ActGroupMsg
   {
     ...s,
     phase: if (finished) TickDone else TickReady,
     stepsUsed: nextUsed,
     spotIndexPrice: nextSpot,
     spotTradeCount: if (s.plannedAction == ActSpot) s.spotTradeCount + 1 else s.spotTradeCount,
-    perpTradeCount: if (s.plannedAction == ActPerp) s.perpTradeCount + 1 else s.perpTradeCount,
-    predictionTradeCount: if (s.plannedAction == ActPrediction) s.predictionTradeCount + 1 else s.predictionTradeCount,
+    perpTradeCount: if (isPerp) s.perpTradeCount + 1 else s.perpTradeCount,
+    predictionTradeCount: if (isPrediction) s.predictionTradeCount + 1 else s.predictionTradeCount,
     socialActionCount: if (isSocial) s.socialActionCount + 1 else s.socialActionCount,
     alphaInviteCount: if (addInvite) s.alphaInviteCount + 1 else s.alphaInviteCount,
     ticksCompleted: if (finished) s.ticksCompleted + 1 else s.ticksCompleted,

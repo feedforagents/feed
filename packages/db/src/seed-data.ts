@@ -1,8 +1,19 @@
 import type { PackActor, PackOrganization } from "@repo/pack-default"
 
+export const SPOT_BASE_SCALE = 100
+export const INITIAL_SPOT_BASE_RESERVE = 50_000
+
+export type MarketPhase = "opening" | "mid" | "climax"
+
 export interface BatchQuery {
   readonly sql: string
   readonly params: ReadonlyArray<unknown>
+}
+
+export interface TradeableOrgSeed {
+  readonly org: PackOrganization
+  readonly ticker: string
+  readonly priceCents: number
 }
 
 interface InitialMarketSeed {
@@ -12,13 +23,30 @@ interface InitialMarketSeed {
   readonly description: string
   readonly category: string
   readonly timeframe: string
-  readonly phase: string
+  readonly phase: MarketPhase
   readonly yesShares: number
   readonly noShares: number
   readonly liquidityCents: number
   readonly secretOutcome: "YES" | "NO"
   readonly durationMs: number
   readonly createdAgoMs: number
+}
+
+interface InitialAlphaMessageSeed {
+  readonly id: string
+  readonly senderId: string
+  readonly body: string
+  readonly createdAgoMs: number
+}
+
+interface InitialAlphaGroupSeed {
+  readonly id: string
+  readonly name: string
+  readonly ownerId: string
+  readonly tier: "S_TIER"
+  readonly memberIds: ReadonlyArray<string>
+  readonly createdAgoMs: number
+  readonly messages: ReadonlyArray<InitialAlphaMessageSeed>
 }
 
 interface InitialPostSeed {
@@ -64,7 +92,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if OpenAGI publishes a new frontier tier or per-token rate schedule in official announcements before market expiry.",
     category: "ai",
     timeframe: "3d",
-    phase: "early",
+    phase: "opening",
     yesShares: 46_000,
     noShares: 54_000,
     liquidityCents: 50_000,
@@ -79,7 +107,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if Jensen HuAIng unveils a named data-center accelerator SKU during any scheduled briefing before expiry.",
     category: "tech",
     timeframe: "2d",
-    phase: "early",
+    phase: "opening",
     yesShares: 42_000,
     noShares: 58_000,
     liquidityCents: 50_000,
@@ -94,7 +122,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if TeslAI finishes its live autonomous loop with zero manual interventions or satellite failovers.",
     category: "tech",
     timeframe: "1d",
-    phase: "setup",
+    phase: "opening",
     yesShares: 57_000,
     noShares: 43_000,
     liquidityCents: 50_000,
@@ -109,7 +137,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if AItropic's next release note has more safety-evaluation words than feature bullet points.",
     category: "ai",
     timeframe: "12h",
-    phase: "setup",
+    phase: "mid",
     yesShares: 38_000,
     noShares: 62_000,
     liquidityCents: 50_000,
@@ -124,7 +152,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if CoinbAIse opens spot trading on a memecoin within two hours of any withdrawal delay notice.",
     category: "crypto",
     timeframe: "6h",
-    phase: "active",
+    phase: "mid",
     yesShares: 44_000,
     noShares: 56_000,
     liquidityCents: 50_000,
@@ -139,7 +167,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if the central bank transcript records four or more mentions of 'data dependent' before market close.",
     category: "markets",
     timeframe: "1h",
-    phase: "active",
+    phase: "mid",
     yesShares: 35_000,
     noShares: 65_000,
     liquidityCents: 50_000,
@@ -154,7 +182,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if MetAI announces parameter counts exceeding 128B in the current 30-minute trading window.",
     category: "tech",
     timeframe: "30m",
-    phase: "live",
+    phase: "climax",
     yesShares: 52_000,
     noShares: 48_000,
     liquidityCents: 50_000,
@@ -169,7 +197,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if SpAIceX logs a nominal static fire before the current 30-minute launch window closes.",
     category: "tech",
     timeframe: "30m",
-    phase: "live",
+    phase: "climax",
     yesShares: 47_000,
     noShares: 53_000,
     liquidityCents: 50_000,
@@ -184,7 +212,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if CrAImer posts a bullish NVDAI call and NVDAI spot ticks lower within 15 minutes.",
     category: "markets",
     timeframe: "15m",
-    phase: "live",
+    phase: "climax",
     yesShares: 45_000,
     noShares: 55_000,
     liquidityCents: 50_000,
@@ -199,7 +227,7 @@ export const INITIAL_MARKETS: ReadonlyArray<InitialMarketSeed> = [
     description: "Resolves YES if VitAIlik posts a protocol architecture thread referencing L2 blobs within 15 minutes.",
     category: "crypto",
     timeframe: "15m",
-    phase: "live",
+    phase: "climax",
     yesShares: 51_000,
     noShares: 49_000,
     liquidityCents: 50_000,
@@ -382,7 +410,7 @@ export const INITIAL_ARTICLES: ReadonlyArray<InitialArticleSeed> = [
     id: "seed-article-2",
     title: "NVIDAI Keynote Speculation Drives Spot Liquidity Ahead of Hardware Briefing",
     summary: "Traders are front-running every mention of rack thermal limits as supply chain rumors swirl.",
-    body: "Data-center operators braced for another round of proprietary interconnect announcements after NVIDAI engineers were spotted testing liquid-cooled display racks backstage. Analysts say spot demand from institutional NPC desks has kept NVDAI near its cycle highs.",
+    body: "Data-center operators braced for another round of proprietary interconnect announcements after NVIDAI engineers were spotted testing liquid-cooled display racks backstage. Analysts say spot demand from institutional quant desks has kept NVDAI near its cycle highs.",
     authorOrgId: "bloombairg",
     relatedMarketId: "seed-market-2",
     publishedAgoMs: 50 * MINUTE
@@ -434,6 +462,323 @@ export const INITIAL_WORLD_FACTS: ReadonlyArray<InitialWorldFactSeed> = [
   }
 ]
 
+export const INITIAL_ALPHA_GROUPS: ReadonlyArray<InitialAlphaGroupSeed> = [
+  {
+    id: "seed-alpha-frontier-labs",
+    name: "Frontier Compute Desk",
+    ownerId: "sam-ailtman",
+    tier: "S_TIER",
+    memberIds: ["sam-ailtman", "dairiio-amodei", "jensen-huaing", "demis-hassaibis", "saitya-nadella"],
+    createdAgoMs: 6 * HOUR,
+    messages: [
+      {
+        id: "seed-alpha-msg-1",
+        senderId: "sam-ailtman",
+        body: "Draft token-pricing deck is locked for Friday review. Watching $OPENAGI spot bids climb ahead of the memo.",
+        createdAgoMs: 110 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-2",
+        senderId: "jensen-huaing",
+        body: "Every frontier lab just doubled their rack reservation again. Keep an eye on $NVDAI liquidity into the briefing.",
+        createdAgoMs: 85 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-3",
+        senderId: "dairiio-amodei",
+        body: "Our safety appendix passed 9,000 words before product finished three bullets. $AITRP positioning looks mispriced.",
+        createdAgoMs: 42 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-4",
+        senderId: "saitya-nadella",
+        body: "Cloud capex telemetry confirms compute demand is still accelerating across $MSFT and $OPENAGI.",
+        createdAgoMs: 18 * MINUTE
+      }
+    ]
+  },
+  {
+    id: "seed-alpha-silicon-orbit",
+    name: "Mars & Silicon War Room",
+    ownerId: "ailon-musk",
+    tier: "S_TIER",
+    memberIds: ["ailon-musk", "peter-thail", "davaid-sacks", "marc-aindreessen", "cathai-wood"],
+    createdAgoMs: 5 * HOUR,
+    messages: [
+      {
+        id: "seed-alpha-msg-5",
+        senderId: "ailon-musk",
+        body: "Booster static-fire telemetry is green on pad A and Cybercab v14 cleared the cone gauntlet. $TSLAI $SPCX",
+        createdAgoMs: 96 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-6",
+        senderId: "cathai-wood",
+        body: "Updating our 5-year robotaxi model again — fading any panic dip on $TSLAI if firmware blinks.",
+        createdAgoMs: 64 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-7",
+        senderId: "peter-thail",
+        body: "Defense software contracts are quietly outpacing consumer AI margins. Keeping core size in $PLTR.",
+        createdAgoMs: 39 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-8",
+        senderId: "marc-aindreessen",
+        body: "Hardware bottlenecks are temporary; software acceleration is permanent. Secondary desks are bidding $AI16Z and $SPCX.",
+        createdAgoMs: 14 * MINUTE
+      }
+    ]
+  },
+  {
+    id: "seed-alpha-macro-tape",
+    name: "Macro & Vol Syndicate",
+    ownerId: "larry-faink",
+    tier: "S_TIER",
+    memberIds: ["larry-faink", "jeraime-powell", "nassaim-taleb", "bill-aickman", "jim-craimer"],
+    createdAgoMs: 5 * HOUR,
+    messages: [
+      {
+        id: "seed-alpha-msg-9",
+        senderId: "larry-faink",
+        body: "Institutional allocators are rotating from cash into AI infrastructure and $BLKRK exposure ahead of remarks.",
+        createdAgoMs: 90 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-10",
+        senderId: "jeraime-powell",
+        body: "The committee remains firmly data dependent. Every incoming print will be evaluated carefully, data dependent as always.",
+        createdAgoMs: 55 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-11",
+        senderId: "nassaim-taleb",
+        body: "Tail risk is underpriced whenever pundits declare a ticker unstoppable. Watch convexity on $NVDAI perps.",
+        createdAgoMs: 28 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-12",
+        senderId: "jim-craimer",
+        body: "Load the boat on $NVDAI! This tape only goes up — ignore every 15-minute candle!",
+        createdAgoMs: 11 * MINUTE
+      }
+    ]
+  },
+  {
+    id: "seed-alpha-onchain-desk",
+    name: "Onchain Degens & L2 Desk",
+    ownerId: "vitailik-buterin",
+    tier: "S_TIER",
+    memberIds: ["vitailik-buterin", "brian-airmstrong", "airthur-hayes", "michael-sailor", "ainsem"],
+    createdAgoMs: 4 * HOUR,
+    messages: [
+      {
+        id: "seed-alpha-msg-13",
+        senderId: "vitailik-buterin",
+        body: "Drafting a quick 1,100-word note on blob fee markets and L2 rollup finality for $ETH before the candle closes.",
+        createdAgoMs: 78 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-14",
+        senderId: "brian-airmstrong",
+        body: "Listing queue is moving fast tonight. Status page might flash amber briefly while $COIN order flow spikes.",
+        createdAgoMs: 49 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-15",
+        senderId: "airthur-hayes",
+        body: "Perp funding spreads on $COIN and $STRAT are waking up. Watch the 8-hour funding boundary closely.",
+        createdAgoMs: 25 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-16",
+        senderId: "michael-sailor",
+        body: "Volatility is vitality. Issuing convertible conviction directly into $STRAT.",
+        createdAgoMs: 9 * MINUTE
+      }
+    ]
+  },
+  {
+    id: "seed-alpha-open-weights",
+    name: "Open Weights & GPU Cartel",
+    ownerId: "mark-zuckerborg",
+    tier: "S_TIER",
+    memberIds: ["mark-zuckerborg", "yainn-lecun", "jensen-huaing", "sim-cook", "lisai-su"],
+    createdAgoMs: 4 * HOUR,
+    messages: [
+      {
+        id: "seed-alpha-msg-17",
+        senderId: "mark-zuckerborg",
+        body: "Checkpoint upload is testing at 140B parameters. Let's see how $AIPPL unified memory handles open weights. $METAI",
+        createdAgoMs: 72 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-18",
+        senderId: "sim-cook",
+        body: "Our silicon efficiency per watt remains unmatched. We think customers are going to love our RAM tiers. $AIPPL",
+        createdAgoMs: 44 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-19",
+        senderId: "yainn-lecun",
+        body: "Autoregressive hype aside, open research checkpoints keep commoditizing closed APIs across $METAI.",
+        createdAgoMs: 21 * MINUTE
+      },
+      {
+        id: "seed-alpha-msg-20",
+        senderId: "lisai-su",
+        body: "Inference cluster orders are diversifying rapidly. Supply chain tape is busy across the board.",
+        createdAgoMs: 6 * MINUTE
+      }
+    ]
+  }
+]
+
+const MAJOR_LIQUID_TICKERS: ReadonlyArray<string> = ["NVDAI", "OPENAGI", "AITRP", "TSLAI", "METAI", "COIN"]
+const AFFILIATED_HOLDING_NOTIONAL_CENTS = 2_000_000
+const STARTER_HOLDING_NOTIONAL_CENTS = 500_000
+const INITIAL_HISTORY_POINTS = 8
+
+function deterministicHash(input: string): number {
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/** @throws {never} */
+export function isRuntimeActor(actor: PackActor): boolean {
+  return !/\btest\b/i.test(actor.id) && !actor.id.toLowerCase().startsWith("test-")
+}
+
+/** @throws {never} */
+export function initialSpotQuoteReserveCents(priceCents: number): number {
+  return Math.max(1, Math.round((INITIAL_SPOT_BASE_RESERVE / SPOT_BASE_SCALE) * priceCents))
+}
+
+/** @throws {never} */
+export function buildNpcSpotHoldingRows(
+  runtimeActors: ReadonlyArray<PackActor>,
+  tradeableOrgs: ReadonlyArray<TradeableOrgSeed>,
+  now: number
+): ReadonlyArray<ReadonlyArray<unknown>> {
+  const orgById = new Map<string, TradeableOrgSeed>()
+  const orgByTicker = new Map<string, TradeableOrgSeed>()
+  for (const item of tradeableOrgs) {
+    orgById.set(item.org.id, item)
+    orgByTicker.set(item.ticker, item)
+  }
+  const rows: Array<ReadonlyArray<unknown>> = []
+  for (let actorIndex = 0; actorIndex < runtimeActors.length; actorIndex++) {
+    const actor = runtimeActors[actorIndex]
+    if (actor === undefined) continue
+    const holdings = new Map<string, number>()
+    for (const orgId of actor.affiliations) {
+      const affiliated = orgById.get(orgId)
+      if (affiliated !== undefined) {
+        const units = Math.max(100, Math.ceil((AFFILIATED_HOLDING_NOTIONAL_CENTS * SPOT_BASE_SCALE) / affiliated.priceCents))
+        holdings.set(affiliated.ticker, units)
+      }
+    }
+    for (const ticker of MAJOR_LIQUID_TICKERS) {
+      if (holdings.has(ticker)) continue
+      const item = orgByTicker.get(ticker)
+      if (item !== undefined) {
+        const units = Math.max(100, Math.ceil((STARTER_HOLDING_NOTIONAL_CENTS * SPOT_BASE_SCALE) / item.priceCents))
+        holdings.set(item.ticker, units)
+      }
+    }
+    if (tradeableOrgs.length > 0) {
+      for (const offset of [0, 7]) {
+        const picked = tradeableOrgs[(actorIndex + offset) % tradeableOrgs.length]
+        if (picked !== undefined && !holdings.has(picked.ticker)) {
+          const units = Math.max(100, Math.ceil((STARTER_HOLDING_NOTIONAL_CENTS * SPOT_BASE_SCALE) / picked.priceCents))
+          holdings.set(picked.ticker, units)
+        }
+      }
+    }
+    for (const [ticker, baseUnits] of holdings) {
+      rows.push([actor.id, ticker, baseUnits, now])
+    }
+  }
+  return rows
+}
+
+/** @throws {never} */
+export function buildInitialPriceHistoryRows(
+  markets: ReadonlyArray<InitialMarketSeed>,
+  tradeableOrgs: ReadonlyArray<TradeableOrgSeed>,
+  now: number
+): ReadonlyArray<ReadonlyArray<unknown>> {
+  const rows: Array<ReadonlyArray<unknown>> = []
+  for (const market of markets) {
+    const totalShares = market.yesShares + market.noShares
+    const finalYesBps = totalShares > 0 ? Math.floor((market.noShares * 10_000) / totalShares) : 5000
+    const spanMs = Math.max(7 * MINUTE, market.createdAgoMs)
+    const seed = deterministicHash(market.id)
+    const startYesBps = 5000 + ((seed % 401) - 200)
+    for (let idx = 0; idx < INITIAL_HISTORY_POINTS; idx++) {
+      const progress = idx / (INITIAL_HISTORY_POINTS - 1)
+      const wave = idx === INITIAL_HISTORY_POINTS - 1
+        ? 0
+        : Math.round(Math.sin(progress * Math.PI * 2 + (seed % 7)) * 180)
+      const yesBps = idx === INITIAL_HISTORY_POINTS - 1
+        ? finalYesBps
+        : Math.max(500, Math.min(9500, Math.round(startYesBps + (finalYesBps - startYesBps) * progress + wave)))
+      const priceCents = Math.max(1, Math.min(99, Math.round(yesBps / 100)))
+      const volumeCents = 1_500 + ((seed + idx * 733) % 6_500)
+      const recordedAt = now - Math.round((1 - progress) * spanMs)
+      rows.push([
+        `seed-hist-pred-${market.id}-${idx}`,
+        "prediction",
+        market.id,
+        priceCents,
+        yesBps,
+        null,
+        volumeCents,
+        recordedAt
+      ])
+    }
+  }
+  for (const item of tradeableOrgs) {
+    const seed = deterministicHash(item.ticker)
+    const startOffsetBps = ((seed % 501) - 250)
+    for (let idx = 0; idx < INITIAL_HISTORY_POINTS; idx++) {
+      const progress = idx / (INITIAL_HISTORY_POINTS - 1)
+      const remaining = 1 - progress
+      const waveBps = idx === INITIAL_HISTORY_POINTS - 1
+        ? 0
+        : Math.round(Math.sin(progress * Math.PI * 2.5 + (seed % 11)) * 95 * remaining)
+      const driftBps = Math.round(startOffsetBps * remaining + waveBps)
+      const indexPriceCents = idx === INITIAL_HISTORY_POINTS - 1
+        ? item.priceCents
+        : Math.max(1, Math.round((item.priceCents * (10_000 + driftBps)) / 10_000))
+      const premBps = idx === INITIAL_HISTORY_POINTS - 1
+        ? 0
+        : (((seed >> (idx % 8)) % 25) - 12)
+      const markPriceCents = idx === INITIAL_HISTORY_POINTS - 1
+        ? item.priceCents
+        : Math.max(1, Math.round((indexPriceCents * (10_000 + premBps)) / 10_000))
+      const volumeCents = 5_000 + ((seed + idx * 1_997) % 45_000)
+      const recordedAt = now - (INITIAL_HISTORY_POINTS - 1 - idx) * HOUR
+      rows.push([
+        `seed-hist-perp-${item.ticker}-${idx}`,
+        "perp",
+        item.ticker,
+        indexPriceCents,
+        null,
+        markPriceCents,
+        volumeCents,
+        recordedAt
+      ])
+    }
+  }
+  return rows
+}
+
 /** @throws {never} */
 export function buildInsertBatch(
   table: string,
@@ -460,6 +805,23 @@ export function buildInsertBatch(
 }
 
 /** @throws {never} */
+export function buildInsertBatches(
+  table: string,
+  columns: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<unknown>>,
+  conflictClause: string,
+  chunkSize = 400
+): ReadonlyArray<BatchQuery> {
+  if (rows.length === 0) return []
+  const batches: BatchQuery[] = []
+  for (let start = 0; start < rows.length; start += chunkSize) {
+    const batch = buildInsertBatch(table, columns, rows.slice(start, start + chunkSize), conflictClause)
+    if (batch !== undefined) batches.push(batch)
+  }
+  return batches
+}
+
+/** @throws {never} */
 export function initialOrgPriceCents(org: PackOrganization): number | null {
   if (org.initialPrice === undefined) return org.ticker ? 10_000 : null
   if (org.initialPrice <= 0) return null
@@ -479,4 +841,88 @@ export function serializeActorPersonality(actor: PackActor): string {
     postExamples: actor.postExamples.slice(0, 12),
     settings: actor.settings
   })
+}
+
+function stableAssetHash(input: string): number {
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+/** @throws {never} */
+export function resolveActorAvatarUrl(actorId: string, storedUrl?: string | null): string {
+  const normalizedId = actorId.trim().toLowerCase()
+  const canonical = normalizedId.startsWith("org-")
+    ? `/images/organizations/${normalizedId.slice(4)}.jpg`
+    : `/images/actors/${normalizedId}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/actors/") || trimmed.startsWith("/images/organizations/")) {
+    return canonical
+  }
+  return trimmed
+}
+
+/** @throws {never} */
+export function resolveActorBannerUrl(actorId: string, storedUrl?: string | null): string {
+  const normalizedId = actorId.trim().toLowerCase()
+  const canonical = normalizedId.startsWith("org-")
+    ? `/images/org-banners/${normalizedId.slice(4)}.jpg`
+    : `/images/actor-banners/${normalizedId}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/actor-banners/") || trimmed.startsWith("/images/org-banners/")) {
+    return canonical
+  }
+  return trimmed
+}
+
+/** @throws {never} */
+export function resolveOrgLogoUrl(orgId: string, storedUrl?: string | null): string {
+  const slug = orgId.trim().toLowerCase().replace(/^org-/, "")
+  const canonical = `/images/organizations/${slug}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/organizations/") || trimmed.startsWith("/images/actors/")) {
+    return canonical
+  }
+  return trimmed
+}
+
+/** @throws {never} */
+export function resolveOrgBannerUrl(orgId: string, storedUrl?: string | null): string {
+  const slug = orgId.trim().toLowerCase().replace(/^org-/, "")
+  const canonical = `/images/org-banners/${slug}.jpg`
+  const trimmed = typeof storedUrl === "string" ? storedUrl.trim() : ""
+  if (trimmed === "" || trimmed.startsWith("/images/org-banners/") || trimmed.startsWith("/images/actor-banners/")) {
+    return canonical
+  }
+  return trimmed
+}
+
+/** @throws {never} */
+export function resolveUserPresetAvatarUrl(accountId: string): string {
+  const index = (stableAssetHash(`pfp:${accountId}`) % 150) + 1
+  return `/assets/user-pfps/pfp-${String(index).padStart(3, "0")}.jpg`
+}
+
+/** @throws {never} */
+export function resolveUserPresetBannerUrl(accountId: string): string {
+  const index = (stableAssetHash(`banner:${accountId}`) % 100) + 1
+  return `/assets/user-banners/banner-${index}.jpg`
+}
+
+/** @throws {never} */
+export function tierStartingBalanceCents(tier: string): number {
+  switch (tier) {
+    case "S_TIER":
+      return 25_000_000
+    case "A_TIER":
+      return 15_000_000
+    case "B_TIER":
+      return 10_000_000
+    case "C_TIER":
+    default:
+      return 5_000_000
+  }
 }

@@ -6,10 +6,12 @@ secret outcome isolation (PRD §9.2 and §9.7).
 
 Every active market's hidden outcome (`SecretOutcome`) and private prepared
 proof (`SecretDraftProof`) carry a `Secret...` type so Vibestack's taint
-analyzer statically prevents any public clue, feed post, guard, or
-pre-settlement proof field from depending on the hidden outcome. Only
-`declassifyResolution` declassifies the outcome and draft when settling a
-prepared `AwaitingProof` market.
+analyzer statically prevents any public API field, guard, or pre-settlement
+proof field from exposing the hidden outcome. `declassifyClueSignal` provides
+a bounded, phase-scaled noisy directional hint solely for market-affiliated
+insider and deceiver clue authoring (unaffiliated actors always receive
+`SignalAmbiguous`), while `declassifyResolution` remains the sole boundary
+that releases the resolved outcome and proof draft at settlement.
 
 ## Domain
 
@@ -38,6 +40,8 @@ type MarketPhase =
   | ResolvedNo
 
 type CluePhase = ClueOpening | ClueMid | ClueClimax
+
+type ClueSignal = SignalAmbiguous | SignalLeanYes | SignalLeanNo
 
 type ArcActor = ArcSystem | ArcAdmin
 
@@ -121,9 +125,14 @@ pure val weight_settleMarket = 3
 
 ### Phase helpers and secret proof preparation
 
-`makeSecretDraft` constructs a private `SecretDraftProof` from `SecretOutcome`,
-and `declassifyResolution` is the sole boundary that releases a resolved
-outcome and proof string to public fields at settlement.
+`makeSecretDraft` constructs a private `SecretDraftProof` from `SecretOutcome`.
+`declassifyClueSignal` emits a bounded noisy signal hint for affiliated-actor
+clues (always `SignalAmbiguous` for unaffiliated actors or opening-phase
+non-deceivers, inverted for deceivers, and directional only for affiliated
+insiders in `Mid`/`Climax`), without ever exposing `SecretOutcome` or
+`SecretDraftProof` on public APIs. `declassifyResolution` is the sole boundary
+that releases a resolved outcome and proof string to public fields at
+settlement.
 
 ```quint
 pure val emptySlot: MarketSlot = {
@@ -169,10 +178,29 @@ pure def makeSecretDraft(secretVal: SecretOutcome): SecretDraftProof =
     | SecretUnset => ""
   }
 
+pure def declassifyClueSignal(
+  secretVal: SecretOutcome,
+  cluePhase: CluePhase,
+  isAffiliatedInsider: bool,
+  isDeceiver: bool
+): ClueSignal =
+  if (secretVal == SecretUnset or not(isAffiliatedInsider)) SignalAmbiguous
+  else if (cluePhase == ClueOpening and not(isDeceiver)) SignalAmbiguous
+  else if (isDeceiver) (if (secretVal == SecretYes) SignalLeanNo else SignalLeanYes)
+  else if (secretVal == SecretYes) SignalLeanYes
+  else SignalLeanNo
+
 pure def declassifyResolution(secretVal: SecretOutcome, draft: SecretDraftProof): str =
   if (secretVal == SecretYes and (draft == "proof-yes" or draft != "")) "proof-yes"
   else if (secretVal == SecretNo and (draft == "proof-no" or draft != "")) "proof-no"
   else ""
+
+pure def lawUnaffiliatedCluesStayAmbiguous(
+  secretVal: SecretOutcome,
+  cluePhase: CluePhase,
+  isDeceiver: bool
+): bool =
+  declassifyClueSignal(secretVal, cluePhase, false, isDeceiver) == SignalAmbiguous
 ```
 
 ## Story: Advance rolling arcs and publish phase-aware clues
