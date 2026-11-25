@@ -1,7 +1,7 @@
-// spec/markets/economy.md, "Initial grants are single-use, balances stay non-negative, and blocked purchases never commit"
+// spec/markets/economy.md, "Initial grants are fixed at 100 pts, balances stay non-negative, and net profit excludes only the starting grant"
 
 lemma EconomyFilterBridge(e: EconomyState)
-  ensures alwaysEconomyInvariantsHold(e) == ((((e.washingtonFreePlayCount >= 0) && !(e.lastPurchaseWasWashington)) && !(e.lastPurchaseWasMcp)) && !((exists p :: p in e.players && !(((((((p.cashCents >= 0) && (p.positionValueCents >= 0)) && (p.purchasedCents >= 0)) && (p.verified == (p.grantClaimed && (p.startingGrantCents == INITIAL_GRANT_CENTS)))) && (!(!(p.verified)) || ((((!(p.grantClaimed) && (p.cashCents == 0)) && (p.positionValueCents == 0)) && (p.startingGrantCents == 0)) && (p.purchasedCents == 0)))) && (|ProofLib.Filter((q: PlayerLedger) => (q.id == p.id), e.players)| == 1))))))
+  ensures alwaysEconomyInvariantsHold(e) == !((exists p :: p in e.players && !(((((((p.cashCents >= 0) && (p.positionValueCents >= 0)) && (p.verified == (p.grantClaimed && (p.startingGrantCents == INITIAL_GRANT_CENTS)))) && (!(p.verified) || (netProfitCents(p) == (equityCents(p) - INITIAL_GRANT_CENTS)))) && (!(!(p.verified)) || (((!(p.grantClaimed) && (p.cashCents == 0)) && (p.positionValueCents == 0)) && (p.startingGrantCents == 0)))) && (|ProofLib.Filter((q: PlayerLedger) => (q.id == p.id), e.players)| == 1)))))
 {
 }
 
@@ -55,16 +55,10 @@ lemma PlayerForAt(e: EconomyState, idx: int)
   FoldPlayerForAt(e.players, emptyPlayer, e.players[idx].id, idx);
 }
 
-lemma LeaderboardFilterBridge(e: EconomyState, playerId: string)
-  ensures leaderboardRank(e, playerId) == (var local_0 := playerFor(e, playerId); if !(local_0.verified) then 0 else (1 + |ProofLib.Filter((q: PlayerLedger) => (q.verified && (netProfitCents(q) > netProfitCents(local_0))), e.players)|))
-{
-}
-
 lemma verifyAndGrant_ensures(e: EconomyState, playerId: string)
   ensures (inv(e) ==> canVerifyAndGrant(e, playerId) ==> alwaysEconomyInvariantsHold(verifyAndGrant(e, playerId)))
-  ensures (inv(e) ==> canVerifyAndGrant(e, playerId) ==> stepNoFreeRefillsWhenBroke(e, "verifyAndGrant", verifyAndGrant(e, playerId)))
-  ensures (inv(e) ==> canVerifyAndGrant(e, playerId) ==> stepStartingGrantGrantedAtMostOnce(e, verifyAndGrant(e, playerId)))
-  ensures (inv(e) ==> canVerifyAndGrant(e, playerId) ==> stepPurchaseNeverChangesNetProfitOrRank(e, "verifyAndGrant", verifyAndGrant(e, playerId)))
+  ensures (inv(e) ==> canVerifyAndGrant(e, playerId) ==> stepNoRefillsOrCapitalInjectionsWhenBroke(e, verifyAndGrant(e, playerId)))
+  ensures (inv(e) ==> canVerifyAndGrant(e, playerId) ==> stepStartingGrantFixedAt100Pts(e, verifyAndGrant(e, playerId)))
 {
   if inv(e) && canVerifyAndGrant(e, playerId) {
     var after := verifyAndGrant(e, playerId);
@@ -85,6 +79,7 @@ lemma verifyAndGrant_ensures(e: EconomyState, playerId: string)
     }
     forall a | a in after.players
       ensures (exists b :: b in e.players && ((b.id == a.id) && (!((b.verified && (equityCents(b) == 0))) || (equityCents(a) == 0))))
+      ensures (exists b :: b in e.players && (((b.id == a.id) && (!(b.grantClaimed) || (a.grantClaimed && (a.startingGrantCents == INITIAL_GRANT_CENTS)))) && (!(!(b.grantClaimed)) || ((a.startingGrantCents == 0) || (a.startingGrantCents == INITIAL_GRANT_CENTS)))))
     {
       var i :| 0 <= i < |after.players| && after.players[i] == a;
       assert e.players[i] in e.players;
@@ -92,63 +87,13 @@ lemma verifyAndGrant_ensures(e: EconomyState, playerId: string)
   }
 }
 
-lemma buyPoints_ensures(e: EconomyState, playerId: string, pack: PurchasePack, channel: PurchaseChannel, geo: GeoCheck)
-  ensures (inv(e) ==> canBuyPoints(e, playerId, pack, channel, geo) ==> alwaysEconomyInvariantsHold(buyPoints(e, playerId, pack, channel, geo)))
-  ensures (inv(e) ==> canBuyPoints(e, playerId, pack, channel, geo) ==> stepNoFreeRefillsWhenBroke(e, "buyPoints", buyPoints(e, playerId, pack, channel, geo)))
-  ensures (inv(e) ==> canBuyPoints(e, playerId, pack, channel, geo) ==> stepStartingGrantGrantedAtMostOnce(e, buyPoints(e, playerId, pack, channel, geo)))
-  ensures (inv(e) ==> canBuyPoints(e, playerId, pack, channel, geo) ==> stepPurchaseNeverChangesNetProfitOrRank(e, "buyPoints", buyPoints(e, playerId, pack, channel, geo)))
+lemma playTrade_ensures(e: EconomyState, playerId: string, cashDeltaCents: int, newPosValueCents: int)
+  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents) ==> alwaysEconomyInvariantsHold(playTrade(e, playerId, cashDeltaCents, newPosValueCents)))
+  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents) ==> stepNoRefillsOrCapitalInjectionsWhenBroke(e, playTrade(e, playerId, cashDeltaCents, newPosValueCents)))
+  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents) ==> stepStartingGrantFixedAt100Pts(e, playTrade(e, playerId, cashDeltaCents, newPosValueCents)))
 {
-  if inv(e) && canBuyPoints(e, playerId, pack, channel, geo) {
-    var after := buyPoints(e, playerId, pack, channel, geo);
-    EconomyFilterBridge(e);
-    EconomyFilterBridge(after);
-    forall i | 0 <= i < |after.players|
-      ensures |ProofLib.Filter((q: PlayerLedger) => (q.id == after.players[i].id), after.players)| == 1
-      ensures after.players[i].id == e.players[i].id
-      ensures netProfitCents(after.players[i]) == netProfitCents(e.players[i])
-      ensures after.players[i].verified == e.players[i].verified
-      ensures e.players[i].id == playerId ==> e.players[i] == playerFor(e, playerId)
-    {
-      var b := e.players[i];
-      var a := after.players[i];
-      assert b in e.players;
-      ProofLib.FilterLengthPointwise((q: PlayerLedger) => (q.id == a.id), (q: PlayerLedger) => (q.id == b.id), after.players, e.players);
-      if b.id == playerId {
-        PlayerForAt(e, i);
-      }
-    }
-    assert alwaysEconomyInvariantsHold(after);
-    forall a | a in after.players
-      ensures (exists b :: b in e.players && (((b.id == a.id) && (netProfitCents(a) == netProfitCents(b))) && (leaderboardRank(after, a.id) == leaderboardRank(e, a.id))))
-    {
-      var i :| 0 <= i < |after.players| && after.players[i] == a;
-      var b := e.players[i];
-      assert b in e.players;
-      PlayerForAt(e, i);
-      PlayerForAt(after, i);
-      LeaderboardFilterBridge(e, a.id);
-      LeaderboardFilterBridge(after, a.id);
-      var ta := playerFor(after, a.id);
-      var tb := playerFor(e, a.id);
-      assert ta == a && tb == b;
-      ProofLib.FilterLengthPointwise(
-        (q: PlayerLedger) => (q.verified && (netProfitCents(q) > netProfitCents(ta))),
-        (q: PlayerLedger) => (q.verified && (netProfitCents(q) > netProfitCents(tb))),
-        after.players,
-        e.players
-      );
-    }
-  }
-}
-
-lemma playTrade_ensures(e: EconomyState, playerId: string, cashDeltaCents: int, newPosValueCents: int, geo: GeoCheck)
-  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents, geo) ==> alwaysEconomyInvariantsHold(playTrade(e, playerId, cashDeltaCents, newPosValueCents, geo)))
-  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents, geo) ==> stepNoFreeRefillsWhenBroke(e, "playTrade", playTrade(e, playerId, cashDeltaCents, newPosValueCents, geo)))
-  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents, geo) ==> stepStartingGrantGrantedAtMostOnce(e, playTrade(e, playerId, cashDeltaCents, newPosValueCents, geo)))
-  ensures (inv(e) ==> canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents, geo) ==> stepPurchaseNeverChangesNetProfitOrRank(e, "playTrade", playTrade(e, playerId, cashDeltaCents, newPosValueCents, geo)))
-{
-  if inv(e) && canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents, geo) {
-    var after := playTrade(e, playerId, cashDeltaCents, newPosValueCents, geo);
+  if inv(e) && canPlayTrade(e, playerId, cashDeltaCents, newPosValueCents) {
+    var after := playTrade(e, playerId, cashDeltaCents, newPosValueCents);
     EconomyFilterBridge(e);
     EconomyFilterBridge(after);
     forall i | 0 <= i < |after.players|
@@ -166,6 +111,7 @@ lemma playTrade_ensures(e: EconomyState, playerId: string, cashDeltaCents: int, 
     }
     forall a | a in after.players
       ensures (exists b :: b in e.players && ((b.id == a.id) && (!((b.verified && (equityCents(b) == 0))) || (equityCents(a) == 0))))
+      ensures (exists b :: b in e.players && (((b.id == a.id) && (!(b.grantClaimed) || (a.grantClaimed && (a.startingGrantCents == INITIAL_GRANT_CENTS)))) && (!(!(b.grantClaimed)) || ((a.startingGrantCents == 0) || (a.startingGrantCents == INITIAL_GRANT_CENTS)))))
     {
       var i :| 0 <= i < |after.players| && after.players[i] == a;
       assert e.players[i] in e.players;
@@ -180,4 +126,8 @@ lemma initialHolds_ensures()
   EconomyFilterBridge(s);
   ProofLib.FilterOne((q: PlayerLedger) => (q.id == s.players[0].id), s.players, 0);
   ProofLib.FilterOne((q: PlayerLedger) => (q.id == s.players[1].id), s.players, 1);
+  assert s.players[1..] == [s.players[1]];
+  assert [s.players[1]][1..] == [];
+  assert forall p :: p in s.players ==> p == s.players[0] || p == s.players[1];
+  assert netProfitCents(s.players[1]) == equityCents(s.players[1]) - INITIAL_GRANT_CENTS;
 }

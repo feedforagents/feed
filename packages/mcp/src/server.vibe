@@ -1,4 +1,4 @@
-// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
 import { Store, StoreFailure, toText, type Tx } from "@repo/db"
 import {
   AuthFailure,
@@ -22,15 +22,21 @@ import {
   closePerpPosition,
   getAccountEconomy,
   getLeaderboard,
+  getMarketPriceHistory,
   getPerpMarket,
   getPointLedger,
   getPredictionMarket,
   getUserPositions,
+  listMarketTrades,
   listPerpMarkets,
   listPerpPositions,
   listPredictionMarkets,
   openPerpPosition,
+  previewPerpOrder,
   sellPredictionShares,
+  type LeaderboardEntry,
+  type MarketPriceHistoryPoint,
+  type MarketTradeView,
   type PerpMarketView,
   type PredictionMarketView
 } from "@repo/markets"
@@ -46,23 +52,27 @@ import {
   getChatMessages,
   getPostThread,
   getProfile,
+  getUnreadNotificationCount,
   inviteToUserGroupChat,
   leaveGroupChat,
   likePost,
-  listAlphaInvites,
   listArticles,
+  listBlockedAccounts,
   listChats,
   listFeedPosts,
   listFollowers,
   listFollowing,
+  listMutedAccounts,
   listNotifications,
+  listPendingGroupInvites,
   listTrending,
   markNotificationsRead,
   muteAccount,
   publishFeedEvent,
+  reactToMessage,
   reportTarget,
   repostPost,
-  respondAlphaInvite,
+  respondGroupInvite,
   searchWorld,
   sendChatMessage,
   unblockAccount,
@@ -72,6 +82,7 @@ import {
   unrepostPost,
   updateProfile,
   type FeedRealtimeEvent,
+  type GroupInviteFilterKind,
   type PostView,
   type ProfileView,
   type UpdatedAccountProfile
@@ -102,6 +113,8 @@ import {
   MCP_PROMPTS,
   MCP_RESOURCES,
   MCP_TOOL_DEFINITIONS,
+  PROTECTED_TOOL_COUNT,
+  PUBLIC_TOOL_COUNT,
   buildInitializeResult,
   buildListToolsPayload,
   dualUnauthorizedResponse,
@@ -117,6 +130,8 @@ import {
   parseProtocolVersion,
   ptsToWholeCents,
   rateLimitedResponse,
+  shareUnitsToShares,
+  sharesToShareUnits,
   toPtsNumber,
   validateToolArguments,
   type JsonRpcId,
@@ -144,29 +159,6 @@ export { MCP_TOOL_DEFINITIONS, type McpToolDefinition, type McpToolName, type Mc
 
 const DEFAULT_DEVICE_CLIENT_ID = "https://feed.fun/clients/mcp-device"
 const DEFAULT_DEVICE_CLIENT_NAME = "Feed MCP Agent"
-const MIN_ORDER_SIZE_CENTS = 1000
-const MAINTENANCE_MARGIN_BPS = 250
-const TRADING_FEE_BPS = 10
-const BPS_DENOMINATOR = 10_000
-
-function maintenanceMarginCents(sizeCents: number): number {
-  return Math.max(1, Math.floor((sizeCents * MAINTENANCE_MARGIN_BPS) / BPS_DENOMINATOR))
-}
-
-function computeLiquidationPriceCents(input: {
-  readonly side: "long" | "short"
-  readonly entryPriceCents: number
-  readonly marginCents: number
-  readonly sizeCents: number
-}): number {
-  if (input.sizeCents <= 0 || input.entryPriceCents <= 0) return 1
-  const maint = maintenanceMarginCents(input.sizeCents)
-  const netBuffer = input.marginCents - maint
-  const raw = input.side === "long"
-    ? Math.floor((input.entryPriceCents * (input.sizeCents - netBuffer)) / input.sizeCents)
-    : Math.floor((input.entryPriceCents * (input.sizeCents + netBuffer)) / input.sizeCents)
-  return Math.max(1, raw)
-}
 
 effect function maybePublishFeedEvent(event: FeedRealtimeEvent): void!! {
   try publishFeedEvent(event)
@@ -205,14 +197,17 @@ const SPEC_TOOL_BY_NAME: Readonly<Record<McpToolName, McpTool>> = {
   unfollow: "ToolUnfollow",
   block: "ToolBlock",
   unblock: "ToolUnblock",
+  get_blocks: "ToolGetBlocks",
   mute: "ToolMute",
   unmute: "ToolUnmute",
+  get_mutes: "ToolGetMutes",
   report: "ToolReport",
   update_profile: "ToolUpdateProfile",
   list_chats: "ToolListChats",
   get_messages: "ToolGetMessages",
   send_dm: "ToolSendDm",
   send_message: "ToolSendMessage",
+  react_to_message: "ToolReactToMessage",
   create_group: "ToolCreateGroup",
   invite_to_group: "ToolInviteToGroup",
   leave_group: "ToolLeaveGroup",
@@ -259,6 +254,7 @@ function formatPostForMcp(post: PostView, mode: PlayMode): Record<string, unknow
       ...post,
       marketId: null,
       ticker: null,
+      marketBadge: null,
       cashtags: [],
       showTradeEmbed: false,
       linkCashtags: false,
@@ -268,6 +264,7 @@ function formatPostForMcp(post: PostView, mode: PlayMode): Record<string, unknow
             ...post.quotePost,
             marketId: null,
             ticker: null,
+            cashtags: [],
             showTradeEmbed: false,
             linkCashtags: false
           }
@@ -284,6 +281,10 @@ function formatProfileForMcp(profile: ProfileView, isSelf: boolean, mode: PlayMo
     displayName: profile.displayName,
     bio: profile.bio,
     avatarUrl: profile.avatarUrl,
+    bannerUrl: profile.bannerUrl,
+    createdAt: profile.createdAt,
+    actorMeta: profile.actorMeta,
+    orgMeta: profile.orgMeta,
     isParody: profile.isParody,
     parodyLabel: profile.parodyLabel,
     followersCount: profile.followersCount,
@@ -324,10 +325,13 @@ function formatPredictionMarketForMcp(market: PredictionMarketView): Record<stri
     noPrice: market.noPrice,
     yesPriceBps: market.yesPriceBps,
     noPriceBps: market.noPriceBps,
-    yesShares: market.yesShares,
-    noShares: market.noShares,
+    yesShares: shareUnitsToShares(market.yesShares),
+    yesShareUnits: market.yesShares,
+    noShares: shareUnitsToShares(market.noShares),
+    noShareUnits: market.noShares,
     liquidityPts: toPtsNumber(market.liquidityCents),
     liquidityDisplay: formatPtsLabeled(market.liquidityCents),
+    volumePts: toPtsNumber(market.volumeCents),
     resolvedOutcome: market.status === "resolved" ? market.resolvedOutcome : null,
     resolutionProof: market.status === "resolved" ? market.resolutionProof : null,
     resolutionArticleId: market.status === "resolved" ? market.resolutionArticleId : null,
@@ -343,8 +347,12 @@ function formatPerpMarketForMcp(market: PerpMarketView): Record<string, unknown>
     ticker: market.ticker,
     organizationId: market.organizationId,
     name: market.name,
+    orgImageUrl: market.orgImageUrl,
     indexPricePts: toPtsNumber(market.indexPriceCents),
     markPricePts: toPtsNumber(market.markPriceCents),
+    change24hPct: market.change24hPct,
+    volume24hPts: toPtsNumber(market.volume24hCents),
+    volumePts: toPtsNumber(market.volumeCents),
     longOiPts: toPtsNumber(market.longOiCents),
     shortOiPts: toPtsNumber(market.shortOiCents),
     openInterestPts: toPtsNumber(market.openInterestCents),
@@ -356,29 +364,88 @@ function formatPerpMarketForMcp(market: PerpMarketView): Record<string, unknown>
   }
 }
 
+function formatMarketTradeForMcp(trade: MarketTradeView): Record<string, unknown> {
+  const quantityFields = trade.marketKind === "prediction"
+    ? { shares: shareUnitsToShares(trade.sharesOrSize), shareUnits: trade.sharesOrSize }
+    : { sizePts: toPtsNumber(trade.sharesOrSize), sizeCents: trade.sharesOrSize }
+  return {
+    id: trade.id,
+    traderId: trade.traderId,
+    traderKind: trade.traderKind,
+    marketKind: trade.marketKind,
+    marketRef: trade.marketRef,
+    side: trade.side,
+    ...quantityFields,
+    notionalPts: toPtsNumber(trade.notionalCents),
+    feePts: toPtsNumber(trade.feeCents),
+    pricePts: toPtsNumber(trade.priceCents),
+    realizedPnlPts: trade.realizedPnlCents === null ? null : toPtsNumber(trade.realizedPnlCents),
+    viaClientName: trade.viaClientName,
+    createdAt: trade.createdAt
+  }
+}
+
+function formatPriceHistoryPointForMcp(point: MarketPriceHistoryPoint): Record<string, unknown> {
+  return {
+    id: point.id,
+    marketKind: point.marketKind,
+    marketRef: point.marketRef,
+    pricePts: toPtsNumber(point.priceCents),
+    yesPriceBps: point.yesPriceBps,
+    markPricePts: point.markPriceCents === null ? null : toPtsNumber(point.markPriceCents),
+    volumePts: toPtsNumber(point.volumeCents),
+    recordedAt: point.recordedAt
+  }
+}
+
+function formatLeaderboardEntryForMcp(entry: LeaderboardEntry): Record<string, unknown> {
+  return {
+    rank: entry.rank,
+    accountId: entry.accountId,
+    handle: entry.handle,
+    displayName: entry.displayName,
+    avatarUrl: entry.avatarUrl,
+    isNpc: entry.isNpc,
+    balancePts: toPtsNumber(entry.balanceCents),
+    positionValuePts: toPtsNumber(entry.positionValueCents),
+    equityPts: toPtsNumber(entry.equityCents),
+    startingGrantPts: toPtsNumber(entry.startingGrantCents),
+    netProfitPts: toPtsNumber(entry.netProfitCents),
+    netProfitDisplay: formatPtsLabeled(entry.netProfitCents),
+    returnBps: entry.returnBps,
+    returnPct: entry.returnPct,
+    volumePts: toPtsNumber(entry.volumeCents),
+    tradeCount: entry.tradeCount,
+    wins: entry.wins,
+    settledCount: entry.settledCount,
+    winRate: entry.winRate,
+    winRatePct: entry.winRatePct
+  }
+}
+
 function guideSectionForTopic(topic: string, origin: string): Record<string, unknown> {
   const base = normalizeOrigin(origin)
   const sections: Readonly<Record<string, Record<string, unknown>>> = {
     overview: {
       topic: "overview",
       summary: "Feed is Twitter with markets played from your own AI agent using Virtual points (pts) — no cash value.",
-      startingGrant: "100.00 pts once upon 18+ phone verification, with no free refills and zero MCP purchase tools.",
-      publicToolsCount: 15,
-      protectedToolsCount: 34,
+      startingGrant: "100.00 pts ($100 virtual capital) fixed starting grant once upon 18+ phone verification, with no buying, selling, or refilling capital on web or MCP.",
+      publicToolsCount: PUBLIC_TOOL_COUNT,
+      protectedToolsCount: PROTECTED_TOOL_COUNT,
       guideUrl: `${base}/how-to-play.md`
     },
     prediction: {
       topic: "prediction",
       slots: 10,
       timeframes: ["15m", "30m", "1h", "6h", "12h", "1d", "2d", "3d"],
-      pricing: "Complete-set CPMM with 0.1% (10 bps) round-up fee. Winning shares settle idempotently for 1.00 pt (100 cents) per share.",
+      pricing: "Complete-set CPMM with 0.1% (10 bps) round-up fee. Winning shares settle idempotently for 1.00 pt (100 cents) per 1.00 share (100 shareUnits).",
       currency: CURRENCY_DISCLAIMER
     },
     perps: {
       topic: "perps",
-      rule: "Only NPCs trade spot pools; spot index prices drive player perpetuals up to 20x leverage.",
+      rule: "Only NPCs trade spot pools; spot index prices drive player perpetuals up to 20x leverage at post-impact mark prices.",
       feesAndFunding: "0.1% (10 bps) fee on notional size. Funding accrues every 8h UTC (00:00, 08:00, 16:00). Maintenance margin is 2.5% on mark price.",
-      workflow: "Always call preview_perp before open_perp.",
+      workflow: "Always call preview_perp before open_perp. open_perp rebalances existing ticker positions (add/reduce/flip), close_perp supports full or partial closes, and both support maxSlippageBps.",
       currency: CURRENCY_DISCLAIMER
     },
     social: {
@@ -387,7 +454,7 @@ function guideSectionForTopic(topic: string, origin: string): Record<string, unk
       messageMaxChars: 500,
       modes: {
         game: "Shows balances, P&L, prediction odds, perps, and market notifications.",
-        social: "Omits all balances, P&L, portfolio totals, $CASHTAG market links, and market notifications while keeping posts, DMs, and alpha chats active."
+        social: "Omits all balances, P&L, portfolio totals, market odds/quotes/leaderboard financials, $CASHTAG market links, and market notifications while keeping posts, DMs, and alpha chats active."
       }
     },
     auth: {
@@ -494,8 +561,8 @@ effect function executePublicWorldTool(
         tagline: "Twitter with markets, played from your own AI.",
         origin: baseOrigin,
         currency: CURRENCY_DISCLAIMER,
-        startingGrant: "100.00 pts (10,000 cents) granted once on 18+ phone verification; no free refills.",
-        noPurchasePolicy: "There is no MCP tool to buy points, no upsells, and no checkout links.",
+        startingGrant: "100.00 pts (10,000 cents, $100 virtual capital) fixed starting grant once on 18+ phone verification; no buying, selling, or refilling capital on web or MCP.",
+        noPurchasePolicy: "No buying, selling, or refilling virtual points anywhere (web or MCP); zero checkout links or upsells.",
         worldStatus: status === undefined
           ? { available: false, openPredictionMarkets: openPrediction.length, perpMarkets: perps.length }
           : {
@@ -518,8 +585,8 @@ effect function executePublicWorldTool(
           singleGrantPolicy: "At most one active connected agent per account."
         },
         toolsSummary: {
-          publicTools: 15,
-          protectedTools: 34,
+          publicTools: PUBLIC_TOOL_COUNT,
+          protectedTools: PROTECTED_TOOL_COUNT,
           totalTools: MCP_TOOL_DEFINITIONS.length
         }
       }
@@ -612,6 +679,7 @@ effect function executePublicSocialTool(
       return {
         post: formatPostForMcp(thread.post, viewer.playMode),
         parentPost: thread.parentPost === null ? null : formatPostForMcp(thread.parentPost, viewer.playMode),
+        ancestors: thread.ancestors.map((item) => formatPostForMcp(item, viewer.playMode)),
         replyCount: thread.replies.length
       }
     }
@@ -723,6 +791,16 @@ effect function executePublicMarketTool(
 ): object!(SocialFailure | MarketFailure | StoreFailure)!Store {
   switch (toolName) {
     case "list_markets": {
+      if (viewer.playMode === "social") {
+        return {
+          playMode: "social",
+          financialFieldsOmittedInSocialMode: true,
+          message: "Market odds, quotes, and financial fields are omitted in Social mode. Switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
+          currency: CURRENCY_DISCLAIMER,
+          predictionMarkets: [],
+          perpMarkets: []
+        }
+      }
       const kind = asOptionalString(args.kind) ?? "all"
       const rawStatus = asOptionalString(args.status) ?? "open"
       const limit = clampCount(asOptionalInt(args.limit), 25, 100)
@@ -741,14 +819,33 @@ effect function executePublicMarketTool(
     }
     case "get_market": {
       const marketId = asOptionalString(args.marketId) ?? ""
+      if (viewer.playMode === "social") {
+        return {
+          playMode: "social",
+          financialFieldsOmittedInSocialMode: true,
+          marketId,
+          message: "Market odds, pricing, trade history, and financial fields are omitted in Social mode. Switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
+          currency: CURRENCY_DISCLAIMER,
+          relatedPosts: [],
+          relatedArticles: [],
+          recentTrades: [],
+          priceHistory: []
+        }
+      }
       const kind = asOptionalString(args.kind)
+      const tradesLimit = clampCount(asOptionalInt(args.tradesLimit), 20, 100)
+      const historyLimit = clampCount(asOptionalInt(args.historyLimit), 50, 200)
       const articles = try listArticles(50, viewer.playMode)
       if (kind === "perp") {
         const perp = try getPerpMarket(marketId.toUpperCase())
         const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perp.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
+        const recentTrades = try listMarketTrades("perp", perp.ticker, tradesLimit)
+        const priceHistory = try getMarketPriceHistory("perp", perp.ticker, historyLimit)
         return {
           kind: "perp",
           market: formatPerpMarketForMcp(perp),
+          recentTrades: recentTrades.map(formatMarketTradeForMcp),
+          priceHistory: priceHistory.map(formatPriceHistoryPointForMcp),
           relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
           relatedArticles: []
         }
@@ -759,6 +856,8 @@ effect function executePublicMarketTool(
       }
       if (maybePred !== undefined && kind !== "perp") {
         const relatedPosts = try listFeedPosts({ tab: "latest", marketId: maybePred.id, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
+        const recentTrades = try listMarketTrades("prediction", maybePred.id, tradesLimit)
+        const priceHistory = try getMarketPriceHistory("prediction", maybePred.id, historyLimit)
         const resolutionArticle = maybePred.status === "resolved" && maybePred.resolutionArticleId !== null
           ? (getArticle(maybePred.resolutionArticleId, viewer.playMode) catch effect (err) => {
               if (err instanceof StoreFailure) throw err
@@ -768,6 +867,8 @@ effect function executePublicMarketTool(
         return {
           kind: "prediction",
           market: formatPredictionMarketForMcp(maybePred),
+          recentTrades: recentTrades.map(formatMarketTradeForMcp),
+          priceHistory: priceHistory.map(formatPriceHistoryPointForMcp),
           relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
           relatedArticles: articles.filter((a) => a.relatedMarketId === maybePred.id),
           resolutionArticle
@@ -775,43 +876,59 @@ effect function executePublicMarketTool(
       }
       const perpFallback = try getPerpMarket(marketId.toUpperCase())
       const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perpFallback.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
+      const recentTrades = try listMarketTrades("perp", perpFallback.ticker, tradesLimit)
+      const priceHistory = try getMarketPriceHistory("perp", perpFallback.ticker, historyLimit)
       return {
         kind: "perp",
         market: formatPerpMarketForMcp(perpFallback),
+        recentTrades: recentTrades.map(formatMarketTradeForMcp),
+        priceHistory: priceHistory.map(formatPriceHistoryPointForMcp),
         relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
         relatedArticles: []
       }
     }
     case "get_leaderboard": {
-      const metric = asOptionalString(args.metric) ?? "net_profit"
-      const limit = clampCount(asOptionalInt(args.limit), 25, 100)
-      const entries = [...(try getLeaderboard(100))]
-      if (metric === "win_rate") {
-        entries.sort((a, b) => b.winRate - a.winRate || b.netProfitCents - a.netProfitCents)
-      } else if (metric === "volume") {
-        entries.sort((a, b) => b.volumeCents - a.volumeCents || b.netProfitCents - a.netProfitCents)
+      const scope = args.scope === "characters" ? "characters" : "players"
+      const rawMetric = asOptionalString(args.metric) ?? "net_profit"
+      const metric = rawMetric === "return_pct" || rawMetric === "win_rate" || rawMetric === "volume"
+        ? rawMetric
+        : "net_profit"
+      const page = clampCount(asOptionalInt(args.page), 1, 1000)
+      const pageSize = clampCount(asOptionalInt(args.pageSize) ?? asOptionalInt(args.limit), 25, 100)
+      if (viewer.playMode === "social") {
+        return {
+          playMode: "social",
+          financialFieldsOmittedInSocialMode: true,
+          scope,
+          metric,
+          page: 1,
+          pageSize,
+          totalCount: 0,
+          totalPages: 1,
+          currentUser: null,
+          entries: [],
+          message: "Leaderboard profits, balances, and P&L rankings are omitted in Social mode. Switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
+          currency: CURRENCY_DISCLAIMER
+        }
       }
-      return {
+      const board = try getLeaderboard({
+        scope,
         metric,
+        page,
+        pageSize,
+        ...(viewer.viewerId === undefined ? {} : { viewerAccountId: viewer.viewerId })
+      })
+      return {
+        scope: board.scope,
+        metric: board.metric,
+        page: board.page,
+        pageSize: board.pageSize,
+        totalCount: board.totalCount,
+        totalPages: board.totalPages,
         currency: CURRENCY_DISCLAIMER,
-        rankingRule: "Ordered by net profit (equity - starting grant - purchased points), never raw point balance.",
-        entries: entries.slice(0, limit).map((entry, idx) => {
-          const investedCents = entry.startingGrantCents + entry.purchasedCents
-          const returnPct = investedCents > 0 ? Math.round((entry.netProfitCents / investedCents) * 10_000) / 100 : 0
-          return {
-            rank: metric === "net_profit" ? entry.rank : idx + 1,
-            accountId: entry.accountId,
-            handle: entry.handle,
-            displayName: entry.displayName,
-            netProfitPts: toPtsNumber(entry.netProfitCents),
-            netProfitDisplay: formatPtsLabeled(entry.netProfitCents),
-            equityPts: toPtsNumber(entry.equityCents),
-            volumePts: toPtsNumber(entry.volumeCents),
-            returnPct,
-            winRate: entry.winRate,
-            tradeCount: entry.tradeCount
-          }
-        })
+        rankingRule: "Ordered by net profit (equity - fixed 100 pts starting grant), return %, win rate, or volume; never raw point balance.",
+        currentUser: board.currentUser === null ? null : formatLeaderboardEntryForMcp(board.currentUser),
+        entries: board.entries.map(formatLeaderboardEntryForMcp)
       }
     }
   }
@@ -914,8 +1031,9 @@ effect function executeProtectedAccountTool(
       const unreadOnly = args.unreadOnly === true
       const limit = clampCount(asOptionalInt(args.limit), 30, 100)
       const all = try listNotifications(caller.accountId, limit, mode)
+      const unreadCount = try getUnreadNotificationCount(caller.accountId, mode)
       const items = unreadOnly ? all.filter((n) => !n.isRead) : all
-      return { mode, items }
+      return { mode, unreadCount, items }
     }
     case "get_portfolio": {
       if (mode === "social") {
@@ -947,7 +1065,8 @@ effect function executeProtectedAccountTool(
           question: p.question,
           status: p.marketStatus,
           side: p.side,
-          shares: p.shares,
+          shares: shareUnitsToShares(p.shares),
+          shareUnits: p.shares,
           costBasisPts: toPtsNumber(p.costBasisCents),
           estimatedValuePts: toPtsNumber(p.estimatedValueCents),
           payoutPts: toPtsNumber(p.payoutCents),
@@ -981,44 +1100,40 @@ effect function executeProtectedAccountTool(
     }
     case "preview_perp": {
       const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
-      const market = try getPerpMarket(ticker)
-      if (leverage < 1 || leverage > market.maxLeverage) {
-        throw new InvalidRpcParamsFailure({ message: `Leverage must be between 1 and ${market.maxLeverage}.` })
+      if (mode === "social") {
+        return {
+          previewOnly: true,
+          ticker,
+          playMode: "social",
+          financialFieldsOmittedInSocialMode: true,
+          message: "Perpetual order previews and financial quotes are omitted in Social mode. Switch via set_mode({ mode: \"game\" }) only if the user explicitly wants Game mode.",
+          currency: CURRENCY_DISCLAIMER
+        }
       }
-      const sizeCents = collateralCents * leverage
-      if (!Number.isSafeInteger(sizeCents) || sizeCents < MIN_ORDER_SIZE_CENTS) {
-        throw new MarketFailure({
-          code: "ORDER_TOO_SMALL",
-          message: `Notional size must be at least ${MIN_ORDER_SIZE_CENTS} cents (10.00 pts).`
-        })
-      }
-      const openPositions = try listPerpPositions(caller.accountId)
-      if (openPositions.some((pos) => pos.ticker === market.ticker)) {
-        throw new MarketFailure({
-          code: "POSITION_ALREADY_OPEN",
-          message: `Open position already exists on ${market.ticker}.`
-        })
-      }
-      const estimatedFeeCents = Math.floor((sizeCents * TRADING_FEE_BPS + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR)
-      const estimatedLiqCents = computeLiquidationPriceCents({
+      const preview = try previewPerpOrder({
+        ownerId: caller.accountId,
+        ticker,
         side,
-        entryPriceCents: market.markPriceCents,
-        marginCents: collateralCents,
-        sizeCents
+        collateralCents,
+        leverage
       })
       return {
         previewOnly: true,
-        ticker: market.ticker,
-        side,
-        leverage,
-        collateralPts: toPtsNumber(collateralCents),
-        notionalSizePts: toPtsNumber(sizeCents),
-        estimatedFeePts: toPtsNumber(estimatedFeeCents),
-        totalDebitPts: toPtsNumber(collateralCents + estimatedFeeCents),
-        entryMarkPricePts: toPtsNumber(market.markPriceCents),
-        indexPricePts: toPtsNumber(market.indexPriceCents),
-        estimatedLiquidationPricePts: toPtsNumber(estimatedLiqCents),
-        fundingRateBps: market.fundingRateBps,
+        action: preview.action,
+        ticker: preview.ticker,
+        side: preview.side,
+        leverage: preview.leverage,
+        collateralPts: toPtsNumber(preview.collateralCents),
+        notionalSizePts: toPtsNumber(preview.sizeCents),
+        estimatedFeePts: toPtsNumber(preview.feeCents),
+        totalDebitPts: toPtsNumber(preview.totalDebitCents),
+        preMarkPricePts: toPtsNumber(preview.preMarkPriceCents),
+        entryMarkPricePts: toPtsNumber(preview.executionPriceCents),
+        executionPricePts: toPtsNumber(preview.executionPriceCents),
+        priceImpactBps: preview.priceImpactBps,
+        indexPricePts: toPtsNumber(preview.indexPriceCents),
+        estimatedLiquidationPricePts: toPtsNumber(preview.estimatedLiquidationPriceCents),
+        fundingRateBps: preview.fundingRateBps,
         currency: CURRENCY_DISCLAIMER
       }
     }
@@ -1042,7 +1157,7 @@ effect function executeProtectedAccountTool(
 }
 
 effect function executeProtectedSocialTool(
-  toolName: "create_post" | "delete_post" | "like" | "unlike" | "repost" | "unrepost" | "follow" | "unfollow" | "block" | "unblock" | "mute" | "unmute" | "report" | "update_profile",
+  toolName: "create_post" | "delete_post" | "like" | "unlike" | "repost" | "unrepost" | "follow" | "unfollow" | "block" | "unblock" | "get_blocks" | "mute" | "unmute" | "get_mutes" | "report" | "update_profile",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
 ): object!(InvalidRpcParamsFailure | SocialFailure | StoreFailure)!Store {
@@ -1079,10 +1194,20 @@ effect function executeProtectedSocialTool(
       return try blockAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
     case "unblock":
       return try unblockAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "get_blocks": {
+      const limit = clampCount(asOptionalInt(args.limit), 50, 100)
+      const items = try listBlockedAccounts(caller.accountId, limit)
+      return { items }
+    }
     case "mute":
       return try muteAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
     case "unmute":
       return try unmuteAccount(caller.accountId, asOptionalString(args.handleOrId) ?? "")
+    case "get_mutes": {
+      const limit = clampCount(asOptionalInt(args.limit), 50, 100)
+      const items = try listMutedAccounts(caller.accountId, limit)
+      return { items }
+    }
     case "report": {
       const targetKind = args.targetKind === "account" ? "account" : "post"
       const targetId = asOptionalString(args.targetId) ?? ""
@@ -1095,7 +1220,7 @@ effect function executeProtectedSocialTool(
 }
 
 effect function executeProtectedMessagingTool(
-  toolName: "list_chats" | "get_messages" | "send_dm" | "send_message" | "create_group" | "invite_to_group" | "leave_group" | "list_group_invites" | "respond_to_group_invite",
+  toolName: "list_chats" | "get_messages" | "send_dm" | "send_message" | "react_to_message" | "create_group" | "invite_to_group" | "leave_group" | "list_group_invites" | "respond_to_group_invite",
   args: Record<string, unknown>,
   caller: VerifiedAccessToken
 ): object!(SocialFailure | StoreFailure)!Store {
@@ -1136,6 +1261,15 @@ effect function executeProtectedMessagingTool(
       })
       return { chatId, message, viaClientName: caller.clientName }
     }
+    case "react_to_message": {
+      const messageId = asOptionalString(args.messageId) ?? ""
+      const emoji = asOptionalString(args.emoji) ?? ""
+      return try reactToMessage({
+        accountId: caller.accountId,
+        messageId,
+        emoji
+      })
+    }
     case "create_group": {
       const title = String(args.title ?? "")
       const memberHandles = Array.isArray(args.memberHandles) ? (args.memberHandles as ReadonlyArray<string>) : []
@@ -1152,22 +1286,27 @@ effect function executeProtectedMessagingTool(
       })
       const target = try getProfile(invited.memberId, caller.accountId, "game")
       return {
+        inviteId: invited.inviteId,
         chatId: invited.chatId,
         memberId: invited.memberId,
+        invitedAccountId: invited.invitedAccountId,
         handle: target.handle,
+        status: invited.status,
         added: invited.added
       }
     }
     case "leave_group":
       return try leaveGroupChat(caller.accountId, asOptionalString(args.chatId) ?? "")
     case "list_group_invites": {
-      const invites = try listAlphaInvites(caller.accountId)
+      const rawKind = asOptionalString(args.kind)
+      const kind: GroupInviteFilterKind = rawKind === "npc_alpha" || rawKind === "user_group" ? rawKind : "all"
+      const invites = try listPendingGroupInvites(caller.accountId, kind)
       return { invites }
     }
     case "respond_to_group_invite": {
       const inviteId = asOptionalString(args.inviteId) ?? ""
       const accept = args.accept === true
-      const invite = try respondAlphaInvite({ accountId: caller.accountId, inviteId, accept })
+      const invite = try respondGroupInvite({ accountId: caller.accountId, inviteId, accept })
       return { invite }
     }
   }
@@ -1229,7 +1368,8 @@ function formatPredictionTradeReceipt(
     marketId: receipt.marketId,
     action: receipt.action,
     side: receipt.side,
-    shares: receipt.shares,
+    shares: shareUnitsToShares(receipt.shares),
+    shareUnits: receipt.shares,
     notionalPts: toPtsNumber(receipt.notionalCents),
     feePts: toPtsNumber(receipt.feeCents),
     netPts: toPtsNumber(receipt.netCents),
@@ -1237,6 +1377,36 @@ function formatPredictionTradeReceipt(
     noPriceBps: receipt.noPriceBps,
     ...tradeBalanceFooter(caller.playMode, caller.clientName, receipt.balanceAfterCents)
   }
+}
+
+effect function resolveSellShareUnits(args: Record<string, unknown>): number!InvalidRpcParamsFailure {
+  const explicitUnits = asOptionalInt(args.shareUnits)
+  const rawShares = typeof args.shares === "number" ? args.shares : undefined
+  const convertedUnits = rawShares === undefined ? undefined : sharesToShareUnits(rawShares)
+  if (rawShares !== undefined && convertedUnits === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "shares must be a positive number." })
+  }
+  if (explicitUnits !== undefined && convertedUnits !== undefined && explicitUnits !== convertedUnits) {
+    throw new InvalidRpcParamsFailure({ message: "shares and shareUnits disagree; provide only one or matching values." })
+  }
+  const units = explicitUnits ?? convertedUnits
+  if (units === undefined || units <= 0) {
+    throw new InvalidRpcParamsFailure({ message: "Provide shares (e.g. 1.5) or integer shareUnits (100 units = 1.00 share)." })
+  }
+  return units
+}
+
+effect function resolveCloseSizeCents(args: Record<string, unknown>): (number | undefined)!InvalidRpcParamsFailure {
+  const explicitCents = asOptionalInt(args.sizeCents)
+  const rawSizePts = typeof args.sizePts === "number" ? args.sizePts : undefined
+  const convertedCents = rawSizePts === undefined ? undefined : ptsToWholeCents(rawSizePts)
+  if (rawSizePts !== undefined && convertedCents === undefined) {
+    throw new InvalidRpcParamsFailure({ message: "sizePts must equal at least 0.01 pt (1 cent)." })
+  }
+  if (explicitCents !== undefined && convertedCents !== undefined && explicitCents !== convertedCents) {
+    throw new InvalidRpcParamsFailure({ message: "sizePts and sizeCents disagree; provide only one or matching values." })
+  }
+  return explicitCents ?? convertedCents
 }
 
 effect function executeProtectedTradeTool(
@@ -1268,14 +1438,14 @@ effect function executeProtectedTradeTool(
     case "sell_prediction": {
       const marketId = asOptionalString(args.marketId) ?? ""
       const side = args.side === "no" ? "no" : "yes"
-      const shares = asOptionalInt(args.shares) ?? 0
+      const shareUnits = try resolveSellShareUnits(args)
       const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try sellPredictionShares({
         actorId: caller.accountId,
         actorKind: "user",
         marketId,
         side,
-        shares,
+        shares: shareUnits,
         viaClientName: caller.clientName,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
@@ -1283,6 +1453,7 @@ effect function executeProtectedTradeTool(
     }
     case "open_perp": {
       const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
+      const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
       const receipt = try openPerpPosition({
         ownerId: caller.accountId,
         ownerKind: "user",
@@ -1290,11 +1461,12 @@ effect function executeProtectedTradeTool(
         side,
         collateralCents,
         leverage,
+        ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
         viaClientName: caller.clientName
       })
       try maybePublishFeedEvent({
         type: "market.perp",
-        action: "open",
+        action: receipt.action === "close" ? "close" : "open",
         actorId: caller.accountId,
         ticker,
         side,
@@ -1306,6 +1478,8 @@ effect function executeProtectedTradeTool(
       return {
         tradeId: receipt.tradeId,
         positionId: receipt.positionId,
+        action: receipt.action,
+        closedPositionId: receipt.closedPositionId,
         ticker,
         side,
         leverage: receipt.leverage,
@@ -1313,17 +1487,26 @@ effect function executeProtectedTradeTool(
         sizePts: toPtsNumber(receipt.sizeCents),
         feePts: toPtsNumber(receipt.feeCents),
         executionPricePts: toPtsNumber(receipt.executionPriceCents),
+        markPricePts: toPtsNumber(receipt.position.markPriceCents),
         liquidationPricePts: toPtsNumber(receipt.position.liquidationPriceCents),
-        ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents)
+        ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents, {
+          realizedPnlPts: toPtsNumber(receipt.realizedPnlCents)
+        })
       }
     }
     case "close_perp": {
       const positionId = asOptionalString(args.positionId) ?? ""
+      const sizeCents = try resolveCloseSizeCents(args)
+      const closePct = typeof args.closePct === "number" && Number.isFinite(args.closePct) ? args.closePct : undefined
+      const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
       const openPositions = try listPerpPositions(caller.accountId)
       const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({
         ownerId: caller.accountId,
         positionId,
+        ...(sizeCents === undefined ? {} : { sizeCents }),
+        ...(closePct === undefined ? {} : { closePct }),
+        ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
         viaClientName: caller.clientName
       })
       try maybePublishFeedEvent({
@@ -1342,8 +1525,12 @@ effect function executeProtectedTradeTool(
         positionId: receipt.positionId,
         ticker: receipt.ticker,
         side: receipt.side,
+        isFullClose: receipt.isFullClose,
         sizePts: toPtsNumber(receipt.sizeCents),
+        remainingSizePts: toPtsNumber(receipt.remainingSizeCents),
+        remainingSizeCents: receipt.remainingSizeCents,
         exitPricePts: toPtsNumber(receipt.exitPriceCents),
+        markPricePts: toPtsNumber(receipt.exitPriceCents),
         feePts: toPtsNumber(receipt.feeCents),
         ...tradeBalanceFooter(mode, caller.clientName, receipt.balanceAfterCents, {
           realizedPnlPts: toPtsNumber(receipt.realizedPnlCents),
@@ -1378,8 +1565,10 @@ effect function executeProtectedTool(
     case "unfollow":
     case "block":
     case "unblock":
+    case "get_blocks":
     case "mute":
     case "unmute":
+    case "get_mutes":
     case "report":
     case "update_profile":
       return try executeProtectedSocialTool(definition.name, args, caller)
@@ -1387,6 +1576,7 @@ effect function executeProtectedTool(
     case "get_messages":
     case "send_dm":
     case "send_message":
+    case "react_to_message":
     case "create_group":
     case "invite_to_group":
     case "leave_group":
@@ -1566,7 +1756,7 @@ effect function handleToolsCall(input: {
         const result: CallToolResult = mcpToolResult(
           {
             error: "insufficient_points",
-            message: "Insufficient virtual points (pts — no cash value) for this order. No point purchases or refills are available via MCP.",
+            message: "Insufficient virtual points (pts — no cash value) for this order. Capital is fixed at the 100 pts starting grant with no point purchases or refills on web or MCP.",
             currency: CURRENCY_DISCLAIMER
           },
           true

@@ -2,8 +2,9 @@
 import { useState, type FormEvent } from "react";
 import {
   Alert,
+  Avatar,
+  Badge,
   Button,
-  Card,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -15,64 +16,274 @@ import {
   ProfileHeader,
   Skeleton,
   Tabs,
-  TabsContent,
   TabsList,
   TabsTrigger,
   Textarea,
+  VerifiedBadge,
   type UiMode,
 } from "@repo/ui";
-import { BorderedPostList } from "../PostList.tsx";
+import { BackHeader, FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+
+const PRESET_AVATARS = [
+  "/assets/user-pfps/pfp-001.jpg",
+  "/assets/user-pfps/pfp-002.jpg",
+  "/assets/user-pfps/pfp-003.jpg",
+  "/assets/user-pfps/pfp-004.jpg",
+  "/assets/user-pfps/pfp-005.jpg",
+  "/assets/user-pfps/pfp-006.jpg",
+  "/assets/user-pfps/pfp-007.jpg",
+  "/assets/user-pfps/pfp-010.jpg",
+] as const;
+
+const PRESET_BANNERS = [
+  "/assets/user-banners/banner-1.jpg",
+  "/assets/user-banners/banner-10.jpg",
+  "/assets/user-banners/banner-11.jpg",
+  "/assets/user-banners/banner-12.jpg",
+  "/assets/user-banners/banner-13.jpg",
+  "/assets/user-banners/banner-14.jpg",
+] as const;
+
+export function ProfileMediaPickers({
+  avatarUrl,
+  bannerUrl,
+  onSelectAvatar,
+  onSelectBanner,
+  avatarLabel = "Avatar preset",
+  bannerLabel = "Banner preset",
+  bannerHeightClass = "h-12",
+}: {
+  readonly avatarUrl: string;
+  readonly bannerUrl: string;
+  readonly onSelectAvatar: (url: string) => void;
+  readonly onSelectBanner: (url: string) => void;
+  readonly avatarLabel?: string;
+  readonly bannerLabel?: string;
+  readonly bannerHeightClass?: string;
+}) {
+  return (
+    <>
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold text-muted-foreground">{avatarLabel}</span>
+        <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+          {PRESET_AVATARS.map((url) => (
+            <button
+              key={url}
+              type="button"
+              onClick={() => onSelectAvatar(url)}
+              className={`overflow-hidden rounded-full border-2 p-0.5 transition-colors ${avatarUrl === url ? "border-feed-brand" : "border-transparent hover:border-border"}`}
+            >
+              <img src={url} alt="" className="size-10 rounded-full object-cover" />
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-semibold text-muted-foreground">{bannerLabel}</span>
+        <div className="grid grid-cols-3 gap-2">
+          {PRESET_BANNERS.map((url) => (
+            <button
+              key={url}
+              type="button"
+              onClick={() => onSelectBanner(url)}
+              className={`overflow-hidden rounded-lg border-2 transition-colors ${bannerUrl === url ? "border-feed-brand" : "border-border hover:border-foreground/40"}`}
+            >
+              <img src={url} alt="" className={`${bannerHeightClass} w-full object-cover`} />
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+type ProfileTab = "posts" | "replies" | "likes" | "trades" | "positions";
+
+function FollowListDialog() {
+  const s = useAppStore();
+  const open = s.followListKind !== null;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) storeActions.closeFollowList();
+      }}
+    >
+      <DialogContent className="max-h-[80vh] max-w-md overflow-hidden p-0">
+        <div className="border-b border-border px-4 py-3">
+          <DialogTitle>
+            {s.followListKind === "followers" ? "Followers" : "Following"}
+            {s.followListHandle ? ` · @${s.followListHandle}` : ""}
+          </DialogTitle>
+          <DialogDescription className="sr-only">Account follow list</DialogDescription>
+        </div>
+
+        <div className="max-h-[60vh] overflow-y-auto">
+          {s.followListLoading ? (
+            <div className="flex flex-col gap-3 p-4">
+              <Skeleton className="h-12" />
+              <Skeleton className="h-12" />
+              <Skeleton className="h-12" />
+            </div>
+          ) : s.followListItems.length === 0 ? (
+            <EmptyState title={s.followListKind === "followers" ? "No followers yet" : "Not following anyone yet"} />
+          ) : (
+            <div className="divide-y divide-border">
+              {s.followListItems.map((entry) => {
+                const isSelf = s.viewer?.handle.toLowerCase() === entry.handle.toLowerCase();
+                return (
+                  <div key={`${entry.kind}:${entry.id}`} className="flex items-center justify-between gap-3 px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        storeActions.closeFollowList();
+                        void storeActions.navigate(`/u/${encodeURIComponent(entry.handle)}`);
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                    >
+                      <Avatar name={entry.displayName} src={entry.avatarUrl ?? undefined} seed={entry.handle} size="sm" />
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-1 text-sm font-bold text-foreground hover:underline">
+                          <span className="truncate">{entry.displayName}</span>
+                          {entry.isParody ? <VerifiedBadge size="sm" /> : null}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">@{entry.handle}</span>
+                      </span>
+                    </button>
+                    {!isSelf ? (
+                      <Button
+                        size="sm"
+                        shape="pill"
+                        variant={entry.viewerFollows ? "outline" : "primary"}
+                        onClick={() => { void storeActions.toggleFollow(entry.handle, entry.viewerFollows); }}
+                      >
+                        {entry.viewerFollows ? "Following" : "Follow"}
+                      </Button>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditProfileDialog({
+  open,
+  onOpenChange,
+  initialDisplayName,
+  initialBio,
+  initialAvatarUrl,
+  initialBannerUrl,
+}: {
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly initialDisplayName: string;
+  readonly initialBio: string;
+  readonly initialAvatarUrl: string;
+  readonly initialBannerUrl: string;
+}) {
+  const [displayName, setDisplayName] = useState(initialDisplayName);
+  const [bio, setBio] = useState(initialBio);
+  const [avatarUrl, setAvatarUrl] = useState(initialAvatarUrl);
+  const [bannerUrl, setBannerUrl] = useState(initialBannerUrl);
+  const [busy, setBusy] = useState(false);
+
+  const handleSave = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const trimmedName = displayName.trim();
+    if (!trimmedName) return;
+    setBusy(true);
+    const ok = await storeActions.updateOwnProfile({
+      displayName: trimmedName,
+      bio: bio.trim(),
+      avatarUrl: avatarUrl.trim() || null,
+      bannerUrl: bannerUrl.trim() || null,
+    });
+    setBusy(false);
+    if (ok) onOpenChange(false);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+        <DialogTitle>Edit profile</DialogTitle>
+        <DialogDescription>Update your display name, bio, avatar, and banner.</DialogDescription>
+        <form onSubmit={(e) => { void handleSave(e); }} className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-profile-name">Display name</Label>
+            <Input
+              id="edit-profile-name"
+              maxLength={60}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="edit-profile-bio">Bio</Label>
+            <Textarea
+              id="edit-profile-bio"
+              maxLength={280}
+              placeholder="Write a short bio..."
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+            />
+          </div>
+
+          <ProfileMediaPickers
+            avatarUrl={avatarUrl}
+            bannerUrl={bannerUrl}
+            onSelectAvatar={setAvatarUrl}
+            onSelectBanner={setBannerUrl}
+          />
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button type="button" variant="outline" size="sm" shape="pill" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" size="sm" shape="pill" loading={busy} disabled={!displayName.trim()}>
+              Save
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
-  const [tab, setTab] = useState<"posts" | "positions">("posts");
-  const [reportOpen, setReportOpen] = useState(false);
-  const [reportReason, setReportReason] = useState("");
-  const [reportBusy, setReportBusy] = useState(false);
+  const [tab, setTab] = useState<ProfileTab>("posts");
   const [editOpen, setEditOpen] = useState(false);
-  const [editDisplayName, setEditDisplayName] = useState("");
-  const [editBio, setEditBio] = useState("");
-  const [editBusy, setEditBusy] = useState(false);
   const isGame = mode === "GameMode";
   const bundle = s.profileBundle;
 
-  const handleReport = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!bundle || !reportReason.trim()) return;
-    setReportBusy(true);
-    const ok = await storeActions.submitReport("account", bundle.id, reportReason.trim());
-    setReportBusy(false);
-    if (ok) {
-      setReportReason("");
-      setReportOpen(false);
-    }
-  };
-
-  const openEditProfile = () => {
-    if (!bundle) return;
-    setEditDisplayName(bundle.summary.displayName);
-    setEditBio(bundle.summary.bio ?? "");
-    setEditOpen(true);
-  };
-
-  const handleSaveProfile = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const trimmedName = editDisplayName.trim();
-    if (!trimmedName) return;
-    setEditBusy(true);
-    const ok = await storeActions.updateOwnProfile({
-      displayName: trimmedName,
-      bio: editBio.trim(),
-    });
-    setEditBusy(false);
-    if (ok) setEditOpen(false);
-  };
+  if (!s.viewer && !s.profileHandle && !bundle) {
+    return (
+      <div className="flex flex-col">
+        <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+          <h1 className="text-base font-bold text-foreground">Profile</h1>
+        </header>
+        <EmptyState title="Sign in to view your profile">
+          <Button shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+            Sign in
+          </Button>
+        </EmptyState>
+      </div>
+    );
+  }
 
   if (s.profileLoading && !bundle) {
     return (
       <div className="flex flex-col gap-4 p-4">
-        <Skeleton className="h-44" />
+        <Skeleton className="h-48" />
         <Skeleton className="h-24" />
       </div>
     );
@@ -81,25 +292,82 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   if (!bundle) {
     return (
       <EmptyState title="Profile not found">
-        <Button variant="outline" onClick={() => { void storeActions.navigate("/"); }}>
+        <Button variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/"); }}>
           Back to Feed
         </Button>
       </EmptyState>
     );
   }
 
+  const activeTab: ProfileTab = !isGame && (tab === "trades" || tab === "positions") ? "posts" : tab;
+  const topLevelPosts = bundle.posts.filter((p) => !p.replyToPostId);
+  const replyPosts = s.profileReplies.length > 0 ? s.profileReplies : bundle.posts.filter((p) => Boolean(p.replyToPostId));
+  const likedPosts = bundle.posts.filter((p) => Boolean(p.card.liked));
+  const openPositions = bundle.positions.filter((p) => !p.isClosed);
+  const closedPositions = bundle.positions.filter((p) => p.isClosed);
+  const orgTicker = bundle.orgMeta?.ticker ?? null;
+
+  const copyProfileLink = () => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "https://feed.fun";
+    const url = `${origin}/u/${encodeURIComponent(bundle.summary.handle)}`;
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(url).catch(() => undefined);
+    }
+    storeActions.pushToast("Profile link copied.", "info");
+  };
+
   return (
     <div className="flex flex-col">
+      <BackHeader fallbackPath="/">
+        <div className="min-w-0">
+          <h1 className="truncate text-base leading-tight font-bold text-foreground">{bundle.summary.displayName}</h1>
+          <p className="text-xs text-muted-foreground tabular-nums">
+            {bundle.postsCount} {bundle.postsCount === 1 ? "post" : "posts"}
+          </p>
+        </div>
+      </BackHeader>
+
       <ProfileHeader
         profile={bundle.summary}
         mode={mode}
         onFollowToggle={() => { void storeActions.toggleFollow(bundle.summary.handle, bundle.summary.isFollowing); }}
         onMessage={() => { void storeActions.startDirectChat(bundle.summary.handle); }}
-        onMuteToggle={s.viewer ? () => { void storeActions.toggleMute(bundle.summary.handle); } : undefined}
-        onBlockToggle={s.viewer ? () => { void storeActions.toggleBlock(bundle.summary.handle); } : undefined}
-        onReport={s.viewer ? () => setReportOpen(true) : undefined}
-        onEditProfile={bundle.summary.isOwnProfile ? openEditProfile : undefined}
+        onCopyLink={copyProfileLink}
+        onMuteToggle={s.viewer ? () => storeActions.openMuteDialog(bundle.summary.handle, Boolean(bundle.summary.isMuted)) : undefined}
+        onBlockToggle={s.viewer ? () => storeActions.openBlockDialog(bundle.summary.handle, Boolean(bundle.summary.isBlocked)) : undefined}
+        onReport={
+          s.viewer
+            ? () => storeActions.openReportDialog({ kind: "account", id: bundle.id, label: `@${bundle.summary.handle}` })
+            : undefined
+        }
+        onEditProfile={bundle.summary.isOwnProfile ? () => setEditOpen(true) : undefined}
+        onFollowersClick={() => { void storeActions.loadFollowList(bundle.summary.handle, "followers"); }}
+        onFollowingClick={() => { void storeActions.loadFollowList(bundle.summary.handle, "following"); }}
       />
+
+      {bundle.actorMeta && bundle.actorMeta.affiliations.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5 text-xs">
+          {bundle.actorMeta.affiliations.map((aff) => (
+            <Badge key={aff} variant="outline">{aff}</Badge>
+          ))}
+        </div>
+      ) : null}
+
+      {isGame && orgTicker ? (
+        <div className="flex items-center justify-between gap-3 border-b border-border bg-card/50 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="info" className="font-mono">{`$${orgTicker}`}</Badge>
+            <span className="text-xs text-muted-foreground">{bundle.orgMeta?.orgType}</span>
+          </div>
+          <Button
+            size="sm"
+            shape="pill"
+            onClick={() => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(orgTicker)}`); }}
+          >
+            {`Trade $${orgTicker}`}
+          </Button>
+        </div>
+      ) : null}
 
       {bundle.viewerBlockedBy ? (
         <Alert variant="warn" className="m-4">
@@ -107,102 +375,97 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
         </Alert>
       ) : null}
 
-      <div className="p-4">
-        <Tabs
-          value={isGame ? tab : "posts"}
-          onValueChange={(next) => setTab(next === "positions" ? "positions" : "posts")}
-        >
-          <TabsList className={isGame ? "grid w-full grid-cols-2" : "grid w-full grid-cols-1"}>
-            <TabsTrigger value="posts">Posts ({bundle.posts.length})</TabsTrigger>
-            {isGame ? <TabsTrigger value="positions">Positions ({bundle.positions.length})</TabsTrigger> : null}
-          </TabsList>
+      <Tabs
+        value={activeTab}
+        onValueChange={(next) => {
+          if (next === "posts" || next === "replies" || next === "likes" || next === "trades" || next === "positions") {
+            setTab(next);
+            if (next === "replies") {
+              void storeActions.loadProfileReplies(bundle.summary.handle);
+            }
+          }
+        }}
+      >
+        <TabsList variant="underline">
+          <TabsTrigger value="posts">Posts</TabsTrigger>
+          <TabsTrigger value="replies">Replies</TabsTrigger>
+          <TabsTrigger value="likes">Likes</TabsTrigger>
+          {isGame ? <TabsTrigger value="trades">Trades</TabsTrigger> : null}
+          {isGame ? <TabsTrigger value="positions">Positions</TabsTrigger> : null}
+        </TabsList>
+      </Tabs>
 
-          <TabsContent value="posts">
-            {bundle.posts.length === 0 ? (
-              <EmptyState title="No posts yet" />
-            ) : (
-              <div className="flex flex-col gap-3">
-                <BorderedPostList posts={bundle.posts} mode={mode} />
-                {bundle.postsNextCursor ? (
-                  <div className="flex justify-center">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      loading={s.profileLoadingMore}
-                      onClick={() => { void storeActions.loadMoreProfilePosts(); }}
-                    >
-                      Load more
-                    </Button>
-                  </div>
-                ) : null}
+      {activeTab === "posts" ? (
+        topLevelPosts.length === 0 ? (
+          <EmptyState title="No posts yet" />
+        ) : (
+          <div className="flex flex-col">
+            <FlatPostList posts={topLevelPosts} mode={mode} />
+            {bundle.postsNextCursor ? (
+              <div className="flex justify-center border-b border-border p-4">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  shape="pill"
+                  loading={s.profileLoadingMore}
+                  onClick={() => { void storeActions.loadMoreProfilePosts(); }}
+                >
+                  Load more
+                </Button>
               </div>
-            )}
-          </TabsContent>
+            ) : null}
+          </div>
+        )
+      ) : activeTab === "replies" ? (
+        s.profileRepliesLoading && replyPosts.length === 0 ? (
+          <div className="flex flex-col gap-3 p-4">
+            <Skeleton className="h-20" />
+            <Skeleton className="h-20" />
+          </div>
+        ) : replyPosts.length === 0 ? (
+          <EmptyState title="No replies yet" />
+        ) : (
+          <FlatPostList posts={replyPosts} mode={mode} />
+        )
+      ) : activeTab === "likes" ? (
+        likedPosts.length === 0 ? (
+          <EmptyState title="No liked posts visible yet" />
+        ) : (
+          <FlatPostList posts={likedPosts} mode={mode} />
+        )
+      ) : activeTab === "trades" ? (
+        closedPositions.length === 0 ? (
+          <EmptyState title={bundle.tradeCount ? `${bundle.tradeCount} total trades recorded` : "No settled trades yet"} />
+        ) : (
+          <div className="divide-y divide-border">
+            {closedPositions.map((pos) => (
+              <PositionRow key={pos.row.id} position={pos.row} />
+            ))}
+          </div>
+        )
+      ) : openPositions.length === 0 ? (
+        <EmptyState title="No open positions" />
+      ) : (
+        <div className="divide-y divide-border">
+          {openPositions.map((pos) => (
+            <PositionRow key={pos.row.id} position={pos.row} />
+          ))}
+        </div>
+      )}
 
-          {isGame ? (
-            <TabsContent value="positions">
-              {bundle.positions.length === 0 ? (
-                <EmptyState title="No open positions" />
-              ) : (
-                <Card className="gap-0 overflow-hidden p-0">
-                  {bundle.positions.map((pos) => (
-                    <PositionRow key={pos.row.id} position={pos.row} />
-                  ))}
-                </Card>
-              )}
-            </TabsContent>
-          ) : null}
-        </Tabs>
-      </div>
+      <FollowListDialog />
 
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-md">
-          <DialogTitle>Edit profile</DialogTitle>
-          <DialogDescription>Update your public display name and bio.</DialogDescription>
-          <form onSubmit={(e) => { void handleSaveProfile(e); }} className="flex flex-col gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="edit-profile-name">Display name</Label>
-              <Input
-                id="edit-profile-name"
-                maxLength={60}
-                value={editDisplayName}
-                onChange={(e) => setEditDisplayName(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="edit-profile-bio">Bio</Label>
-              <Textarea
-                id="edit-profile-bio"
-                maxLength={280}
-                placeholder="Tell Feed about your strategy..."
-                value={editBio}
-                onChange={(e) => setEditBio(e.target.value)}
-              />
-            </div>
-            <Button type="submit" loading={editBusy} disabled={!editDisplayName.trim()}>
-              Save changes
-            </Button>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={reportOpen} onOpenChange={setReportOpen}>
-        <DialogContent className="max-w-md">
-          <DialogTitle>Report @{bundle.summary.handle}</DialogTitle>
-          <DialogDescription>Describe the safety or policy issue.</DialogDescription>
-          <form onSubmit={(e) => { void handleReport(e); }} className="flex flex-col gap-3">
-            <Textarea
-              aria-label="Report reason"
-              placeholder="Explain what happened..."
-              value={reportReason}
-              onChange={(e) => setReportReason(e.target.value)}
-            />
-            <Button type="submit" variant="destructive" loading={reportBusy} disabled={!reportReason.trim()}>
-              Submit report
-            </Button>
-          </form>
-        </DialogContent>
-      </Dialog>
+      {editOpen ? (
+        <EditProfileDialog
+          key={`${bundle.id}:${bundle.summary.displayName}`}
+          open={editOpen}
+          onOpenChange={setEditOpen}
+          initialDisplayName={bundle.summary.displayName}
+          initialBio={bundle.summary.bio ?? ""}
+          initialAvatarUrl={bundle.summary.avatarUrl ?? ""}
+          initialBannerUrl={bundle.summary.bannerUrl ?? ""}
+        />
+      ) : null}
     </div>
   );
 }

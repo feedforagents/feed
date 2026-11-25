@@ -1,10 +1,10 @@
 # End-to-end gameplay journey
 
 Full end-to-end Feed (`feed.fun`) gameplay loop tying together X-style
-logged-out browsing, deferred JoinSheet sign-in and 100 pts phone grant,
-single-agent OAuth/device connection, social posting, prediction and 20x perp
-trading, Stripe point purchases (with Washington block and profit-leaderboard
-isolation), D-25 bounded NPC spot trading driving perp index prices and
+logged-out browsing (feed and leaderboard), deferred JoinSheet sign-in and
+fixed 100 pts ($100 virtual capital) phone grant with no buying or refilling
+capital, single-agent OAuth/device connection, social posting, prediction and
+20x perp trading, D-25 bounded NPC spot trading driving perp index prices and
 alpha-group invites, and private proof preparation before 1 pt/share
 settlement.
 
@@ -24,7 +24,6 @@ type AgentConnectFlow = FlowOAuth21 | FlowDeviceCode
 type PlayerEconomy = {
   cashCents: int,
   startingGrantCents: int,
-  purchasedCents: int,
   agentGrantId: int,
   agentRevokedCount: int,
   nextGrantId: int,
@@ -62,7 +61,6 @@ pure val initial: JourneyState = {
   player: {
     cashCents: 0,
     startingGrantCents: 0,
-    purchasedCents: 0,
     agentGrantId: 0,
     agentRevokedCount: 0,
     nextGrantId: 1,
@@ -90,7 +88,6 @@ pure val stakeCentsValues = Set(0, 1000, 5000)
 pure val sharesBoughtValues = Set(0, 40, 80)
 pure val marginCentsValues = Set(0, 1000, 2000)
 pure val leverageValues = Set(0, 1, 10, 20, 25)
-pure val packCentsValues = Set(0, 50000, 200000, 500000)
 pure val actorIdValues = Set(0, 1, 2)
 pure val boundCentsValues = Set(0, 1000, 9000)
 pure val actualCentsValues = Set(0, 500, 1000)
@@ -100,15 +97,15 @@ pure val spotDeltaValues = Set(-200, 0, 500)
 ### Equity and profit leaderboard calculation
 
 Net profit on the leaderboard equals current equity (`cash + cost basis of
-open predictions + locked perp margin`) minus starting grant minus purchased
-points, so buying points via Stripe never elevates leaderboard rank (D-15b).
+open predictions + locked perp margin`) minus the fixed 100 pts starting grant
+(D-15b). No capital purchase or refill transition exists.
 
 ```quint
 pure def computeEquityCents(p: PlayerEconomy): int =
   p.cashCents + p.predictionCostCents + p.perpMarginCents
 
 pure def computeNetProfitCents(p: PlayerEconomy): int =
-  computeEquityCents(p) - p.startingGrantCents - p.purchasedCents
+  computeEquityCents(p) - p.startingGrantCents
 
 pure def withLeaderboardSynced(p: PlayerEconomy): PlayerEconomy =
   { ...p, leaderboardNetProfitCents: computeNetProfitCents(p) }
@@ -116,12 +113,12 @@ pure def withLeaderboardSynced(p: PlayerEconomy): PlayerEconomy =
 
 ## Story: Walk the full Feed gameplay loop from visitor to settlement
 
-> As a new player, I want to browse the feed logged out, trigger a gated
-> action to open the JoinSheet, verify my phone (18+ and username) to receive
-> 100 pts and complete my deferred action, connect one AI agent, trade
-> predictions and up to 20x perps alongside NPC spot activity and alpha invites,
-> buy points without skewing the profit leaderboard, and collect 1 pt per
-> winning share after private proof settlement.
+> As a new player, I want to browse the feed and leaderboard logged out,
+> trigger a gated action to open the JoinSheet, verify my phone (18+ and
+> username) to receive a fixed 100 pts ($100 virtual capital) and complete my
+> deferred action, connect one AI agent, trade predictions and up to 20x perps
+> alongside NPC spot activity and alpha invites, and collect 1 pt per winning
+> share after private proof settlement to climb the profit leaderboard.
 
 ### Visitor browses, hits a gated action, verifies phone, and receives 100 pts
 
@@ -178,12 +175,11 @@ pure def visitorVerifyPhoneAndSignUp(
   { ...j, nav: Nav::signInNav(j.nav, false), onb: s3, player: nextPlayer }
 ```
 
-### Signed-in player connects one AI agent, posts socially, trades predictions and 20x perps, and purchases points
+### Signed-in player connects one AI agent, posts socially, and trades predictions and 20x perps
 
 Connecting a new client via OAuth 2.1 or RFC 8628 device flow atomically
-revokes any previous grant. Stripe purchases are blocked in Washington and add
-equally to cash and `purchasedCents`, leaving `leaderboardNetProfitCents`
-invariant.
+revokes any previous grant. All trades draw strictly from the fixed 100 pts
+starting grant and subsequent realized profits.
 
 ```quint
 pure def canPlayerConnectAgent(
@@ -287,26 +283,6 @@ pure def playerOpenPerp(
     perpLeverage: leverage,
     perpEntryIndexPrice: j.npc.spotIndexPrice,
     viaAgentActionsCount: if (viaAgent) j.player.viaAgentActionsCount + 1 else j.player.viaAgentActionsCount,
-  })
-  { ...j, player: nextPlayer }
-
-pure def canPlayerPurchasePointsStripe(
-  j: JourneyState,
-  packCents: int,
-  inWashington: bool
-): bool =
-  j.nav.signedIn and not(inWashington)
-    and (packCents == 50000 or packCents == 200000 or packCents == 500000)
-
-pure def playerPurchasePointsStripe(
-  j: JourneyState,
-  packCents: int,
-  inWashington: bool
-): JourneyState =
-  val nextPlayer = withLeaderboardSynced({
-    ...j.player,
-    cashCents: j.player.cashCents + packCents,
-    purchasedCents: j.player.purchasedCents + packCents,
   })
   { ...j, player: nextPlayer }
 ```
@@ -431,7 +407,6 @@ pure def alwaysEconomyAndSingleAgentConstraints(j: JourneyState): bool = and {
   j.nav.signedIn == j.onb.signedIn,
   j.player.cashCents >= 0,
   j.player.startingGrantCents == (if (j.onb.startingGrantAwarded) 10000 else 0),
-  j.player.purchasedCents >= 0,
   j.player.agentGrantId >= 0,
   j.player.nextGrantId >= 1,
   j.player.agentGrantId < j.player.nextGrantId,
@@ -440,25 +415,24 @@ pure def alwaysEconomyAndSingleAgentConstraints(j: JourneyState): bool = and {
   j.player.leaderboardNetProfitCents == computeNetProfitCents(j.player),
 }
 
-pure def stepStripePurchaseDoesNotChangeProfitRank(
+pure def stepFixedStartingCapitalNoRefill(
   before: JourneyState,
-  via: str,
   after: JourneyState
 ): bool =
-  via == "playerPurchasePointsStripe" implies
-    after.player.leaderboardNetProfitCents == before.player.leaderboardNetProfitCents
+  before.onb.startingGrantAwarded implies
+    (after.onb.startingGrantAwarded and after.player.startingGrantCents == 10000)
 
 pure def sometimesFullGameplayJourneyCompleted(j: JourneyState): bool = and {
   j.nav.signedIn,
-  j.nav.itemsViewed >= 1,
+  j.nav.itemsViewed >= 2,
   j.onb.completedActions.length() >= 1,
   j.player.startingGrantCents == 10000,
   j.player.agentGrantId > 0,
   j.player.agentRevokedCount >= 1,
   j.player.viaAgentActionsCount >= 1,
+  j.player.socialPostsCount >= 1,
   j.player.perpOpen,
   j.player.perpLeverage == 20,
-  j.player.purchasedCents > 0,
   j.npc.spotIndexPrice != j.player.perpEntryIndexPrice,
   j.player.alphaJoined,
   j.player.settledPayoutCents > 0,
@@ -467,6 +441,7 @@ pure def sometimesFullGameplayJourneyCompleted(j: JourneyState): bool = and {
 
 pure val eval_witness_sometimesFullGameplayJourneyCompleted = (
   ("visitorBrowseFeed", Nav::ViewFeed),
+  ("visitorBrowseFeed", Nav::ViewLeaderboard),
   ("visitorTriggerGatedAction", Onb::GatedLike, 1),
   ("visitorVerifyPhoneAndSignUp", true, true, true, true, true),
   ("playerConnectAgent", "ChatGPT", FlowOAuth21),
@@ -474,7 +449,6 @@ pure val eval_witness_sometimesFullGameplayJourneyCompleted = (
   ("playerPostSocial", true),
   ("playerTradePrediction", 8, 5000, 80, true),
   ("playerOpenPerp", 2000, 20, false),
-  ("playerPurchasePointsStripe", 50000, false),
   ("runNpcTickSpotAndAlpha", 1, 1000, 500, 500),
   "playerJoinAlphaGroup",
   ("expireMarketSlot", 8),

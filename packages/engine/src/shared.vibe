@@ -1,6 +1,7 @@
 // spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"; spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"
 import { parseJsonModelRecord } from "@elizaos/core"
 import { Store, type StoreFailure, type Tx, toInt } from "@repo/db"
+import { actors, organizations } from "@repo/pack-default"
 import { RealtimeBus, publishFeedEvent } from "@repo/social"
 import { FetchHttpClient, HttpClient, type HttpClientRequest, type HttpClientResponse } from "effect/http"
 
@@ -36,16 +37,128 @@ export function minuteIndexOf(nowMs: number): number {
   return Math.floor(nowMs / 60_000)
 }
 
+function escapeSlugRegExp(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+const entityDisplayNameById: ReadonlyMap<string, string> = (() => {
+  const map = new Map<string, string>()
+  for (const org of organizations) {
+    map.set(org.id.toLowerCase(), org.name)
+    map.set(`org-${org.id.toLowerCase()}`, org.name)
+  }
+  for (const actor of actors) {
+    map.set(actor.id.toLowerCase(), actor.name)
+  }
+  return map
+})()
+
+const slugReplacements: ReadonlyArray<{ readonly pattern: RegExp; readonly displayName: string }> = (() => {
+  const seen = new Map<string, string>()
+  for (const actor of actors) {
+    if (actor.id.includes("-") && actor.name.trim().length > 0) {
+      seen.set(actor.id.toLowerCase(), actor.name)
+    }
+  }
+  for (const org of organizations) {
+    if (org.id.includes("-") && org.name.trim().length > 0) {
+      seen.set(org.id.toLowerCase(), org.name)
+    }
+    if (org.name.trim().length > 0) {
+      seen.set(`org-${org.id.toLowerCase()}`, org.name)
+    }
+  }
+  return [...seen.entries()]
+    .sort((a, b) => b[0].length - a[0].length)
+    .map(([slug, displayName]) => ({
+      pattern: new RegExp(`(?<![a-zA-Z0-9_-])@?${escapeSlugRegExp(slug)}(?![a-zA-Z0-9_-])`, "gi"),
+      displayName,
+    }))
+})()
+
+export function displayNameForEntity(entityId: string, explicitName?: string): string {
+  const cleanExplicit = explicitName?.trim() ?? ""
+  if (cleanExplicit.length > 0) return cleanExplicit
+  const cleanId = entityId.trim()
+  if (cleanId.length === 0) return ""
+  return entityDisplayNameById.get(cleanId.toLowerCase()) ?? cleanId
+}
+
+export function replaceActorSlugsWithNames(input: string): string {
+  if (!input.includes("-")) return input
+  let output = input
+  for (const entry of slugReplacements) {
+    output = output.replace(entry.pattern, entry.displayName)
+  }
+  return output
+}
+
+export function stripLeadingSelfPrefix(text: string, actorName: string, actorHandle: string): string {
+  let out = text.trim()
+  const candidates = [actorName.trim(), actorHandle.trim(), `@${actorHandle.trim()}`].filter((c) => c.length >= 2)
+  for (const candidate of candidates) {
+    const prefixPattern = new RegExp(`^@?${escapeSlugRegExp(candidate)}\\s*[:—–-]\\s*`, "i")
+    out = out.replace(prefixPattern, "")
+  }
+  return out.trim()
+}
+
+export function trimToWordBoundary(input: string, maxLen: number): string {
+  const collapsed = input.replace(/\s+/g, " ").trim()
+  if (collapsed.length <= maxLen) {
+    return collapsed.replace(/\s+#[a-zA-Z0-9_]{0,2}\.\.\.$/, "").trimEnd()
+  }
+  if (maxLen <= 3) return collapsed.slice(0, maxLen)
+  const window = collapsed.slice(0, maxLen)
+  const minSentenceCut = Math.floor(maxLen * 0.55)
+  let sentenceCut = -1
+  for (let i = window.length - 1; i >= minSentenceCut; i--) {
+    const ch = window[i]
+    if (ch === "." || ch === "!" || ch === "?") {
+      const nextCh = collapsed[i + 1]
+      if (nextCh === undefined || nextCh === " " || nextCh === "\"" || nextCh === ")") {
+        sentenceCut = i + 1
+        break
+      }
+    }
+  }
+  if (sentenceCut >= minSentenceCut) {
+    return window.slice(0, sentenceCut).replace(/\s+#[a-zA-Z0-9_]{0,2}\.\.\.$/, "").trimEnd()
+  }
+  const budget = maxLen - 3
+  const slice = collapsed.slice(0, budget + 1)
+  const lastSpace = slice.lastIndexOf(" ")
+  const minWordCut = Math.floor(budget * 0.4)
+  let prefix = lastSpace >= minWordCut ? slice.slice(0, lastSpace) : collapsed.slice(0, budget)
+  prefix = prefix.replace(/(?:\s+#[a-zA-Z0-9_]*|\s+[@$])+$/, "")
+  prefix = prefix.replace(/[,;:\-–—(\s]+$/, "").trimEnd()
+  if (prefix.length === 0) {
+    prefix = collapsed.slice(0, budget).trimEnd()
+  }
+  if (/[.!?]$/.test(prefix)) return prefix
+  return `${prefix}...`
+}
+
 export function sanitizeText(input: string, maxLen: number): string {
   let plain = ""
   for (let i = 0; i < input.length; i++) {
     const code = input.charCodeAt(i)
     plain += code <= 31 || code === 127 ? " " : input[i]!
   }
-  const collapsed = plain.replace(/\s+/g, " ").trim()
-  if (collapsed.length <= maxLen) return collapsed
-  if (maxLen <= 3) return collapsed.slice(0, maxLen)
-  return `${collapsed.slice(0, maxLen - 3).trimEnd()}...`
+  return trimToWordBoundary(plain, maxLen)
+}
+
+export function sanitizeNarrativeText(input: string, maxLen: number): string {
+  return sanitizeText(replaceActorSlugsWithNames(input), maxLen)
+}
+
+export function isRuntimeNpcActor(id: string, name?: string, username?: string): boolean {
+  const cleanId = id.trim()
+  if (cleanId.length === 0) return false
+  if (/\btest\b/i.test(cleanId) || /^test[-_]/i.test(cleanId)) return false
+  if (name !== undefined && /\btest\b/i.test(name)) return false
+  if (username !== undefined && (/\btest\b/i.test(username) || /^test[-_]/i.test(username))) return false
+  return true
 }
 
 export function hashString(input: string): number {
