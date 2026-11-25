@@ -58,6 +58,10 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
       void storeActions.navigate(`/post/${encodeURIComponent(notif.postId)}`);
       return;
     }
+    if (notif.isChatMessage) {
+      void storeActions.navigate("/chats");
+      return;
+    }
     if (notif.item.kind === "GroupInvite" || notif.chatId) {
       const targetChatId = notif.chatId;
       void storeActions.navigate("/chats").then(() => {
