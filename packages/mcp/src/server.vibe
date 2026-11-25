@@ -855,7 +855,7 @@ effect function executePublicMarketTool(
         return undefined
       }
       if (maybePred !== undefined && kind !== "perp") {
-      const relatedArticles = try listArticlesForMarket(maybePred.id, viewer.playMode)
+        const relatedArticles = try listArticlesForMarket(maybePred.id, viewer.playMode)
         const relatedPosts = try listFeedPosts({ tab: "latest", marketId: maybePred.id, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
         const recentTrades = try listMarketTrades("prediction", maybePred.id, tradesLimit)
         const priceHistory = try getMarketPriceHistory("prediction", maybePred.id, historyLimit)
