@@ -303,6 +303,7 @@ export interface AppNotification {
   readonly chatId: string | null;
   readonly inviteId: string | null;
   readonly isGameOnly: boolean;
+  readonly isChatMessage: boolean;
 }
 
 export interface AppNotificationsPayload {
@@ -1516,7 +1517,8 @@ export function decodeNotifications(raw: unknown): AppNotificationsPayload {
       if (!isRecord(n)) return null;
       const id = optStr(n.id);
       if (!id) return null;
-      const kind = toNotificationKind(str(n.kind, "reply"));
+      const rawKind = str(n.kind, "reply");
+      const kind = toNotificationKind(rawKind);
       const createdAtMs = num(n.createdAt ?? n.created_at, 0);
       const actorName = optStr(n.actorName ?? n.actor_name);
       const actorHandle = optStr(n.actorHandle ?? n.actor_handle);
@@ -1528,6 +1530,7 @@ export function decodeNotifications(raw: unknown): AppNotificationsPayload {
       return {
         postId: optStr(n.postId ?? n.post_id),
         marketId: optStr(n.marketId ?? n.market_id),
+        isChatMessage: rawKind === "chat_message",
         chatId,
         inviteId,
         isGameOnly: bool(n.isGameOnly ?? n.is_game_only, kind === "MarketResolved" || kind === "PnLDigest"),
