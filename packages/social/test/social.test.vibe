@@ -1483,6 +1483,8 @@ it.effect(
     try followAccount("alice", "bob")
     const searchAfter = try searchWorld({ query: "bob", mode: "game", viewerId: "alice", limit: 10 })
     const bobAfter = searchAfter.accounts.find((a) => a.handle === "bob")
+    const searchOtherViewer = try searchWorld({ query: "bob", mode: "game", viewerId: "carol", limit: 10 })
+    const bobOtherViewer = searchOtherViewer.accounts.find((a) => a.handle === "bob")
     const searchCarol = try searchWorld({ query: "carol", mode: "game", viewerId: "alice", limit: 10 })
     const carolAfter = searchCarol.accounts.find((a) => a.handle === "carol")
     const searchAnonymous = try searchWorld({ query: "bob", mode: "game", limit: 10 })
@@ -1495,6 +1497,7 @@ it.effect(
       bobFound: bobBefore !== undefined,
       bobBefore: bobBefore?.isFollowing,
       bobAfter: bobAfter?.isFollowing,
+      bobOtherViewer: bobOtherViewer?.isFollowing,
       carolAfter: carolAfter?.isFollowing,
       bobAnonymous: bobAnonymous?.isFollowing,
       bobUnfollowed: bobUnfollowed?.isFollowing
@@ -1502,6 +1505,7 @@ it.effect(
       bobFound: true,
       bobBefore: false,
       bobAfter: true,
+      bobOtherViewer: false,
       carolAfter: false,
       bobAnonymous: false,
       bobUnfollowed: false
