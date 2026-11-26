@@ -305,7 +305,7 @@ function socialModeMarketExclusionSql(alias: string): string {
   return `NOT ((${alias}.author_kind = 'org' AND (${alias}.market_id IS NOT NULL OR ${alias}.ticker IS NOT NULL)) OR ${alias}.content ILIKE 'NEW MARKET (%' OR ${alias}.content ILIKE '%prediction market resolution%' OR ${alias}.content ILIKE 'Settlement Wire:%' OR ${alias}.content ILIKE 'Admin Resolution:%')`
 }
 
-interface OrgTickerRef {
+export interface OrgTickerRef {
   readonly id: string
   readonly name: string
   readonly ticker: string
@@ -335,7 +335,7 @@ function matchOrgTickerInText(text: string, orgs: ReadonlyArray<OrgTickerRef>): 
   return null
 }
 
-function resolvePredictionMarketTicker(
+export function resolvePredictionMarketTicker(
   question: string,
   description: string,
   orgs: ReadonlyArray<OrgTickerRef>
