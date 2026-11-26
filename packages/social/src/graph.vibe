@@ -1003,7 +1003,7 @@ export effect function clearNotifications(
           [accountId, [...notificationIds]]
         )
       : try tx.query(
-          "DELETE FROM feed_notifications WHERE account_id = $1 RETURNING id",
+          `DELETE FROM feed_notifications n WHERE n.id IN (SELECT n2.id FROM feed_notifications n2 LEFT JOIN feed_posts p ON p.id = n2.post_id WHERE ${notificationVisibilityWhereSql(mode).replace(/\bn\./g, "n2.")}) RETURNING n.id`,
           [accountId]
         )
     return {
