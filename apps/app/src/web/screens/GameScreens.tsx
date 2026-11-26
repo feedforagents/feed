@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   Button,
   EmptyState,
+  formatPts,
   LeaderboardPanel,
   TradeConfirmationDialog,
   WalletPanel,
@@ -245,11 +246,11 @@ export function WalletScreen() {
 
   return (
     <div className="flex flex-col">
-      <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+      <header className="hidden h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:sticky md:top-0 md:z-20 md:flex">
         <div className="flex min-w-0 items-center gap-3">
-          <h1 className="hidden text-base font-bold text-foreground md:block">Wallet</h1>
-          <span className="hidden truncate text-xs text-muted-foreground sm:inline">
-            Starting capital: 100 pts — trade to climb the leaderboard
+          <h1 className="text-base font-bold text-foreground">Wallet</h1>
+          <span className="truncate text-xs text-muted-foreground">
+            Starting capital: {formatPts(startingGrantCents / 100)} — trade to climb the leaderboard
           </span>
         </div>
         <Button size="sm" onClick={() => { void storeActions.navigate("/markets"); }}>
@@ -260,13 +261,26 @@ export function WalletScreen() {
       {!s.viewer ? (
         <div className="p-6">
           <EmptyState title="Sign in to view your wallet">
-            <Button shape="pill" onClick={() => storeActions.openJoinSheet()}>
-              Sign in &amp; claim 100 pts
-            </Button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button shape="pill" onClick={() => storeActions.openJoinSheet()}>
+                Sign in &amp; claim {formatPts(startingGrantCents / 100)}
+              </Button>
+              <Button size="sm" variant="outline" className="md:hidden" onClick={() => { void storeActions.navigate("/markets"); }}>
+                Markets
+              </Button>
+            </div>
           </EmptyState>
         </div>
       ) : (
-        <div className="p-4">
+        <div className="flex flex-col gap-3 p-4">
+          <div className="flex items-center justify-between gap-3 md:hidden">
+            <span className="truncate text-xs text-muted-foreground">
+              Starting capital: {formatPts(startingGrantCents / 100)}
+            </span>
+            <Button size="sm" variant="outline" onClick={() => { void storeActions.navigate("/markets"); }}>
+              Markets
+            </Button>
+          </div>
           <WalletPanel
             summary={summary}
             pnlHistory={pnlHistory}

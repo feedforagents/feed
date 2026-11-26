@@ -1,6 +1,7 @@
 import { type ComponentProps, useMemo } from "react";
 import { filterChartPointsByRange } from "../lib/chart.ts";
 import { cn } from "../lib/cn.ts";
+import { formatPts } from "../lib/hosts.ts";
 import { Badge } from "./Badge.tsx";
 import {
   LightweightChartBase,
@@ -40,10 +41,6 @@ export type PerpPriceChartProps = Omit<ComponentProps<"div">, "children"> & {
   formatPrice?: (price: number) => string;
 };
 
-function defaultFormatPrice(price: number): string {
-  return `${new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(price)} pts`;
-}
-
 /** Interactive perpetual mark-price area chart colored by period direction with a dashed live price line. */
 export function PerpPriceChart({
   ticker,
@@ -56,13 +53,13 @@ export function PerpPriceChart({
   height = 340,
   loading = false,
   error,
-  formatPrice = defaultFormatPrice,
+  formatPrice = formatPts,
   className,
   ...props
 }: PerpPriceChartProps) {
   const safeFormatPrice = (value: number): string => {
     const formatted = formatPrice(value);
-    return typeof formatted === "string" ? formatted : defaultFormatPrice(value);
+    return typeof formatted === "string" ? formatted : formatPts(value);
   };
   const visible = useMemo(() => filterChartPointsByRange(data, timeRange), [data, timeRange]);
 

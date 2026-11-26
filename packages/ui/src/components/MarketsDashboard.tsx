@@ -89,10 +89,6 @@ function formatCompactPts(value: number): string {
   return formatPts(value);
 }
 
-function formatPricePts(value: number): string {
-  return `${new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)} pts`;
-}
-
 function FavoriteButton({
   active,
   label,
@@ -208,7 +204,7 @@ function PerpsMarketsTable({
                   </button>
                 </TableCell>
                 <TableCell className="text-right font-mono font-semibold text-foreground tabular-nums">
-                  {formatPricePts(market.currentPrice)}
+                  {formatPts(market.currentPrice)}
                 </TableCell>
                 <TableCell className="text-right">
                   <Badge variant={positive ? "ok" : "destructive"} className="font-mono tabular-nums">

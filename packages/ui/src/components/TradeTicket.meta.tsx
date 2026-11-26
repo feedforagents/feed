@@ -135,7 +135,7 @@ export const meta: ComponentMeta<TradeTicketProps> = {
     PerpAtMinimum: async ({ canvasElement }: { canvasElement: HTMLElement }) => {
       onSubmit.mockClear();
       const canvas = within(canvasElement);
-      await expect(canvas.getByText("10.00 pts")).toBeVisible();
+      await expect(canvas.getByText("10 pts")).toBeVisible();
       await expect(canvas.queryByText("Notional size must be at least 10 pts (margin × leverage).")).toBeNull();
       await expect(canvas.getByRole("button", { name: "Open Long 5x" })).toBeEnabled();
       await userEvent.click(canvas.getByRole("button", { name: "Open Long 5x" }));
