@@ -721,6 +721,18 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
     const charlieInvites = (try readJson(charlieInvitesRes)).invites as ReadonlyArray<Record<string, unknown>>
     try check(() => assert.strictEqual(charlieInvitesRes.status, 200))
     try check(() => assert.strictEqual(charlieInvites.length, 1))
+    const charlieAlphaInvitesRes = try callApp("/api/chats/alpha-invites", { cookie: charlie.cookie })
+    const charlieAlphaInvites = (try readJson(charlieAlphaInvitesRes)).invites as ReadonlyArray<Record<string, unknown>>
+    const charlieAllInvitesRes = try callApp("/api/chats/invites", { cookie: charlie.cookie })
+    const charlieAllInvites = (try readJson(charlieAllInvitesRes)).invites as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.deepStrictEqual(
+      {
+        alphaInvitesStatus: charlieAlphaInvitesRes.status,
+        alphaInvitesCount: charlieAlphaInvites.length,
+        allInvitesCount: charlieAllInvites.length
+      },
+      { alphaInvitesStatus: 200, alphaInvitesCount: 0, allInvitesCount: 1 }
+    ))
     const inviteId = String(charlieInvites[0]?.id ?? "")
     const acceptInviteRes = try callApp(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
       cookie: charlie.cookie,
