@@ -85,10 +85,10 @@ module nodeStub {
   }
 
   /** @throws {unknown} */
-  export function startStubProvider(status: number, body: string): Promise<StubProvider> {
+  export function startStubProvider(status: number, body: string, headers: Readonly<Record<string, string>> = {}): Promise<StubProvider> {
     return new Promise((resolve, reject) => {
       const server = http.createServer((_req, res) => {
-        res.writeHead(status, { "content-type": "application/json" })
+        res.writeHead(status, { "content-type": "application/json", ...headers })
         res.end(body)
       })
       server.once("error", reject)
@@ -160,11 +160,11 @@ effect function withSeededEngine<A, E>(initialTimeMs: number, body: A!E!Store) {
   })
 }
 
-effect function withStubProvider<A, E, R>(status: number, body: string, run: (baseUrl: string) => A!E!R) {
+effect function withStubProvider<A, E, R>(status: number, body: string, run: (baseUrl: string) => A!E!R, headers: Readonly<Record<string, string>> = {}) {
   return try scoped(effect {
     const stub = try acquireRelease(
       Effect.tryPromise({
-        try: () => startStubProvider(status, body),
+        try: () => startStubProvider(status, body, headers),
         catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: "Stub provider failed to start.", cause }),
       }),
       (started) => Effect.ignore(Effect.tryPromise({
@@ -939,7 +939,7 @@ it.effect('NPCs execute full trading and social actions, alpha invites honor blo
   })
 }), 180_000)
 
-it.effect('Failed live LLM calls the provider never receives settle at zero instead of locking budget uncertain (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
+it.effect('Failed live LLM calls the provider never receives settle at zero at once (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
   const day1Ms = Date.UTC(2026, 10, 23, 12, 0, 0)
   const day2Ms = day1Ms + 86_400_000
   try withSeededEngine(day1Ms, effect {
@@ -1020,5 +1020,19 @@ it.effect('Failed live LLM calls the provider answers stay uncertain until recon
         assert.strictEqual(toInt(uncertainRows[0]?.reserved_micros), 10_000)
       })
     })
+    try withStubProvider(307, "", effect (redirectUrl: string) => {
+      const redirect = try withEnvOverrides({ SURPLUS_BASE_URL: redirectUrl }, generateCompletion({
+        user: "Hello",
+        nowMs: day2Ms + 3_000,
+      }))
+      const redirectRows = try queryRows("SELECT status, reserved_micros, actual_micros FROM feed_llm_spend_reservations WHERE attempt_id = $1", [redirect.attemptId])
+      try check(() => {
+        assert.isTrue(redirect.usedFallback)
+        assert.strictEqual(redirect.provider, "offline-fallback")
+        assert.strictEqual(redirect.actualMicros, 0)
+        assert.strictEqual(toText(redirectRows[0]?.status), "uncertain")
+        assert.strictEqual(toInt(redirectRows[0]?.reserved_micros), 10_000)
+      })
+    }, { location: "http://127.0.0.1:1/v1/chat/completions" })
   })
 }))
