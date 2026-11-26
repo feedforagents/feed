@@ -1668,31 +1668,33 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         viewerFollows: followedSet.has(accountId)
       }
     })
-    const actors: SearchActorResult[] = actorRows.map((row) => {
+    const searchEntityBase = (row: Row) => {
       const id = toText(row.id) ?? ""
       return {
         id,
         username: canonicalHandle(toText(row.username), id),
         name: toText(row.name) ?? "",
-        tier: toText(row.tier) ?? "",
         description: toText(row.description) ?? "",
-        avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
-        isParody: true,
         viewerFollows: followedSet.has(id)
+      }
+    }
+    const actors: SearchActorResult[] = actorRows.map((row) => {
+      const base = searchEntityBase(row)
+      return {
+        ...base,
+        tier: toText(row.tier) ?? "",
+        avatarUrl: base.id !== "" ? resolveActorAvatarUrl(base.id, toText(row.profile_image_url)) : null,
+        isParody: true
       }
     })
     const organizations: SearchOrganizationResult[] = orgRows.map((row) => {
-      const id = toText(row.id) ?? ""
+      const base = searchEntityBase(row)
       return {
-        id,
-        username: canonicalHandle(toText(row.username), id),
-        name: toText(row.name) ?? "",
+        ...base,
         ticker: mode === "social" ? null : (toText(row.ticker) ?? null),
         orgType: toText(row.org_type) ?? "",
-        description: toText(row.description) ?? "",
-        avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
-        initialPriceCents: mode === "social" || row.initial_price_cents === null ? null : safeInt(row.initial_price_cents, 0),
-        viewerFollows: followedSet.has(id)
+        avatarUrl: base.id !== "" ? resolveOrgLogoUrl(base.id, toText(row.image_url)) : null,
+        initialPriceCents: mode === "social" || row.initial_price_cents === null ? null : safeInt(row.initial_price_cents, 0)
       }
     })
     let postRows: ReadonlyArray<Row>

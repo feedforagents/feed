@@ -2,8 +2,6 @@
 import {
   Store,
   type StoreFailure,
-  resolveUserPresetAvatarUrl,
-  resolveUserPresetBannerUrl,
   toInt,
   toText,
   type Tx
@@ -38,24 +36,28 @@ import {
 import { AuthFailure, RateLimited } from "./errors.vibe"
 import {
   ONBOARDING_TOKEN_TTL_SECONDS,
-  STARTING_GRANT_CENTS,
-  USERNAME_PATTERN,
+  buildSendRateState,
   completePhoneOnboarding,
   emailAuthFromAccount,
   ensureHandleAvailableInTx,
-  insertCloudAccountTx,
+  finalizeOnboardedAccountTx,
   issueSessionInTx,
   lockFeedAccountByIdInTx,
   normalizeIpPrefix,
+  readRuntimeEnvVar,
+  requireActiveNonReviewerAccount,
+  requireLockedAccountByIdInTx,
+  requireTurnstilePassed,
   resolveSignedInAt,
   revokeSessionsAndBumpEpochInTx,
   rowToAccountProfile,
+  runOnboardingTx,
   signingSecretBytes,
-  verifyTurnstile,
   type AccountProfile,
   type AuthRuntimeConfig,
   type AuthenticatedAccountResult,
   type CloudflareEmailAddress,
+  type CompleteOnboardingInput,
   type EmailMode
 } from "./phone-auth.vibe"
 import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
@@ -148,15 +150,6 @@ schema OnboardingPurposeClaim {
 
 const loopbackMagicLinks = new Map<string, { readonly token: string; readonly magicLinkUrl: string; readonly expiresAt: number }>()
 
-module emailRuntimeEnv {
-  /** @throws {never} */
-  export function readEmailEnvVar(name: string): string | undefined {
-    const g = globalThis as { readonly process?: { readonly env?: Record<string, string | undefined> } }
-    return g.process?.env?.[name]
-  }
-}
-import { readEmailEnvVar } from emailRuntimeEnv
-
 function normalizeEmailOrUndefined(raw: string): string | undefined {
   const normalized = raw.trim().toLowerCase()
   if (normalized.length < 3 || normalized.length > 254) return undefined
@@ -230,23 +223,6 @@ function sanitizeRedirectTo(raw: string | undefined): string | null {
   return trimmed
 }
 
-function buildEmailSendRateState(accountState: EmailAuth, sentTimestamps: ReadonlyArray<number>, now: number): EmailAuth {
-  if (sentTimestamps.length === 0) return { ...accountState, now }
-  const lastSentAt = sentTimestamps[0]
-  const inHour = sentTimestamps.filter((ts) => ts > now - HOUR_MS)
-  const inDay = sentTimestamps.filter((ts) => ts > now - DAY_MS)
-  return {
-    ...accountState,
-    hasSentBefore: true,
-    lastSentAt,
-    hourWindowStart: inHour.length > 0 ? inHour[inHour.length - 1] : now - HOUR_MS,
-    hourSends: inHour.length,
-    dayWindowStart: inDay.length > 0 ? inDay[inDay.length - 1] : now - DAY_MS,
-    daySends: inDay.length,
-    now
-  }
-}
-
 function pruneLoopbackMagicLinks(now: number): void {
   for (const [email, entry] of loopbackMagicLinks.entries()) {
     if (entry.expiresAt <= now) loopbackMagicLinks.delete(email)
@@ -258,7 +234,7 @@ export function getLoopbackMagicLink(
   config?: Pick<AuthRuntimeConfig, "emailMode" | "cloudflareEmailSender" | "smsMode">
 ): { readonly token: string; readonly magicLinkUrl: string } | undefined {
   if (config !== undefined && resolveEmailMode(config) !== "loopback") return undefined
-  const envMode = readEmailEnvVar("EMAIL_MODE")
+  const envMode = readRuntimeEnvVar("EMAIL_MODE")
   if (envMode !== undefined && envMode !== "" && envMode !== "loopback") return undefined
   const normalized = normalizeEmailOrUndefined(email)
   if (normalized === undefined) return undefined
@@ -404,14 +380,11 @@ effect function sendEmailMagicLinkInternal(input: {
       status: 503
     })
   }
-  const turnstilePassed = try verifyTurnstile({
+  const turnstilePassed = try requireTurnstilePassed({
     token: input.turnstileToken,
     ipAddress: input.ipAddress,
     config: input.config
   })
-  if (!turnstilePassed) {
-    throw new AuthFailure({ code: "turnstile_failed", message: "Human verification failed.", status: 400 })
-  }
   const normalizedEmail = try normalizeEmail(input.email)
   const emailHash = try hashEmail(input.config.digestKey, normalizedEmail)
   const emailMasked = maskEmail(normalizedEmail)
@@ -444,18 +417,12 @@ effect function sendEmailMagicLinkInternal(input: {
     }
     let baseState: EmailAuth
     if (input.purpose === "link_email") {
-      if (input.accountId === null || input.accountId === "") {
-        throw new AuthFailure({ code: "unauthorized", message: "Account is required.", status: 401 })
-      }
-      const existingRow = try lockFeedAccountByIdInTx(tx, input.accountId)
-      if (existingRow === undefined) {
-        throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
-      }
+      const { accountId, row: existingRow } = try requireLockedAccountByIdInTx(tx, input.accountId)
       const currentHash = toText(existingRow.email_hash) ?? ""
       if (currentHash === emailHash) {
         throw new AuthFailure({ code: "email_unchanged", message: "That email address is already linked to your account.", status: 400 })
       }
-      try ensureEmailUnusedByOtherInTx(tx, emailHash, input.accountId)
+      try ensureEmailUnusedByOtherInTx(tx, emailHash, accountId)
       baseState = emailAuthFromAccount(existingRow, now)
       if (!canRequestLinkEmail(
         baseState,
@@ -487,7 +454,7 @@ effect function sendEmailMagicLinkInternal(input: {
       [emailHash, now - DAY_MS]
     )
     const sentTimestamps = recentRows.map((row) => toInt(row.created_at)).filter((ts) => Number.isSafeInteger(ts) && ts > 0)
-    const rateState = buildEmailSendRateState(baseState, sentTimestamps, now)
+    const rateState = buildSendRateState(baseState, sentTimestamps, now)
     if (!withinEmailSendRateLimits(rateState)) {
       if (!emailResendGapOk(rateState)) {
         const retryAfterSeconds = Math.max(1, Math.ceil((rateState.lastSentAt + emailResendGapMs - now) / 1000))
@@ -795,14 +762,7 @@ export effect function verifyEmailMagicLink(input: {
         now
       }
     }
-    if (toText(existing.status) !== "active") {
-      throw new AuthFailure({ code: "account_inactive", message: "Account is not active.", status: 403 })
-    }
-    if (existing.is_reviewer === true) {
-      throw new AuthFailure({ code: "reviewer_password_only", message: "Reviewer accounts must use reviewer sign-in.", status: 403 })
-    }
-    const accountId = toText(existing.account_id) ?? ""
-    const epoch = Math.max(1, toInt(existing.sessions_revoked_before))
+    const { accountId, epoch } = try requireActiveNonReviewerAccount(existing)
     const updated = try tx.query(
       "UPDATE feed_accounts SET email_verified_at = $2, updated_at = $2 WHERE account_id = $1 RETURNING *",
       [accountId, now]
@@ -861,116 +821,69 @@ export effect function verifyEmailMagicLink(input: {
   }
 }
 
-export effect function completeEmailOnboarding(input: {
-  readonly pendingToken: string
-  readonly username: string
-  readonly accepted18Plus: boolean
-  readonly acceptedTerms: boolean
-  readonly bio?: string | undefined
-  readonly displayName?: string | undefined
-  readonly config: AuthRuntimeConfig
-}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
-  if (!input.accepted18Plus || !input.acceptedTerms) {
-    throw new AuthFailure({
-      code: "attestation_required",
-      message: "You must confirm you are 18+ and accept the Terms of Service.",
-      status: 400
-    })
-  }
-  const username = input.username.trim().toLowerCase()
-  if (!USERNAME_PATTERN.test(username)) {
-    throw new AuthFailure({
-      code: "invalid_username",
-      message: "Username must be 2-32 lowercase letters, numbers, or underscores.",
-      status: 400
-    })
-  }
-  const secret = try signingSecretBytes(input.config)
-  const verifiedJwt = try tryPromise({
-    try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),
-    catch: () => new AuthFailure({ code: "invalid_onboarding_token", message: "Onboarding session expired. Request a new magic link.", status: 401 })
-  })
-  const claims = Option.getOrUndefined(Schema.decodeUnknownOption(PendingEmailOnboardingClaims)(verifiedJwt.payload))
-  if (claims === undefined || claims.emailHash === "") {
-    throw new AuthFailure({ code: "invalid_onboarding_token", message: "Invalid onboarding token.", status: 401 })
-  }
-  const bio = (input.bio ?? "").trim().slice(0, 280)
-  const displayName = (input.displayName?.trim() ?? "") !== "" ? input.displayName!.trim().slice(0, 80) : username
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:onboard:email:${claims.emailHash}`])
-    const cooldownRows = try tx.query("SELECT expires_at FROM feed_email_cooldowns WHERE email_hash = $1", [claims.emailHash])
-    if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
-      throw new AuthFailure({ code: "email_cooldown", message: "This email address is in a 30-day deletion cooldown.", status: 403 })
+export effect function completeEmailOnboarding(
+  input: CompleteOnboardingInput
+): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+  return try runOnboardingTx(
+    input,
+    "Onboarding session expired. Request a new magic link.",
+    (payload) => {
+      const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(PendingEmailOnboardingClaims)(payload))
+      return decoded !== undefined && decoded.emailHash !== "" ? decoded : undefined
+    },
+    (claims) => `feed:onboard:email:${claims.emailHash}`,
+    effect (tx, { username, bio, displayName, claims, now }) => {
+      const cooldownRows = try tx.query("SELECT expires_at FROM feed_email_cooldowns WHERE email_hash = $1", [claims.emailHash])
+      if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
+        throw new AuthFailure({ code: "email_cooldown", message: "This email address is in a 30-day deletion cooldown.", status: 403 })
+      }
+      const existingEmail = try tx.query("SELECT account_id FROM feed_accounts WHERE email_hash = $1 FOR UPDATE", [claims.emailHash])
+      if (existingEmail.length > 0) {
+        throw new AuthFailure({ code: "account_exists", message: "An account for this email address already exists.", status: 409 })
+      }
+      try ensureHandleAvailableInTx(tx, username)
+      const accountId = newUuid()
+      const organizationId = newUuid()
+      const pendingState: EmailAuth = {
+        ...initialEmailAuth,
+        status: "EmailPendingOnboarding",
+        userId: accountId,
+        emailVerified: true,
+        emailHash: claims.emailHash,
+        emailMasked: claims.emailMasked,
+        sessionsEpoch: 1,
+        lastSignInAt: now,
+        now
+      }
+      if (!canCompleteEmailOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)) {
+        throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
+      }
+      stepCompleteEmailOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
+      return try finalizeOnboardedAccountTx(tx, {
+        accountId,
+        organizationId,
+        username,
+        displayName,
+        bio,
+        identityMethod: "EmailMagicLink",
+        identitySubject: claims.emailHash,
+        phoneHash: null,
+        phoneLast2: null,
+        phoneVerifiedAt: null,
+        emailHash: claims.emailHash,
+        emailMasked: claims.emailMasked,
+        emailVerifiedAt: now,
+        challengeId: claims.challengeId,
+        config: input.config,
+        now
+      })
     }
-    const existingEmail = try tx.query("SELECT account_id FROM feed_accounts WHERE email_hash = $1 FOR UPDATE", [claims.emailHash])
-    if (existingEmail.length > 0) {
-      throw new AuthFailure({ code: "account_exists", message: "An account for this email address already exists.", status: 409 })
-    }
-    try ensureHandleAvailableInTx(tx, username)
-    const accountId = newUuid()
-    const organizationId = newUuid()
-    const pendingState: EmailAuth = {
-      ...initialEmailAuth,
-      status: "EmailPendingOnboarding",
-      userId: accountId,
-      emailVerified: true,
-      emailHash: claims.emailHash,
-      emailMasked: claims.emailMasked,
-      sessionsEpoch: 1,
-      lastSignInAt: now,
-      now
-    }
-    if (!canCompleteEmailOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)) {
-      throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
-    }
-    stepCompleteEmailOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
-    const cloudAccountState = JSON.stringify({
-      status: "Active",
-      userId: accountId,
-      organizationId,
-      identities: [{ method: "EmailMagicLink", subject: claims.emailHash }]
-    })
-    try insertCloudAccountTx(tx, {
-      accountId,
-      organizationId,
-      displayName,
-      stateJson: cloudAccountState,
-      now
-    })
-    const defaultAvatarUrl = resolveUserPresetAvatarUrl(accountId)
-    const defaultBannerUrl = resolveUserPresetBannerUrl(accountId)
-    const insertedRows = try tx.query(
-      `INSERT INTO feed_accounts
-         (account_id, handle, display_name, bio, avatar_url, banner_url, phone_hash, phone_last2, phone_verified_at, email_hash, email_masked, email_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, NULL, $7, $8, $9, $9, 'game', $10, $10, 0, false, false, NULL, $9, $9)
-       RETURNING *`,
-      [accountId, username, displayName, bio, defaultAvatarUrl, defaultBannerUrl, claims.emailHash, claims.emailMasked, now, STARTING_GRANT_CENTS]
-    )
-    try tx.query(
-      `INSERT INTO feed_point_ledger
-         (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
-       VALUES ($1, $2, 'starting_grant', $3, $3, $4, $5)`,
-      [newUuid(), accountId, STARTING_GRANT_CENTS, claims.challengeId, now]
-    )
-    const session = try issueSessionInTx(tx, accountId, 1, input.config, now)
-    return {
-      account: rowToAccountProfile(insertedRows[0]),
-      ...session
-    }
-  })
+  )
 }
 
-export effect function completeOnboarding(input: {
-  readonly pendingToken: string
-  readonly username: string
-  readonly accepted18Plus: boolean
-  readonly acceptedTerms: boolean
-  readonly bio?: string | undefined
-  readonly displayName?: string | undefined
-  readonly config: AuthRuntimeConfig
-}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+export effect function completeOnboarding(
+  input: CompleteOnboardingInput
+): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
   const secret = try signingSecretBytes(input.config)
   const verifiedJwt = try tryPromise({
     try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),

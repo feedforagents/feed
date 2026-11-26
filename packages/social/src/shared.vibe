@@ -427,6 +427,28 @@ function userProfileFromRow(row: Row, id: string): SubjectProfile {
   }
 }
 
+function npcProfileFromRow(row: Row, id: string): SubjectProfile {
+  return {
+    id,
+    kind: "npc",
+    handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
+    displayName: toText(row.name) ?? id,
+    avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
+    bannerUrl: id !== "" ? resolveActorBannerUrl(id, toText(row.profile_banner_url)) : null
+  }
+}
+
+function orgProfileFromRow(row: Row, id: string): SubjectProfile {
+  return {
+    id,
+    kind: "org",
+    handle: canonicalHandle(toText(row.username), id),
+    displayName: toText(row.name) ?? id,
+    avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
+    bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null
+  }
+}
+
 export effect function loadSubjectProfilesMapTx(
   tx: Tx,
   refs: ReadonlyArray<SubjectRef>
@@ -452,14 +474,7 @@ export effect function loadSubjectProfilesMapTx(
     )
     for (const row of npcRows) {
       const id = toText(row.id) ?? ""
-      profiles.set(`npc:${id}`, {
-        id,
-        kind: "npc",
-        handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
-        displayName: toText(row.name) ?? id,
-        avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
-        bannerUrl: id !== "" ? resolveActorBannerUrl(id, toText(row.profile_banner_url)) : null
-      })
+      profiles.set(`npc:${id}`, npcProfileFromRow(row, id))
     }
   }
   if (orgIds.length > 0) {
@@ -469,14 +484,7 @@ export effect function loadSubjectProfilesMapTx(
     )
     for (const row of orgRows) {
       const id = toText(row.id) ?? ""
-      profiles.set(`org:${id}`, {
-        id,
-        kind: "org",
-        handle: canonicalHandle(toText(row.username), id),
-        displayName: toText(row.name) ?? id,
-        avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
-        bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null
-      })
+      profiles.set(`org:${id}`, orgProfileFromRow(row, id))
     }
   }
   return profiles
@@ -508,14 +516,7 @@ export effect function loadProfilesByIdsTx(
     for (const row of orgRows) {
       const id = toText(row.id) ?? ""
       if (id !== "") {
-        profiles.set(id, {
-          id,
-          kind: "org",
-          handle: canonicalHandle(toText(row.username), id),
-          displayName: toText(row.name) ?? id,
-          avatarUrl: resolveOrgLogoUrl(id, toText(row.image_url)),
-          bannerUrl: resolveOrgBannerUrl(id, toText(row.banner_url))
-        })
+        profiles.set(id, orgProfileFromRow(row, id))
       }
     }
   }
@@ -528,14 +529,7 @@ export effect function loadProfilesByIdsTx(
     for (const row of npcRows) {
       const id = toText(row.id) ?? ""
       if (id !== "") {
-        profiles.set(id, {
-          id,
-          kind: "npc",
-          handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
-          displayName: toText(row.name) ?? id,
-          avatarUrl: resolveActorAvatarUrl(id, toText(row.profile_image_url)),
-          bannerUrl: resolveActorBannerUrl(id, toText(row.profile_banner_url))
-        })
+        profiles.set(id, npcProfileFromRow(row, id))
       }
     }
   }
