@@ -550,6 +550,7 @@ export function reconnectRealtime(): void {
     "chat.message",
     "chat.reaction",
     "chat.invite",
+    "chat.updated",
     "alpha.invite",
     "notification.created",
     "world.tick",
