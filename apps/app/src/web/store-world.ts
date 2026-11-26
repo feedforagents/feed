@@ -1405,10 +1405,17 @@ export async function respondGroupInvite(inviteId: string, accept: boolean): Pro
   await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
 
+let notificationsLoadCount = 0;
+
 export async function loadNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const loadId = ++notificationsLoadCount;
   setStoreState({ notificationsLoading: true });
   const res = await requestJson("/api/notifications", { parse: decodeNotifications });
+  if (loadId !== notificationsLoadCount) {
+    setStoreState({ notificationsLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({
       notifications: res.data.items,
@@ -1444,6 +1451,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
 
 export async function markAllNotificationsRead(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  notificationsLoadCount += 1;
   const res = await requestJson("/api/notifications/read", {
     method: "POST",
     body: {},
