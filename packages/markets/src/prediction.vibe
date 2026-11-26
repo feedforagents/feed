@@ -126,6 +126,7 @@ export interface BuyPredictionInput {
   readonly amountCents: number
   readonly viaClientName?: string
   readonly idempotencyKey?: string
+  readonly nowMs?: number
 }
 
 export interface SellPredictionInput {
@@ -136,6 +137,7 @@ export interface SellPredictionInput {
   readonly shares: number
   readonly viaClientName?: string
   readonly idempotencyKey?: string
+  readonly nowMs?: number
 }
 
 export interface PreviewPredictionBuyInput {
@@ -743,14 +745,14 @@ effect function findIdempotentPredictionReceipt(
 }
 
 effect function withLockedPredictionMarket(
-  input: Pick<BuyPredictionInput, "marketId" | "viaClientName" | "actorId" | "idempotencyKey">,
+  input: Pick<BuyPredictionInput, "marketId" | "viaClientName" | "actorId" | "idempotencyKey" | "nowMs">,
   requestFingerprint: string,
   run: (ctx: LockedPredictionContext) => TradeReceipt!(MarketFailure | StoreFailure)
 ): TradeReceipt!(MarketFailure | StoreFailure)!Store {
   const viaClientName = normalizeViaClient(input.viaClientName)
   const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const store = try Store
-  const now = try Clock.currentTimeMillis
+  const now = input.nowMs !== undefined && Number.isFinite(input.nowMs) ? Math.trunc(input.nowMs) : try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     if (idempotencyKey !== null) {
       const replayed = try findIdempotentPredictionReceipt(tx, input.actorId, idempotencyKey, requestFingerprint)

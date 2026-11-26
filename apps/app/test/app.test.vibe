@@ -5,7 +5,7 @@ import { localStoreLayer } from "@repo/db/node"
 import { realtimeBusLayer } from "@repo/social"
 import { TestClock } from "effect/testing"
 import { parseAppServerConfig, type AppServerConfig } from "../src/server/config.vibe"
-import { handleFeedRequest, runScheduledTicks } from "../src/server/router.vibe"
+import { handleFeedRequest, runScheduledTicks, runWorkerCronLane, workerCronLanes } from "../src/server/router.vibe"
 
 module node {
   import { createHash } from "node:crypto"
@@ -449,6 +449,26 @@ it.effect('Scheduled ticks run each core world job on its spec cadence (spec/eng
       ["article-tick", "markets-tick", "perp-funding"],
       ["article-tick", "markets-tick", "world-facts"]
     ]))
+
+    try store.transaction((tx: Tx) => tx.query("DELETE FROM feed_tick_health"))
+    try runWorkerCronLane("fast", 480)
+    const fastRows = try store.transaction((tx: Tx) => tx.query("SELECT job_name FROM feed_tick_health ORDER BY job_name ASC"))
+    try store.transaction((tx: Tx) => tx.query("DELETE FROM feed_tick_health"))
+    try runWorkerCronLane("periodic-slow", 720)
+    const periodicRows = try store.transaction((tx: Tx) => tx.query("SELECT job_name FROM feed_tick_health ORDER BY job_name ASC"))
+    try check(() => assert.deepStrictEqual({
+      lanesMinute: workerCronLanes("* * * * *"),
+      lanesNpc: workerCronLanes("*/2 * * * *"),
+      lanesPeriodic: workerCronLanes("*/5 * * * *"),
+      fastLaneJobs: fastRows.map((row) => String(row.job_name)),
+      periodicSlowJobs: periodicRows.map((row) => String(row.job_name))
+    }, {
+      lanesMinute: ["fast", "minute-slow"],
+      lanesNpc: ["npc"],
+      lanesPeriodic: ["periodic-slow"],
+      fastLaneJobs: ["minute-tick", "perp-funding"],
+      periodicSlowJobs: ["article-tick", "organization-tick", "rss-refresh", "world-facts"]
+    }))
   }
 }, 180_000)
 

@@ -376,6 +376,7 @@ effect function simulateCorrelatedSpotActivity(nowMs: number): number!StoreFailu
       ticker: trade.ticker,
       side: effectiveSide,
       quoteCents: trade.quoteCents,
+      nowMs,
     }) catch effect () => null
     if (receipt !== null) {
       simulatedCount += 1
@@ -791,6 +792,7 @@ export effect function runOrganizationTick(nowMs?: number): { readonly skipped: 
           authorKind: "org",
           content: postContent,
           ...(ticker ? { ticker } : {}),
+          nowMs: resolvedNow,
         })
         try maybePublishFeedEvent({ type: "org.posted", organizationId: orgId, ticker })
         postsCreated += 1
@@ -875,6 +877,7 @@ export effect function runArticleTick(nowMs?: number): { readonly skipped: boole
         authorId: orgId,
         authorKind: "org",
         content: sanitizeNarrativeText(`${title} — ${summary}`, 260),
+        nowMs: resolvedNow,
       })
       try maybePublishFeedEvent({ type: "article.published", articleId, organizationId: orgId })
       const endWall = try Clock.currentTimeMillis
@@ -1070,19 +1073,19 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
       for (let i = 0; i < feedCount; i += 1) {
         selectedUrls.push(configuredUrls[(bucket + i) % configuredUrls.length]!)
       }
-      const perFeedBuckets: Array<ReadonlyArray<RssFeedHeadlineItem>> = []
-      for (const url of selectedUrls) {
-        const req = HttpClientRequest.get(url)
-        const response = fetchTextWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
-        if (!response || response.status < 200 || response.status >= 300) continue
-        const xml = response.text
-        if (xml.length > 0) {
-          const parsedItems = extractRssHeadlinesFromXml(xml, url)
-          if (parsedItems.length > 0) {
-            perFeedBuckets.push(parsedItems)
+      const perFeedResults = try Effect.forEach(
+        selectedUrls,
+        (url) => effect {
+          const req = HttpClientRequest.get(url)
+          const response = fetchTextWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
+          if (!response || response.status < 200 || response.status >= 300 || response.text.length === 0) {
+            return [] as ReadonlyArray<RssFeedHeadlineItem>
           }
-        }
-      }
+          return extractRssHeadlinesFromXml(response.text, url)
+        },
+        { concurrency: 6 },
+      )
+      const perFeedBuckets = perFeedResults.filter((bucket) => bucket.length > 0)
       const interleaved = interleaveRssFeedItems(perFeedBuckets)
       let insertedCount = 0
       const rosterHint = groundingRosterSummary()

@@ -471,6 +471,7 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       content: clueContent,
       marketId,
       ...(matchedOrgTicker !== undefined ? { ticker: matchedOrgTicker } : {}),
+      nowMs: resolvedNow,
     })
     const postId = createdPost.id
     try store.transaction(effect (tx: Tx) => {
@@ -547,6 +548,7 @@ effect function settleMarketWithProofArticle(input: {
     authorKind: "org",
     content: sanitizeNarrativeText(`${cleanTitle} — ${cleanSummary}`, 260),
     marketId: input.marketId,
+    nowMs: input.nowMs,
   }) catch effect () => undefined
   try maybePublishFeedEvent({ type: "market.resolved", marketId: input.marketId, outcome: input.outcome, articleId })
   return { articleId }
@@ -640,6 +642,7 @@ export effect function ensureRollingMarketSlots(nowMs?: number): ReadonlyArray<s
         authorKind: "org",
         content: sanitizeNarrativeText(`NEW MARKET (${slotSpec.timeframe}): ${question}`, 260),
         marketId,
+        nowMs: resolvedNow,
       }) catch effect () => undefined
       try maybePublishFeedEvent({ type: "world.tick", kind: "market", refId: marketId, createdAt: resolvedNow })
     }
@@ -932,6 +935,7 @@ effect function resolveHoldCommon(
     authorKind: "org",
     content: sanitizeNarrativeText(`${committed.cleanTitle} — ${committed.cleanSummary}`, 260),
     marketId: cleanId,
+    nowMs,
   }) catch effect () => undefined
   try maybePublishFeedEvent({ type: "market.resolved", marketId: cleanId, outcome: committed.chosenOutcome, articleId })
   const createdIds = ensureRollingMarketSlots(nowMs) catch effect () => []

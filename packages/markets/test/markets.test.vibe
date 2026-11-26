@@ -1523,3 +1523,59 @@ it.effect('Perp open/close idempotency: same key replays the receipt, different 
     ))
   })
 })
+
+it.effect("prediction, perp, and NPC spot write helpers stamp explicit nowMs timestamps", effect () => {
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+    const store = try Store
+    const simNowMs = 1_750_000_555_000
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_accounts (account_id, handle, display_name, balance_cents, created_at, updated_at)
+         VALUES ('user-sim', 'simuser', 'Sim User', 200000, $1, $1)
+         ON CONFLICT (account_id) DO NOTHING`,
+        [simNowMs - 60_000]
+      )
+      try tx.query(
+        `INSERT INTO feed_prediction_markets
+           (id, slot_index, question, description, category, timeframe, phase, yes_shares, no_shares, liquidity_cents, status, secret_outcome, expires_at, created_at)
+         VALUES
+           ('pred-sim-now', NULL, 'Sim clock market?', 'Tests nowMs threading.', 'Tech', '1d', 'opening', 500000, 500000, 1000000, 'open', 'YES', $1, $2)`,
+        [simNowMs + 86_400_000, simNowMs - 60_000]
+      )
+    })
+    const npcRows = try store.transaction((tx: Tx) =>
+      tx.query("SELECT id FROM feed_actors WHERE balance_cents >= 50000 ORDER BY id ASC LIMIT 1")
+    )
+    const npcId = String(npcRows[0]?.id ?? "")
+    const predReceipt = try buyPredictionShares({
+      actorId: "user-sim",
+      actorKind: "user",
+      marketId: "pred-sim-now",
+      side: "yes",
+      amountCents: 1_000,
+      nowMs: simNowMs
+    })
+    const perpReceipt = try openPerpPosition({
+      ownerId: "user-sim",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 2,
+      nowMs: simNowMs
+    })
+    const spotReceipt = try executeNpcSpotTrade({
+      actorId: npcId,
+      ticker: "XTRPC",
+      side: "buy",
+      quoteCents: 2_000,
+      nowMs: simNowMs
+    })
+    try check(() => assert.deepStrictEqual(
+      [predReceipt.createdAt, perpReceipt.createdAt, perpReceipt.position.createdAt, spotReceipt.createdAt],
+      [simNowMs, simNowMs, simNowMs, simNowMs]
+    ))
+  }
+})

@@ -100,6 +100,7 @@ export interface NpcSpotTradeInput {
   readonly ticker: string
   readonly side: "buy" | "sell"
   readonly quoteCents: number
+  readonly nowMs?: number
 }
 
 export interface SpotTradeReceipt {
@@ -128,6 +129,7 @@ export interface OpenPerpInput {
   readonly maxSlippageBps?: number
   readonly viaClientName?: string
   readonly idempotencyKey?: string
+  readonly nowMs?: number
 }
 
 export interface OpenPerpReceipt {
@@ -154,6 +156,7 @@ export interface ClosePerpInput {
   readonly maxSlippageBps?: number
   readonly viaClientName?: string
   readonly idempotencyKey?: string
+  readonly nowMs?: number
 }
 
 export interface ClosePerpReceipt {
@@ -501,6 +504,10 @@ export effect function listPerpPositions(ownerId: string): ReadonlyArray<PerpPos
   return try store.transaction((tx) => listPerpPositionsIn(tx, ownerId))
 }
 
+effect function resolveTradeNowMs(nowMs?: number): number!! {
+  return nowMs !== undefined && Number.isFinite(nowMs) ? Math.trunc(nowMs) : try Clock.currentTimeMillis
+}
+
 // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
 export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeReceipt!(MarketFailure | StoreFailure)!Store {
   try assertSafePositiveInt(input.quoteCents, "INVALID_AMOUNT", "Spot trade quoteCents must be a positive integer")
@@ -508,7 +515,7 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
     throw marketFail("INVALID_SIDE", "Spot side must be 'buy' or 'sell'")
   }
   const store = try Store
-  const now = try Clock.currentTimeMillis
+  const now = try resolveTradeNowMs(input.nowMs)
   return try store.transaction(effect (tx: Tx) => {
     const userRows = try tx.query("SELECT account_id FROM feed_accounts WHERE account_id = $1", [input.actorId])
     if (userRows.length > 0) {
@@ -1379,7 +1386,7 @@ effect function findIdempotentPerpReceipt<A>(
   actorId: string,
   idempotencyKey: string,
   requestFingerprint: string,
-  schema: Schema.Schema<A>,
+  schema: Schema.Codec<A, unknown, never, never>,
   shapeLabel: string
 ): (A | null)!(MarketFailure | StoreFailure) {
   try tx.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [actorId, idempotencyKey])
@@ -1430,7 +1437,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
   const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const fingerprint = `open:${input.ticker}:${input.side}:${input.collateralCents}:${input.leverage}:${input.mode ?? ""}`
   const store = try Store
-  const now = try Clock.currentTimeMillis
+  const now = try resolveTradeNowMs(input.nowMs)
   const currentPeriod = fundingPeriodFromSeconds(Math.floor(now / 1000))
   return try store.transaction(effect (tx: Tx) => {
     if (idempotencyKey !== null) {
@@ -1619,7 +1626,7 @@ export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceip
   const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const fingerprint = `close:${input.positionId}:${input.sizeCents ?? ""}:${input.closePct ?? ""}`
   const store = try Store
-  const now = try Clock.currentTimeMillis
+  const now = try resolveTradeNowMs(input.nowMs)
   return try store.transaction(effect (tx: Tx) => {
     if (idempotencyKey !== null) {
       const replayed = try findIdempotentPerpReceipt(

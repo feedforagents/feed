@@ -49,7 +49,7 @@
     }
   ],
   "triggers": {
-    "crons": ["* * * * *"]
+    "crons": ["* * * * *", "*/2 * * * *", "*/5 * * * *"]
   },
   "observability": {
     "enabled": true

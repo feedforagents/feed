@@ -1,17 +1,22 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
 import { type CloudflareEmailSender } from "@repo/auth"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, workerDbStore, type StoreFailure, type Tx } from "@repo/db/worker"
-import { RealtimeBus, realtimeBusLayer } from "@repo/social"
+import { createDbBackedRealtimeBusLayer, RealtimeBus } from "@repo/social"
 import { assertAppServerConfig, parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
-import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
+import { resolveOptionalRouteResponse, runWorkerCronLane, workerCronLanes } from "./router.vibe"
 
 module web {
   /** @throws {never} */
   export function makeResponse(body: BodyInit | null, init?: ResponseInit): Response {
     return new Response(body, init)
   }
+
+  /** @throws {never} */
+  export function randomIsolateId(): string {
+    return crypto.randomUUID()
+  }
 }
-import { makeResponse } from web
+import { makeResponse, randomIsolateId } from web
 
 export interface WorkerHyperdrive {
   readonly connectionString: string
@@ -58,7 +63,8 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
 }
 
 const bootstrappedConnections = new Set<string>()
-let isolateBusRuntime: ManagedRuntime.ManagedRuntime<RealtimeBus, never> | undefined
+const workerIsolateId = randomIsolateId()
+const isolateBusRuntimes = new Map<string, ManagedRuntime.ManagedRuntime<RealtimeBus, never>>()
 
 function connectionStringForEnv(env: WorkerEnv): string | undefined {
   const hyperdriveUrl = env.HYPERDRIVE?.connectionString?.trim()
@@ -81,7 +87,8 @@ effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
          to_regclass('public.feed_world_events') AS world_events,
          to_regclass('public.feed_email_magic_links') AS email_magic_links,
          to_regclass('public.feed_email_cooldowns') AS email_cooldowns,
-         to_regclass('public.feed_job_leases') AS job_leases`
+         to_regclass('public.feed_job_leases') AS job_leases,
+         to_regclass('public.feed_realtime_events') AS realtime_events`
     )
     const row = tableRows[0]
     if (
@@ -96,6 +103,7 @@ effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
       || typeof row.email_magic_links !== "string"
       || typeof row.email_cooldowns !== "string"
       || typeof row.job_leases !== "string"
+      || typeof row.realtime_events !== "string"
     ) {
       return false
     }
@@ -144,9 +152,17 @@ effect function readBusService(): RealtimeBus.Shape!!RealtimeBus {
   return try RealtimeBus
 }
 
-async function sharedRealtimeBusLayer(): Promise<Layer.Layer<RealtimeBus>> {
-  isolateBusRuntime ??= ManagedRuntime.make(realtimeBusLayer)
-  const bus = await isolateBusRuntime.runPromise(readBusService())
+async function sharedRealtimeBusLayer(connectionString: string): Promise<Layer.Layer<RealtimeBus>> {
+  let runtime = isolateBusRuntimes.get(connectionString)
+  if (runtime === undefined) {
+    runtime = ManagedRuntime.make(
+      createDbBackedRealtimeBusLayer(perCheckWorkerStore(connectionString), {
+        isolateId: workerIsolateId
+      })
+    )
+    isolateBusRuntimes.set(connectionString, runtime)
+  }
+  const bus = await runtime.runPromise(readBusService())
   return Layer.succeed(RealtimeBus, bus)
 }
 
@@ -176,7 +192,7 @@ async function workerRuntimeLayer(env: WorkerEnv): Promise<{
   }
   const dbLayer = workerDbStore(connectionString)
   await ensureBootstrapped(connectionString, dbLayer)
-  const busLayer = await sharedRealtimeBusLayer()
+  const busLayer = await sharedRealtimeBusLayer(connectionString)
   return {
     layer: Layer.mergeAll(dbLayer, busLayer),
     connectionString
@@ -232,12 +248,15 @@ export default {
     const config = parseAppServerConfig(stringEnvRecord(env), "https://feed.fun")
     if (config.gameStart !== "run") return
     const cycle = Math.max(1, Math.floor(controller.scheduledTime / 60_000))
-    ctx.waitUntil(
-      (async () => {
-        await Effect.runPromise(assertAppServerConfig(config))
-        const { layer: appLayer } = await workerRuntimeLayer(env)
-        await Effect.runPromise(Effect.provide(runScheduledTicks(cycle), appLayer))
-      })()
-    )
+    const lanes = workerCronLanes(controller.cron)
+    for (const lane of lanes) {
+      ctx.waitUntil(
+        (async () => {
+          await Effect.runPromise(assertAppServerConfig(config))
+          const { layer: appLayer } = await workerRuntimeLayer(env)
+          await Effect.runPromise(Effect.provide(runWorkerCronLane(lane, cycle), appLayer))
+        })()
+      )
+    }
   }
 }

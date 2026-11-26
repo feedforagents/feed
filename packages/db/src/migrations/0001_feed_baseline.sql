@@ -768,3 +768,11 @@ CREATE TABLE IF NOT EXISTS feed_job_leases (
   lease_until bigint NOT NULL,
   updated_at bigint NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS feed_realtime_events (
+  seq bigserial PRIMARY KEY,
+  origin_isolate text NOT NULL,
+  payload_json text NOT NULL,
+  created_at bigint NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feed_realtime_events_created_idx ON feed_realtime_events (created_at);

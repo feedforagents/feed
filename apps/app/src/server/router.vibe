@@ -2601,40 +2601,153 @@ export effect function resolveOptionalRouteResponse(
   return withRefreshedSessionCookie(response, session)
 }
 
+export interface ScheduledTickOptions {
+  readonly slowJobTimeoutMs?: number
+  readonly slowCycleBudgetMs?: number
+}
+
+export type WorkerCronLane = "fast" | "minute-slow" | "npc" | "periodic-slow" | "all-slow"
+
+const DEFAULT_SLOW_JOB_TIMEOUT_MS = 25_000
+const DEFAULT_SLOW_CYCLE_BUDGET_MS = 45_000
+
+interface ScheduledJobEntry {
+  readonly name: string
+  readonly run: () => unknown!(EngineFailure | StoreFailure | MarketFailure | SocialFailure)!(Store | RealtimeBus)
+}
+
 effect function runScheduledJob(
   name: string,
-  run: () => unknown!(EngineFailure | StoreFailure | MarketFailure | SocialFailure)!(Store | RealtimeBus)
+  run: () => unknown!(EngineFailure | StoreFailure | MarketFailure | SocialFailure)!(Store | RealtimeBus),
+  timeoutMs?: number
 ): void!!(Store | RealtimeBus) {
-  run() catch effect (err) => {
+  const exec = timeoutMs === undefined
+    ? run()
+    : timeout(run(), `${Math.max(1, Math.trunc(timeoutMs))} millis`)
+  exec catch effect (err) => {
     const detail = err instanceof Error ? err.message : String(err)
     try Effect.logWarning(`scheduled tick ${name} failed: ${detail}`)
   }
 }
 
-export effect function runScheduledTicks(cycle: number): void!!(Store | RealtimeBus) {
+effect function runBoundedSlowJobs(
+  jobs: ReadonlyArray<ScheduledJobEntry>,
+  options: ScheduledTickOptions = {}
+): void!!(Store | RealtimeBus) {
+  if (jobs.length === 0) return
+  const jobTimeoutMs = Math.max(1, Math.trunc(options.slowJobTimeoutMs ?? DEFAULT_SLOW_JOB_TIMEOUT_MS))
+  const cycleBudgetMs = Math.max(1, Math.trunc(options.slowCycleBudgetMs ?? DEFAULT_SLOW_CYCLE_BUDGET_MS))
+  const startedAt = try Clock.currentTimeMillis
+  for (const job of jobs) {
+    const elapsedMs = (try Clock.currentTimeMillis) - startedAt
+    const remainingMs = cycleBudgetMs - elapsedMs
+    if (remainingMs <= 0) {
+      try Effect.logWarning(`scheduled tick ${job.name} deferred: slow cycle budget (${cycleBudgetMs}ms) exhausted`)
+      continue
+    }
+    try runScheduledJob(job.name, job.run, Math.min(jobTimeoutMs, remainingMs))
+  }
+}
+
+export effect function runFastScheduledTicks(cycle: number): void!!(Store | RealtimeBus) {
   try runScheduledJob("minute-tick", () => runMinuteTick())
-  try runScheduledJob("markets-recovery", () => runMarketsRecovery())
-  if (isRouteDue("RouteNpcTick", cycle)) {
-    try runScheduledJob("npc-tick", () => runNpcTick())
-  }
-  if (isRouteDue("RouteMarketsTick", cycle)) {
-    try runScheduledJob("markets-tick", () => runMarketsTick())
-  }
-  if (isRouteDue("RouteOrganizationTick", cycle)) {
-    try runScheduledJob("organization-tick", () => runOrganizationTick())
-  }
-  if (isRouteDue("RouteRssRefresh", cycle)) {
-    try runScheduledJob("rss-refresh-tick", () => runRssRefreshTick())
-  }
-  if (isRouteDue("RouteArticleTick", cycle)) {
-    try runScheduledJob("article-tick", () => runArticleTick())
-  }
   if (isRouteDue("RoutePerpFunding", cycle)) {
     try runScheduledJob("perp-funding-tick", () => runPerpFundingTick())
   }
-  if (isRouteDue("RouteWorldFacts", cycle)) {
-    try runScheduledJob("world-facts-tick", () => runWorldFactsTick())
+}
+
+function minuteSlowJobsForCycle(cycle: number): ReadonlyArray<ScheduledJobEntry> {
+  const jobs: ScheduledJobEntry[] = [
+    { name: "markets-recovery", run: () => runMarketsRecovery() }
+  ]
+  if (isRouteDue("RouteMarketsTick", cycle)) {
+    jobs.push({ name: "markets-tick", run: () => runMarketsTick() })
   }
+  return jobs
+}
+
+function npcJobsForCycle(cycle: number): ReadonlyArray<ScheduledJobEntry> {
+  return isRouteDue("RouteNpcTick", cycle)
+    ? [{ name: "npc-tick", run: () => runNpcTick() }]
+    : []
+}
+
+function periodicSlowJobsForCycle(cycle: number): ReadonlyArray<ScheduledJobEntry> {
+  const jobs: ScheduledJobEntry[] = []
+  if (isRouteDue("RouteOrganizationTick", cycle)) {
+    jobs.push({ name: "organization-tick", run: () => runOrganizationTick() })
+  }
+  if (isRouteDue("RouteRssRefresh", cycle)) {
+    jobs.push({ name: "rss-refresh-tick", run: () => runRssRefreshTick() })
+  }
+  if (isRouteDue("RouteArticleTick", cycle)) {
+    jobs.push({ name: "article-tick", run: () => runArticleTick() })
+  }
+  if (isRouteDue("RouteWorldFacts", cycle)) {
+    jobs.push({ name: "world-facts-tick", run: () => runWorldFactsTick() })
+  }
+  return jobs
+}
+
+export effect function runSlowScheduledTicks(
+  cycle: number,
+  options: ScheduledTickOptions = {}
+): void!!(Store | RealtimeBus) {
+  const jobs: ReadonlyArray<ScheduledJobEntry> = [
+    ...minuteSlowJobsForCycle(cycle),
+    ...npcJobsForCycle(cycle),
+    ...periodicSlowJobsForCycle(cycle)
+  ]
+  try runBoundedSlowJobs(jobs, options)
+}
+
+export function workerCronLanes(cron: string): ReadonlyArray<WorkerCronLane> {
+  switch (cron.trim()) {
+    case "* * * * *":
+      return ["fast", "minute-slow"]
+    case "*/2 * * * *":
+      return ["npc"]
+    case "*/5 * * * *":
+      return ["periodic-slow"]
+    default:
+      return ["fast", "all-slow"]
+  }
+}
+
+export effect function runWorkerCronLane(
+  lane: WorkerCronLane,
+  cycle: number,
+  options: ScheduledTickOptions = {}
+): void!!(Store | RealtimeBus) {
+  switch (lane) {
+    case "fast":
+      try runFastScheduledTicks(cycle)
+      return
+    case "minute-slow":
+      try runBoundedSlowJobs(minuteSlowJobsForCycle(cycle), options)
+      return
+    case "npc":
+      try runBoundedSlowJobs(npcJobsForCycle(cycle), options)
+      return
+    case "periodic-slow":
+      try runBoundedSlowJobs(periodicSlowJobsForCycle(cycle), options)
+      return
+    case "all-slow":
+      try runSlowScheduledTicks(cycle, options)
+      return
+    default: {
+      const _exhaustive: never = lane
+      return _exhaustive
+    }
+  }
+}
+
+export effect function runScheduledTicks(
+  cycle: number,
+  options: ScheduledTickOptions = {}
+): void!!(Store | RealtimeBus) {
+  try runFastScheduledTicks(cycle)
+  try runSlowScheduledTicks(cycle, options)
 }
 
 export effect function handleFeedRequest(

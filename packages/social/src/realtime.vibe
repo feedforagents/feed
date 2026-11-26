@@ -162,13 +162,56 @@ module web {
       }
     })
   }
+
+  /** @throws {never} */
+  export function randomIsolateId(): string {
+    return crypto.randomUUID()
+  }
 }
-import { sseResponse } from web
+import { randomIsolateId, sseResponse } from web
 
 export service RealtimeBus {
   static readonly key = "@repo/social/RealtimeBus"
   publish(event: FeedRealtimeEvent): boolean!!
   subscribe(): Stream.Stream<FeedRealtimeEvent>
+}
+
+export interface DbRealtimeBusOptions {
+  readonly isolateId?: string
+  readonly pollIntervalMs?: number
+  readonly retentionMs?: number
+}
+
+const VALID_REALTIME_EVENT_TYPES = new Set<string>([
+  "post.created",
+  "post.deleted",
+  "post.engagement",
+  "chat.message",
+  "chat.reaction",
+  "chat.invite",
+  "chat.updated",
+  "notification.created",
+  "world.tick",
+  "market.spot",
+  "market.perp",
+  "market.prediction",
+  "market.clue",
+  "market.resolved",
+  "alpha.invite",
+  "org.posted",
+  "article.published"
+])
+
+function parseRealtimeEventJson(raw: string): FeedRealtimeEvent | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== "object" || parsed === null) return undefined
+    const eventType = (parsed as { readonly type?: unknown }).type
+    if (typeof eventType !== "string" || !VALID_REALTIME_EVENT_TYPES.has(eventType)) return undefined
+    return parsed as FeedRealtimeEvent
+  } catch {
+    return undefined
+  }
 }
 
 export const realtimeBusLayer: Layer.Layer<RealtimeBus> = Layer.effect(RealtimeBus, effect {
@@ -179,6 +222,79 @@ export const realtimeBusLayer: Layer.Layer<RealtimeBus> = Layer.effect(RealtimeB
   }
   return shape
 })
+
+export function createDbBackedRealtimeBusLayer(
+  store: Store.Shape,
+  options: DbRealtimeBusOptions = {}
+): Layer.Layer<RealtimeBus> {
+  const isolateId = options.isolateId?.trim() || randomIsolateId()
+  const pollIntervalMs = Math.max(50, Math.trunc(options.pollIntervalMs ?? 1_500))
+  const retentionMs = Math.max(10_000, Math.trunc(options.retentionMs ?? 300_000))
+  return Layer.effect(RealtimeBus, effect {
+    const pubsub = try PubSub.unbounded<FeedRealtimeEvent>()
+    let publishCount = 0
+    const shape: RealtimeBus.Shape = {
+      publish: (event) => effect {
+        const localOk = try PubSub.publish(pubsub, event)
+        const now = try Clock.currentTimeMillis
+        publishCount += 1
+        const shouldPrune = publishCount % 50 === 0
+        const persisted = try exit(store.transaction(effect (tx: Tx) => {
+          try tx.query(
+            `INSERT INTO feed_realtime_events (origin_isolate, payload_json, created_at)
+             VALUES ($1, $2, $3)`,
+            [isolateId, JSON.stringify(event), now]
+          )
+          if (shouldPrune) {
+            try tx.query("DELETE FROM feed_realtime_events WHERE created_at < $1", [now - retentionMs])
+          }
+        }))
+        return localOk || Exit.isSuccess(persisted)
+      },
+      subscribe: () => {
+        const localStream = Stream.fromPubSub(pubsub)
+        const remoteStream = Stream.unwrap(effect {
+          const initialSeqRes = try exit(store.transaction(effect (tx: Tx) => {
+            const rows = try tx.query("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM feed_realtime_events")
+            return toInt(rows[0]?.max_seq)
+          }))
+          const cursorRef = try Ref.make(Exit.isSuccess(initialSeqRes) ? initialSeqRes.value : 0)
+          const batches = Stream.mapEffect(Stream.tick(`${pollIntervalMs} millis`), () => effect {
+            const lastSeq = try Ref.get(cursorRef)
+            const batchRes = try exit(store.transaction(effect (tx: Tx) =>
+              try tx.query(
+                `SELECT seq, payload_json
+                 FROM feed_realtime_events
+                 WHERE seq > $1 AND origin_isolate <> $2
+                 ORDER BY seq ASC
+                 LIMIT 100`,
+                [lastSeq, isolateId]
+              )
+            ))
+            if (!Exit.isSuccess(batchRes) || batchRes.value.length === 0) return [] as ReadonlyArray<FeedRealtimeEvent>
+            let nextSeq = lastSeq
+            const out: FeedRealtimeEvent[] = []
+            for (const row of batchRes.value) {
+              const seq = toInt(row.seq)
+              if (seq > nextSeq) nextSeq = seq
+              const raw = toText(row.payload_json)
+              if (raw === undefined) continue
+              const decoded = parseRealtimeEventJson(raw)
+              if (decoded !== undefined) out.push(decoded)
+            }
+            if (nextSeq > lastSeq) {
+              try Ref.set(cursorRef, nextSeq)
+            }
+            return out as ReadonlyArray<FeedRealtimeEvent>
+          })
+          return Stream.flatMap(batches, (items) => Stream.fromIterable(items))
+        })
+        return Stream.merge(localStream, remoteStream)
+      }
+    }
+    return shape
+  })
+}
 
 function normalizeViewerId(viewerAccountId: string | null | undefined): string | undefined {
   if (viewerAccountId === undefined || viewerAccountId === null) return undefined

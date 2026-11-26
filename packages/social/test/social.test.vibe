@@ -2,6 +2,7 @@
 import { assert, it } from "@effect/vitest"
 import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
 import {
   type FeedRealtimeEvent,
   type RealtimeBus,
@@ -10,6 +11,7 @@ import {
   blockAccount,
   canDeliverRealtimeEventToViewer,
   clearNotifications,
+  createDbBackedRealtimeBusLayer,
   createDirectChat,
   createNpcAlphaInvite,
   createPost,
@@ -1882,6 +1884,50 @@ it.effect(
       gameFoundHasUnrelated: false,
       socialFound: [contentPost.id],
       socialFoundHasUnrelated: false
+    }))
+  })
+)
+
+it.effect(
+  'db-backed RealtimeBus fans out cross-isolate events without same-isolate duplicates and createPost honors nowMs (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")',
+  () => withSocialWorld(effect {
+    const store = try Store
+    try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
+    try seedAccount("bob", "bob", "Bob Trader", 20_000, "game")
+    const customNowMs = 1_750_000_123_000
+    const busA = createDbBackedRealtimeBusLayer(store, { isolateId: "isolate-a", pollIntervalMs: 100 })
+    const busB = createDbBackedRealtimeBusLayer(store, { isolateId: "isolate-b", pollIntervalMs: 100 })
+    const remoteFiber = fork effect {
+      provide busB {
+        const events = try subscribeViewerFeedEvents("bob", store)
+        return try Stream.runHead(events)
+      }
+    }
+    const result = try effect {
+      provide busA {
+        const localEvents = try subscribeViewerFeedEvents("alice", store)
+        const localFiber = fork Stream.runHead(localEvents)
+        try TestClock.adjust("10 millis")
+        const created = try createPost({
+          authorId: "alice",
+          authorKind: "user",
+          content: "Cross-isolate SSE fanout post",
+          nowMs: customNowMs
+        })
+        const localOpt = try join localFiber
+        return { created, localOpt }
+      }
+    }
+    try TestClock.adjust("200 millis")
+    const remoteOpt = try join remoteFiber
+    try check(() => assert.deepStrictEqual({
+      createdAt: result.created.createdAt,
+      localMatch: result.localOpt._tag === "Some" && result.localOpt.value.type === "post.created" ? [result.localOpt.value.postId, result.localOpt.value.createdAt] : null,
+      remoteMatch: remoteOpt._tag === "Some" && remoteOpt.value.type === "post.created" ? [remoteOpt.value.postId, remoteOpt.value.createdAt] : null
+    }, {
+      createdAt: customNowMs,
+      localMatch: [result.created.id, customNowMs],
+      remoteMatch: [result.created.id, customNowMs]
     }))
   })
 )
