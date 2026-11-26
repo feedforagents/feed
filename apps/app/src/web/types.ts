@@ -22,6 +22,7 @@ import {
   type ToastTone,
   type TradeTicketPerpPreview,
   type TrendingItem,
+  type UiMode,
   type WalletClosedPosition,
   defaultAgentLaunchers,
   defaultSkillPrompt,
@@ -325,6 +326,10 @@ export interface AppNotification {
   readonly chatId: string | null;
   readonly inviteId: string | null;
   readonly isGameOnly: boolean;
+}
+
+export function isNotificationVisibleInMode(n: AppNotification, mode: UiMode): boolean {
+  return mode !== "SocialMode" || (!n.isGameOnly && n.item.kind !== "MarketResolved" && n.item.kind !== "PnLDigest");
 }
 
 export interface AppNotificationsPayload {
