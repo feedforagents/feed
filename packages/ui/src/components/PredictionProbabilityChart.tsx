@@ -90,6 +90,10 @@ export function PredictionProbabilityChart({
   const latest = visible[visible.length - 1];
   const yesPct = latest ? toPercent(latest.yesPrice, unit) : 50;
   const noPct = latest?.noPrice !== undefined ? toPercent(latest.noPrice, unit) : 100 - yesPct;
+  const hasVisible = visible.length > 0;
+  const yesLabel = hasVisible ? `${yesPct.toFixed(1)}%` : "—";
+  const noLabel = hasVisible ? `${noPct.toFixed(1)}%` : "—";
+  const emptyMessage = timeRange === "ALL" ? "No probability history yet." : `No probability history in the last ${timeRange}.`;
 
   const series = useMemo<readonly LightweightChartSeriesSpec[]>(() => {
     if (visible.length === 0) return [];
@@ -107,11 +111,11 @@ export function PredictionProbabilityChart({
     <div className="flex flex-wrap items-center justify-between gap-2">
       <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
         <span aria-hidden className="size-2.5 shrink-0 rounded-full bg-ok" />
-        <span className="font-mono text-sm font-semibold whitespace-nowrap text-foreground tabular-nums">YES {yesPct.toFixed(1)}%</span>
+        <span className="font-mono text-sm font-semibold whitespace-nowrap text-foreground tabular-nums">YES {yesLabel}</span>
       </div>
       <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
         <span aria-hidden className="size-2.5 shrink-0 rounded-full bg-destructive" />
-        <span className="font-mono text-sm font-semibold whitespace-nowrap text-foreground tabular-nums">NO {noPct.toFixed(1)}%</span>
+        <span className="font-mono text-sm font-semibold whitespace-nowrap text-foreground tabular-nums">NO {noLabel}</span>
       </div>
     </div>
   ) : undefined;
@@ -120,11 +124,11 @@ export function PredictionProbabilityChart({
     <div className="flex items-center justify-center gap-6 text-xs text-muted-foreground">
       <div className="flex items-center gap-2">
         <span aria-hidden className="h-2.5 w-4 rounded-sm bg-ok/40" />
-        <span className="font-mono tabular-nums">YES {yesPct.toFixed(1)}%</span>
+        <span className="font-mono tabular-nums">YES {yesLabel}</span>
       </div>
       <div className="flex items-center gap-2">
         <span aria-hidden className="h-2.5 w-4 rounded-sm bg-destructive/40" />
-        <span className="font-mono tabular-nums">NO {noPct.toFixed(1)}%</span>
+        <span className="font-mono tabular-nums">NO {noLabel}</span>
       </div>
     </div>
   ) : undefined;
@@ -132,7 +136,7 @@ export function PredictionProbabilityChart({
   return (
     <LightweightChartBase
       data-market-id={marketId}
-      ariaLabel={`Prediction probability chart: YES ${yesPct.toFixed(1)}%, NO ${noPct.toFixed(1)}%`}
+      ariaLabel={`Prediction probability chart: YES ${yesLabel}, NO ${noLabel}`}
       series={series}
       timeRange={showHeader && onTimeRangeChange ? timeRange : undefined}
       onTimeRangeChange={showHeader ? onTimeRangeChange : undefined}
@@ -148,7 +152,7 @@ export function PredictionProbabilityChart({
       fillHeight={fillHeight}
       loading={loading}
       error={error}
-      emptyMessage="No probability history yet."
+      emptyMessage={emptyMessage}
       className={cn(className)}
       {...props}
     />
