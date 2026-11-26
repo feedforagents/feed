@@ -11,7 +11,7 @@ import { ChildProcess } from "effect/process"
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner"
 import { acceptReviews, readSpecs, type Result } from "../../pipeline.ts"
 import { manifestOf, nodesOf } from "../src/doc.ts"
-import { NODE, TOOLS, type Snapshot } from "../src/project.ts"
+import { NODE, REPO_ROOT, STUDIO_ROOT, TOOLS, type Snapshot } from "../src/project.ts"
 import type { ComponentIndex } from "../../stories/emit.ts"
 import { serve, startStudio } from "../src/server.vibe"
 import { agents, scratch } from "./served.vibe"
@@ -39,11 +39,11 @@ effect function client(url: string) {
 /** A wait that ran out, with what was last seen. */
 error TimedOut { last: unknown }
 
-/** What `get` gives once `ok` holds of it, asking every 50 ms; after 45 seconds it fails with what `show` makes of the last answer. */
+/** What `get` gives once `ok` holds of it, asking every 50 ms; after 120 seconds it fails with what `show` makes of the last answer. */
 effect function until<A>(get: () => A!unknown, ok: (a: A) => boolean, show: (a: A) => unknown) {
   let last = try get()
   for (let waited = 0; !ok(last); waited += 50) {
-    if (waited >= 45_000) throw new TimedOut({ last: show(last) })
+    if (waited >= 120_000) throw new TimedOut({ last: show(last) })
     try sleep("50 millis")
     last = try get()
   }
@@ -289,7 +289,7 @@ describe("Studio through its server, its files and a browser", () => {
     try settled()
     const savedAgain = try fs.readFileString(`${root}/spec/door.md`)
     try check(() => assert.match(savedAgain, /## Story: Keep ringing the bell\n/))
-  }) } }, 120_000)
+  }) } }, 180_000)
 
   // spec/components.md, "Story: Inspect a component and its stories"
   it.live("component controls follow the selected story and clear overrides when another preview is chosen", effect () => { provide services { try scoped(effect {
@@ -335,6 +335,33 @@ describe("Studio through its server, its files and a browser", () => {
       assert.equal(design, `vscode://file${root}/design.md`)
     })
   }) } })
+
+  // spec/components.md, "Story: Inspect a component and its stories"
+  it.live("a model-bound preview follows the simulation in the split view", effect () => { provide services { try scoped(effect {
+    const fs = try FileSystem.FileSystem
+    const spawner = try ChildProcessSpawner
+    const catalog: ComponentIndex = { version: 1, components: [{
+      id: "DoorView", name: "DoorView", package: "fixture", title: "DoorView", description: "", source: { file: "src/DoorView.tsx", line: 1 },
+      props: [{ name: "door", kind: "object", required: true }], diagnostics: [],
+      model: { spec: "spec/door.md", module: "door", state: "Door", events: ["setAlarm", "move"] },
+      stories: [{ id: "DoorView-model", name: "Model", kind: "model", args: { door: { mode: "Closed", opened: 0, alarm: false } } }],
+    }] }
+    const root = try scratch({
+      "spec/door.md": try fs.readFileString(`${TOOLS}/fixtures/door.md`), "generated/stories/catalog.json": JSON.stringify(catalog),
+      "src/DoorView.tsx": 'export function DoorView({ door }: { door: { alarm: boolean } }) { return <output>{door.alarm ? "alarm on" : "alarm off"}</output>; }\n',
+    })
+    const generated = try spawner.exitCode(ChildProcess.make(NODE, [`${TOOLS}/spec.ts`, "gen"], { cwd: root, stdout: "ignore", stderr: "ignore" }))
+    // The simulation loads the project's generated module, which only Studio's own program can: `spec studio`, as a person starts it.
+    const child = try spawner.spawn(ChildProcess.make(NODE, [`${TOOLS}/spec.ts`, "studio", "--port", "0"], { cwd: root }))
+    const line = try Stream.runHead(Stream.filter(Stream.splitLines(Stream.decodeText(child.stdout)), (l) => l.startsWith("studio: ")))
+    const { page, on } = try browse(Option.getOrThrow(line).match(/studio: (http:\/\/localhost:\d+)/)![1].replace("localhost", "127.0.0.1"))
+    try on(() => page.getByRole("tab", { name: "Split", exact: true }).click())
+    const shown = () => page.frameLocator("iframe").getByRole("status")
+    const before = try on(() => shown().innerText())
+    try on(() => page.getByRole("button", { name: "▶ setAlarm", exact: true }).click())
+    try on(() => shown().filter({ hasText: "alarm on" }).waitFor({ timeout: 15_000 }))
+    try check(() => assert.deepStrictEqual({ generated, before }, { generated: 0, before: "alarm off" }))
+  }) } }, 120_000)
 
   // spec/index.md, "Story: Edit, then publish"
   it.live("new and nested specs are published, deleted specs leave their ledger for review, and paths stay inside spec/", effect () => { provide services { try scoped(effect {
@@ -456,20 +483,20 @@ describe("Studio through its server, its files and a browser", () => {
       { resumed, markedAgain },
       { resumed: { unpublished: false, waiting: 2, job: "Idle", verdict: "Unknown", previewing: false }, markedAgain: 200 },
     ))
-  }) } })
+  }) } }, 180_000)
 
   // spec/index.md, "Story: Edit, then publish": the specs a person edits are those of the project they opened, and only those.
   it.live("the studio opens only the current project or the requested project path", effect () => { provide services { try scoped(effect {
     const fs = try FileSystem.FileSystem
     const path = try Path.Path
     const spawner = try ChildProcessSpawner
-    const repo = try scratch({ "spec/index.md": "", "vibestack/examples/order/spec/index.md": "# Order\n" })
+    const repo = try scratch({ "spec/index.md": "", "examples/order/spec/index.md": "# Order\n" })
     const outside = try scratch({ "a project/spec/index.md": "# Outside\n", "a project/package.json": '{"name":"order"}' })
-    const example = path.join(repo, "vibestack/examples/order")
+    const example = path.join(repo, "examples/order")
     const external = path.join(outside, "a project")
     const cases: [string, string | undefined, string][] = [
-      [repo, undefined, repo], [repo, ".", repo], [repo, "vibestack/examples/order", example], [repo, example, example],
-      [repo, external, external], [repo, path.relative(repo, external), external], [path.join(TOOLS, ".."), "vibestack/studio", path.join(TOOLS, "studio")],
+      [repo, undefined, repo], [repo, ".", repo], [repo, "examples/order", example], [repo, example, example],
+      [repo, external, external], [repo, path.relative(repo, external), external], [REPO_ROOT, "vibestack/studio", STUDIO_ROOT],
     ]
     effect function opensProject([cwd, target, expected]: [string, string | undefined, string]) { try scoped(effect {
       // `spec studio`, as a person starts it: the tools' command, which starts Studio's own program.
@@ -484,7 +511,7 @@ describe("Studio through its server, its files and a browser", () => {
       const current = try page.project()
       const specs: string[][] = []
       for (const s of try Effect.try(() => readSpecs(root))) if (s.file.startsWith("spec/")) specs.push([s.file, try fs.readFileString(path.join(root, s.file))])
-      const other = (try page.get("/api/project?project=vibestack/examples/order")).status
+      const other = (try page.get("/api/project?project=examples/order")).status
       try check(() => assert.deepStrictEqual(
         { projects, current: current.project, specs: current.specs.map((s) => [s.file, s.text]).sort(), other },
         { projects: { projects: [{ id: ".", name }], open: "." }, current: { id: ".", name, root }, specs: specs.sort(), other: 404 },

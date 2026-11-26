@@ -1,4 +1,4 @@
-// What Studio reads of a project, through the tools' own synchronous API (../../pipeline.ts, ../../parse.ts), and the
+// What Studio reads of a project, through the tools' own synchronous API, and the
 // Node edges Effect has no service for. Everything that runs, writes or serves is ./server.vibe's.
 // README, "Studio".
 import fs from "node:fs";
@@ -6,29 +6,70 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { trusted } from "vibelang-runtime";
-import { acceptable, type Result } from "../../pipeline.ts";
+import type { Result } from "../../pipeline.ts";
 import { isStd, parseSpec, readSpecs, specFiles, specName } from "../../parse.ts";
 import { citationLookup, ledgerFile, pending, pendingContracts, pendingKey, pendingSpecs, type Lock, type Pending, type ReviewSpec } from "../../review.ts";
-import { appScript as scriptOfApp, filesUnder, packageScripts, projectRoot, servedAt, short } from "../../util.ts";
+import { appScript as scriptOfApp, citations, filesUnder, packageScripts, projectRoot, servedAt, short } from "../../util.ts";
 import type { Session, Verdict } from "../gen/index.ts";
 import type { Outline } from "../gen/outline.ts";
 import { manifestOf, nodesOf, type Ids, type Manifest } from "./doc.ts";
+import { graphOfSpec, simulateModule, type SpecModelGraph } from "./graph.ts";
 import { outlineOf, specOrder } from "./markdown.ts";
+import { closePreview, ensurePreview, type PreviewInfo } from "./preview.ts";
 import type { ComponentIndex } from "../../stories/emit.ts";
 
 const EXT = path.extname(import.meta.filename);
-/** The tools: vibestack/ from source, dist/ when built. */
-export const TOOLS = path.join(import.meta.dirname, "..", "..");
-/** The `spec` command, as source or as built. */
-export const SPEC = path.join(TOOLS, `spec${EXT}`);
-/** The page, as built by ../vite.config.ts. */
-export const PUBLIC = path.join(import.meta.dirname, "..", "dist", "page");
-/** This Node, to run the `spec` command with. */
+const BUNDLED = EXT !== ".ts";
+/** The studio package directory (vibestack/studio/ from source, or package root when bundled). */
+export const STUDIO_ROOT = path.resolve(import.meta.dirname, "..");
+/** The monorepo root directory, when developing inside the monorepo. */
+export const REPO_ROOT = path.resolve(STUDIO_ROOT, "..", "..");
+/** The monorepo core toolchain source directory, when developing inside the monorepo. */
+export const TOOLS = path.resolve(STUDIO_ROOT, "..");
+/** The page, as built by ../vite.config.ts: dist/page/ beside dist/server.mjs when bundled, or ../dist/page/ from src/. */
+export const PUBLIC = BUNDLED ? path.join(import.meta.dirname, "page") : path.join(STUDIO_ROOT, "dist", "page");
+/** This Node, to run local scripts with. */
 export const NODE = process.execPath;
+
+const SPEC_BIN = process.platform === "win32" ? "spec.cmd" : "spec";
+
+/**
+ * Resolve the target project's `spec` command in priority order:
+ * 1. Target project's `node_modules/.bin/spec`
+ * 2. Target project's vendored `vibestack/spec.ts`
+ * 3. Monorepo sibling `packages/vibestack/{dist/spec.js,src/spec.ts}`
+ * 4. Fallback `pnpm dlx vibestack`
+ * @throws {never}
+ */
+export function specCommand(root: string, args: string[]): [string, string[]] {
+  const localBin = path.join(root, "node_modules", ".bin", SPEC_BIN);
+  if (fs.existsSync(localBin)) return [localBin, args];
+
+  const vendored = path.join(root, "vibestack", "spec.ts");
+  if (fs.existsSync(vendored)) return [NODE, [vendored, ...args]];
+
+  const siblingCandidates = BUNDLED
+    ? [
+        path.join(TOOLS, "spec.js"),
+        path.join(TOOLS, "spec.ts"),
+        path.join(root, "packages", "vibestack", "dist", "spec.js"),
+        path.join(root, "packages", "vibestack", "src", "spec.ts"),
+      ]
+    : [
+        path.join(TOOLS, "spec.ts"),
+        path.join(TOOLS, "spec.js"),
+        path.join(root, "packages", "vibestack", "src", "spec.ts"),
+        path.join(root, "packages", "vibestack", "dist", "spec.js"),
+      ];
+  const sibling = siblingCandidates.find((file) => fs.existsSync(file));
+  if (sibling) return [NODE, [sibling, ...args]];
+
+  return ["pnpm", ["dlx", "vibestack", ...args]];
+}
 
 /** @throws {never} */
 export const createServer = () => http.createServer();
-/** The directory and arguments `spec studio` was started with (../../spec.ts). @throws {never} */
+/** The directory and arguments Studio was started with. @throws {never} */
 export const commandLine = () => ({ cwd: process.cwd(), args: process.argv.slice(2) });
 /** @throws {never} */
 export const interactive = () => process.stdout.isTTY === true;
@@ -93,11 +134,14 @@ export function specStamp(root: string): string | undefined {
   }
 }
 
-/** The command a person or agent runs in a project to check it: its own script if it can, else the tools of this repository. A trusted call. */
+/** The command a person or agent runs in a project to check it: its own script if it can, else the delegated spec command. A trusted call. */
 export const checkCommand = trusted(function checkCommand(root: string): string {
   const scripts = packageScripts(root);
-  const hasSpecBin = fs.existsSync(path.join(root, "node_modules/.bin/spec")) || !scripts.check?.startsWith("spec ");
-  return scripts.check && hasSpecBin ? "pnpm check" : `node ${path.relative(root, SPEC)} check`;
+  const hasSpecBin = fs.existsSync(path.join(root, "node_modules", ".bin", SPEC_BIN)) || !scripts.check?.startsWith("spec ");
+  if (scripts.check && hasSpecBin) return "pnpm check";
+  const [program, args] = specCommand(root, ["check"]);
+  const shown = program === NODE ? "node" : program;
+  return [shown, ...args.map((arg) => (path.isAbsolute(arg) ? path.relative(root, arg) : arg))].join(" ");
 }, [Error]);
 
 /** The sync skill, as a path from the project root: its own copy, or the nearest one above it. @throws {never} */
@@ -109,7 +153,7 @@ export function skillPath(root: string): string {
   }
 }
 
-/** The review ledger (../../review.ts, `ledgerFile`) and Studio's state, as written: they belong to the tools, not the sync agent. A trusted call. */
+/** The review ledger (`ledgerFile`) and Studio's state, as written: they belong to the tools, not the sync agent. A trusted call. */
 export const ownedFiles = trusted(function ownedFiles(root: string): Record<string, string> {
   const ledger = path.relative(root, ledgerFile(root));
   return Object.fromEntries([...(fs.existsSync(path.join(root, ledger)) ? [ledger] : []), ...filesUnder(root, ".studio")]
@@ -121,12 +165,15 @@ export const ownedFiles = trusted(function ownedFiles(root: string): Record<stri
  * passed, every story has rules and every rule has Quint. @throws {never}
  */
 export function verdictOf(results: Result[]): Verdict {
-  return !results.some((r) => !r.ok) ? "Green" : acceptable(results) ? "Reviewable" : "Failing";
+  const failed = results.filter((r) => !r.ok);
+  if (!failed.length) return "Green";
+  const canAccept = failed.every((r) => r.stage === "review" && !/story has no rules|not formalized/.test(r.detail));
+  return canAccept ? "Reviewable" : "Failing";
 }
 
 /** One spec as the page shows it: its text, the hash a publish names it by, and its outline (spec/outline.md). */
 export interface SpecView { file: string; module: string; hash: string; text: string; outline: Outline }
-/** A story, rule, document, removed spec or contract of verified code (../../review.ts, `pendingContracts`) waiting for sign-off, with what there is to read of it. */
+/** A story, rule, document, removed spec or contract of verified code (`pendingContracts`) waiting for sign-off, with what there is to read of it. */
 export interface ReviewItem { where: string; file?: string; key?: string; status: string; prose?: string; quint?: string }
 const reviewItem = (p: Pending, file?: string): ReviewItem => ({
   where: p.where, file, key: file && pendingKey(p), status: p.status + (p.note ?? ""),
@@ -138,16 +185,31 @@ export interface ProjectTree {
   parsed?: { texts: Record<string, string>; fileCount: number; specs: ReviewSpec[] };
 }
 
+function safePendingContracts(root: string): Pending[] {
+  try {
+    return pendingContracts(root);
+  } catch (e) {
+    const code = e instanceof Error && "code" in e ? String((e as { code: unknown }).code) : "";
+    if (code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND") return [];
+    throw e;
+  }
+}
+
 /**
- * The specs as the page shows them, and everything `accept` would record (../../pipeline.ts, the `review` stage), or the
+ * The specs as the page shows them, and everything `accept` would record (the `review` stage), or the
  * `problem` that keeps the specs from being read as one tree. A trusted call.
  */
-export const readTree = trusted(function readTree(tree: ProjectTree): Pick<Snapshot, "specs" | "review" | "problem"> {
+export const readTree = trusted(function readTree(tree: ProjectTree): Pick<Snapshot, "specs" | "review" | "problem" | "graphs"> {
   const { root } = tree;
   const texts = specTexts(root);
   const entries = Object.entries(texts);
   const specs = entries.sort(([a], [b]) => specOrder(a, b))
     .map(([file, text]) => ({ file, module: specName(file), hash: short(text), text, outline: outlineOf(file, text) }));
+  const components = (() => { try { return componentsOf(root); } catch { return undefined; } })();
+  const allCitations = (() => { try { return citations(root); } catch { return []; } })();
+  const graphs: Record<string, SpecModelGraph> = Object.fromEntries(
+    specs.map((s) => [s.file, graphOfSpec(s.file, s.text, components, allCitations)]),
+  );
   try {
     const previous = tree.parsed;
     let read: ReviewSpec[];
@@ -162,27 +224,61 @@ export const readTree = trusted(function readTree(tree: ProjectTree): Pick<Snaps
     }
     const locks = new Map<string, Lock>();
     const citedAt = citationLookup(root);
-    return { specs, review: [...read.flatMap((s) => pending(root, s, read, locks, citedAt).map((p) => reviewItem(p, s.file))), ...[...pendingSpecs(root, read), ...pendingContracts(root)].map((p) => reviewItem(p))] };
-  } catch (e) { return { specs, review: [], problem: (e as Error).message }; }
+    return { specs, graphs, review: [...read.flatMap((s) => pending(root, s, read, locks, citedAt).map((p) => reviewItem(p, s.file))), ...[...pendingSpecs(root, read), ...safePendingContracts(root)].map((p) => reviewItem(p))] };
+  } catch (e) { return { specs, graphs, review: [], problem: (e as Error).message }; }
 }, [Error]);
+
+/** Build a live SpecModelGraph for an unsaved spec draft with project component and test backlinks. A trusted call. */
+export const graphOfDraft = trusted(function graphOfDraft(root: string, file: string, text: string): SpecModelGraph {
+  const components = (() => { try { return componentsOf(root); } catch { return undefined; } })();
+  const allCitations = (() => { try { return citations(root); } catch { return []; } })();
+  return graphOfSpec(file, text, components, allCitations);
+}, [Error]);
+
+/** Start or reuse the embedded Vite preview server for `root`, or return `{ url: null, mode: "none" }`. */
+export async function studioPreview(root: string): Promise<PreviewInfo> {
+  let components: ComponentIndex | undefined;
+  try { components = componentsOf(root); } catch { components = undefined; }
+  return ensurePreview(root, components);
+}
+
+export { closePreview, simulateModule };
 
 let pageBuild: Promise<unknown> | undefined;
 
+function resolveWorkspaceInput(specifier: string): string | undefined {
+  try {
+    return fileURLToPath(import.meta.resolve(specifier));
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The page, built: from a source checkout, Vite builds it again when anything it is built from is newer than the
- * build; a packaged studio ships it built.
+ * build; a packaged studio ships it built and skips rebuilding.
  */
 export async function buildPage(): Promise<void> {
-  if (EXT !== ".ts") return;
+  if (BUNDLED) return;
   while (pageBuild) await pageBuild;
-  const studio = path.join(import.meta.dirname, "..");
+  const studio = STUDIO_ROOT;
   const built = fs.statSync(path.join(PUBLIC, "index.html"), { throwIfNoEntry: false })?.mtimeMs ?? 0;
   const newest = (dir: string): number => fs.readdirSync(dir, { withFileTypes: true }).reduce((n, e) => e.name === "node_modules" ? n
     : Math.max(n, e.isDirectory() ? newest(path.join(dir, e.name)) : fs.statSync(path.join(dir, e.name)).mtimeMs), 0);
-  const inputs = [path.join(studio, "src"), path.join(studio, "gen"), path.join(studio, "vite.config.ts"), path.join(TOOLS, "design"),
-    path.dirname(fileURLToPath(import.meta.resolve("@repo/ui"))), fileURLToPath(import.meta.resolve("@repo/design-system/tokens.json"))];
-  if (inputs.every((f) => (fs.statSync(f).isDirectory() ? newest(f) : fs.statSync(f).mtimeMs) < built)) return;
-  pageBuild = import("vite").then(({ build }) => build({ configFile: path.join(studio, "vite.config.ts") }));
+  const uiEntry = resolveWorkspaceInput("@repo/ui");
+  const tokensEntry = resolveWorkspaceInput("@repo/design-system/tokens.json");
+  const inputs = [
+    path.join(studio, "src"),
+    path.join(studio, "gen"),
+    path.join(studio, "vite.config.ts"),
+    path.join(TOOLS, "design"),
+    ...(uiEntry ? [path.dirname(uiEntry)] : []),
+    ...(tokensEntry ? [tokensEntry] : []),
+  ].filter((f) => fs.existsSync(f));
+  if (built > 0 && inputs.every((f) => (fs.statSync(f).isDirectory() ? newest(f) : fs.statSync(f).mtimeMs) < built)) return;
+  const viteSpecifier = "vite";
+  pageBuild = (import(viteSpecifier) as Promise<{ build(config: { configFile: string }): Promise<unknown> }>)
+    .then(({ build }) => build({ configFile: path.join(studio, "vite.config.ts") }));
   try {
     await pageBuild;
   } finally {
@@ -191,7 +287,7 @@ export async function buildPage(): Promise<void> {
 }
 
 /**
- * The component catalogs `vibestack/stories/cli.ts gen` wrote in the project and in its workspace packages, as one,
+ * The component catalogs the story generator wrote in the project and in its workspace packages, as one,
  * each source path from the project root; undefined when there are none. A trusted call.
  */
 export const componentsOf = trusted(function componentsOf(root: string): ComponentIndex | undefined {
@@ -206,12 +302,13 @@ export const componentsOf = trusted(function componentsOf(root: string): Compone
     // A component catalogued both in the project and in its package is shown once.
     components: [...new Map(found.flatMap(({ dir, index }) => index.components.map((c) => {
       const file = path.posix.join(dir, c.source.file);
-      // Its model and design documents are its package's own, or else the root's (../../util.ts, `owner`).
+      // Its model and design documents are its package's own, or else the root's (`owner`).
       const here = (doc: string) => (fs.existsSync(path.join(root, dir, doc.replace(/#.*$/, ""))) ? path.posix.join(dir, doc) : doc);
       return [`${file}#${c.name}`, {
         ...c, source: { ...c.source, file },
         ...(c.model && { model: { ...c.model, spec: here(c.model.spec) } }),
         ...(c.design && { design: c.design.map(here) }),
+        ...(c.citations && { citations: c.citations.map((cit) => ({ ...cit, spec: here(cit.spec) })) }),
       }] as const;
     }))).values()],
   };
@@ -227,6 +324,7 @@ export interface Snapshot {
   session: Session;
   heard: boolean;
   specs: SpecView[];
+  graphs: Record<string, SpecModelGraph>;
   review: ReviewItem[];
   problem?: string;
   manifest?: Manifest;

@@ -1233,11 +1233,11 @@ lemma sendDm_ensures(s: MessagingState, recipientId: string, textLen: int, by_: 
   ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> alwaysMembersValidAndUnique(sendDm(s, recipientId, textLen, by_)))
   ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> alwaysMessagesValid(sendDm(s, recipientId, textLen, by_)))
   ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> alwaysReactionsValidAndUnique(sendDm(s, recipientId, textLen, by_)))
-  ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> alwaysBlocksValid(sendDm(s, recipientId, textLen, by_)))
   ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(sendDm(s, recipientId, textLen, by_)))
+  ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> alwaysBlocksValid(sendDm(s, recipientId, textLen, by_)))
+  ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> stepMessageOnlyFromActiveMember(s, "sendDm", sendDm(s, recipientId, textLen, by_)))
   ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "sendDm", sendDm(s, recipientId, textLen, by_)))
   ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "sendDm", sendDm(s, recipientId, textLen, by_)))
-  ensures (inv(s) ==> canSendDm(s, recipientId, textLen, by_) ==> stepMessageOnlyFromActiveMember(s, "sendDm", sendDm(s, recipientId, textLen, by_)))
 {
   hide *;
   if inv(s) && canSendDm(s, recipientId, textLen, by_) {
@@ -1304,11 +1304,11 @@ lemma sendMessage_ensures(s: MessagingState, chatId: int, textLen: int, by_: str
   ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> alwaysMembersValidAndUnique(sendMessage(s, chatId, textLen, by_)))
   ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> alwaysMessagesValid(sendMessage(s, chatId, textLen, by_)))
   ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> alwaysReactionsValidAndUnique(sendMessage(s, chatId, textLen, by_)))
-  ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> alwaysBlocksValid(sendMessage(s, chatId, textLen, by_)))
   ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(sendMessage(s, chatId, textLen, by_)))
+  ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> alwaysBlocksValid(sendMessage(s, chatId, textLen, by_)))
+  ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> stepMessageOnlyFromActiveMember(s, "sendMessage", sendMessage(s, chatId, textLen, by_)))
   ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "sendMessage", sendMessage(s, chatId, textLen, by_)))
   ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "sendMessage", sendMessage(s, chatId, textLen, by_)))
-  ensures (inv(s) ==> canSendMessage(s, chatId, textLen, by_) ==> stepMessageOnlyFromActiveMember(s, "sendMessage", sendMessage(s, chatId, textLen, by_)))
 {
   hide *;
   if inv(s) && canSendMessage(s, chatId, textLen, by_) {
@@ -1344,11 +1344,11 @@ lemma addReaction_ensures(s: MessagingState, messageId: int, emoji: string, by_:
   ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> alwaysMembersValidAndUnique(addReaction(s, messageId, emoji, by_)))
   ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> alwaysMessagesValid(addReaction(s, messageId, emoji, by_)))
   ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> alwaysReactionsValidAndUnique(addReaction(s, messageId, emoji, by_)))
-  ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> alwaysBlocksValid(addReaction(s, messageId, emoji, by_)))
   ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(addReaction(s, messageId, emoji, by_)))
+  ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> alwaysBlocksValid(addReaction(s, messageId, emoji, by_)))
+  ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> stepMessageOnlyFromActiveMember(s, "addReaction", addReaction(s, messageId, emoji, by_)))
   ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "addReaction", addReaction(s, messageId, emoji, by_)))
   ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "addReaction", addReaction(s, messageId, emoji, by_)))
-  ensures (inv(s) ==> canAddReaction(s, messageId, emoji, by_) ==> stepMessageOnlyFromActiveMember(s, "addReaction", addReaction(s, messageId, emoji, by_)))
 {
   hide *;
   if inv(s) && canAddReaction(s, messageId, emoji, by_) {
@@ -1383,11 +1383,11 @@ lemma readChat_ensures(s: MessagingState, chatId: int, by_: string)
   ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> alwaysMembersValidAndUnique(readChat(s, chatId, by_)))
   ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> alwaysMessagesValid(readChat(s, chatId, by_)))
   ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> alwaysReactionsValidAndUnique(readChat(s, chatId, by_)))
-  ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> alwaysBlocksValid(readChat(s, chatId, by_)))
   ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(readChat(s, chatId, by_)))
+  ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> alwaysBlocksValid(readChat(s, chatId, by_)))
+  ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> stepMessageOnlyFromActiveMember(s, "readChat", readChat(s, chatId, by_)))
   ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "readChat", readChat(s, chatId, by_)))
   ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "readChat", readChat(s, chatId, by_)))
-  ensures (inv(s) ==> canReadChat(s, chatId, by_) ==> stepMessageOnlyFromActiveMember(s, "readChat", readChat(s, chatId, by_)))
 {
   hide *;
   if inv(s) && canReadChat(s, chatId, by_) {
@@ -1420,11 +1420,11 @@ lemma createGroup_ensures(s: MessagingState, chatType: ChatType, by_: string)
   ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> alwaysMembersValidAndUnique(createGroup(s, chatType, by_)))
   ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> alwaysMessagesValid(createGroup(s, chatType, by_)))
   ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> alwaysReactionsValidAndUnique(createGroup(s, chatType, by_)))
-  ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> alwaysBlocksValid(createGroup(s, chatType, by_)))
   ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(createGroup(s, chatType, by_)))
+  ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> alwaysBlocksValid(createGroup(s, chatType, by_)))
+  ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> stepMessageOnlyFromActiveMember(s, "createGroup", createGroup(s, chatType, by_)))
   ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "createGroup", createGroup(s, chatType, by_)))
   ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "createGroup", createGroup(s, chatType, by_)))
-  ensures (inv(s) ==> canCreateGroup(s, chatType, by_) ==> stepMessageOnlyFromActiveMember(s, "createGroup", createGroup(s, chatType, by_)))
 {
   hide *;
   if inv(s) && canCreateGroup(s, chatType, by_) {
@@ -1456,11 +1456,11 @@ lemma inviteMember_ensures(s: MessagingState, chatId: int, targetId: string, by_
   ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> alwaysMembersValidAndUnique(inviteMember(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> alwaysMessagesValid(inviteMember(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> alwaysReactionsValidAndUnique(inviteMember(s, chatId, targetId, by_)))
-  ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> alwaysBlocksValid(inviteMember(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(inviteMember(s, chatId, targetId, by_)))
+  ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> alwaysBlocksValid(inviteMember(s, chatId, targetId, by_)))
+  ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "inviteMember", inviteMember(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "inviteMember", inviteMember(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "inviteMember", inviteMember(s, chatId, targetId, by_)))
-  ensures (inv(s) ==> canInviteMember(s, chatId, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "inviteMember", inviteMember(s, chatId, targetId, by_)))
 {
   hide *;
   if inv(s) && canInviteMember(s, chatId, targetId, by_) {
@@ -1496,11 +1496,11 @@ lemma inviteAlphaGroup_ensures(s: MessagingState, chatId: int, targetId: string,
   ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> alwaysMembersValidAndUnique(inviteAlphaGroup(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> alwaysMessagesValid(inviteAlphaGroup(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> alwaysReactionsValidAndUnique(inviteAlphaGroup(s, chatId, targetId, by_)))
-  ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> alwaysBlocksValid(inviteAlphaGroup(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(inviteAlphaGroup(s, chatId, targetId, by_)))
+  ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> alwaysBlocksValid(inviteAlphaGroup(s, chatId, targetId, by_)))
+  ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "inviteAlphaGroup", inviteAlphaGroup(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "inviteAlphaGroup", inviteAlphaGroup(s, chatId, targetId, by_)))
   ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "inviteAlphaGroup", inviteAlphaGroup(s, chatId, targetId, by_)))
-  ensures (inv(s) ==> canInviteAlphaGroup(s, chatId, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "inviteAlphaGroup", inviteAlphaGroup(s, chatId, targetId, by_)))
 {
   hide *;
   if inv(s) && canInviteAlphaGroup(s, chatId, targetId, by_) {
@@ -1535,11 +1535,11 @@ lemma respondInvite_ensures(s: MessagingState, inviteId: int, response: InviteRe
   ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> alwaysMembersValidAndUnique(respondInvite(s, inviteId, response, by_)))
   ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> alwaysMessagesValid(respondInvite(s, inviteId, response, by_)))
   ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> alwaysReactionsValidAndUnique(respondInvite(s, inviteId, response, by_)))
-  ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> alwaysBlocksValid(respondInvite(s, inviteId, response, by_)))
   ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(respondInvite(s, inviteId, response, by_)))
+  ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> alwaysBlocksValid(respondInvite(s, inviteId, response, by_)))
+  ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> stepMessageOnlyFromActiveMember(s, "respondInvite", respondInvite(s, inviteId, response, by_)))
   ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "respondInvite", respondInvite(s, inviteId, response, by_)))
   ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "respondInvite", respondInvite(s, inviteId, response, by_)))
-  ensures (inv(s) ==> canRespondInvite(s, inviteId, response, by_) ==> stepMessageOnlyFromActiveMember(s, "respondInvite", respondInvite(s, inviteId, response, by_)))
 {
   hide *;
   if inv(s) && canRespondInvite(s, inviteId, response, by_) {
@@ -1591,11 +1591,11 @@ lemma leaveGroup_ensures(s: MessagingState, chatId: int, by_: string)
   ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> alwaysMembersValidAndUnique(leaveGroup(s, chatId, by_)))
   ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> alwaysMessagesValid(leaveGroup(s, chatId, by_)))
   ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> alwaysReactionsValidAndUnique(leaveGroup(s, chatId, by_)))
-  ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> alwaysBlocksValid(leaveGroup(s, chatId, by_)))
   ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(leaveGroup(s, chatId, by_)))
+  ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> alwaysBlocksValid(leaveGroup(s, chatId, by_)))
+  ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> stepMessageOnlyFromActiveMember(s, "leaveGroup", leaveGroup(s, chatId, by_)))
   ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "leaveGroup", leaveGroup(s, chatId, by_)))
   ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "leaveGroup", leaveGroup(s, chatId, by_)))
-  ensures (inv(s) ==> canLeaveGroup(s, chatId, by_) ==> stepMessageOnlyFromActiveMember(s, "leaveGroup", leaveGroup(s, chatId, by_)))
 {
   hide *;
   if inv(s) && canLeaveGroup(s, chatId, by_) {
@@ -1628,11 +1628,11 @@ lemma blockUser_ensures(s: MessagingState, targetId: string, by_: string)
   ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> alwaysMembersValidAndUnique(blockUser(s, targetId, by_)))
   ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> alwaysMessagesValid(blockUser(s, targetId, by_)))
   ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> alwaysReactionsValidAndUnique(blockUser(s, targetId, by_)))
-  ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> alwaysBlocksValid(blockUser(s, targetId, by_)))
   ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(blockUser(s, targetId, by_)))
+  ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> alwaysBlocksValid(blockUser(s, targetId, by_)))
+  ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "blockUser", blockUser(s, targetId, by_)))
   ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "blockUser", blockUser(s, targetId, by_)))
   ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "blockUser", blockUser(s, targetId, by_)))
-  ensures (inv(s) ==> canBlockUser(s, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "blockUser", blockUser(s, targetId, by_)))
 {
   hide *;
   if inv(s) && canBlockUser(s, targetId, by_) {
@@ -1667,11 +1667,11 @@ lemma unblockUser_ensures(s: MessagingState, targetId: string, by_: string)
   ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> alwaysMembersValidAndUnique(unblockUser(s, targetId, by_)))
   ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> alwaysMessagesValid(unblockUser(s, targetId, by_)))
   ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> alwaysReactionsValidAndUnique(unblockUser(s, targetId, by_)))
-  ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> alwaysBlocksValid(unblockUser(s, targetId, by_)))
   ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> alwaysPendingInvitesValidAndDisjointFromActiveMembers(unblockUser(s, targetId, by_)))
+  ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> alwaysBlocksValid(unblockUser(s, targetId, by_)))
+  ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "unblockUser", unblockUser(s, targetId, by_)))
   ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> stepDeclinedInviteDoesNotAddMember(s, "unblockUser", unblockUser(s, targetId, by_)))
   ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> stepAcceptedInviteAddsMemberAndRemovesPending(s, "unblockUser", unblockUser(s, targetId, by_)))
-  ensures (inv(s) ==> canUnblockUser(s, targetId, by_) ==> stepMessageOnlyFromActiveMember(s, "unblockUser", unblockUser(s, targetId, by_)))
 {
   hide *;
   if inv(s) && canUnblockUser(s, targetId, by_) {

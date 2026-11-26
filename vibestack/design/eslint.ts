@@ -10,12 +10,12 @@ const anywhere = new RegExp(`^${hex}$|(?<![\\w&[/-])${functional}`, "i")
 // A style object's property that holds a color, wherever the object is declared.
 const colored = /color$|^(?:background|border|outline|boxShadow|textShadow|textDecoration|columnRule|fill|stroke)/i
 
-interface Node { type: string; parent?: Node; name?: { name?: string }; key?: { name?: string } }
-const attribute = (node: Node | undefined): string | undefined => node && (node.type === "JSXAttribute" ? node.name?.name : attribute(node.parent))
+export interface DesignNode { type: string; parent?: DesignNode; name?: { name?: string }; key?: { name?: string } }
+const attribute = (node: DesignNode | undefined): string | undefined => node && (node.type === "JSXAttribute" ? node.name?.name : attribute(node.parent))
 // An anchor or an id may spell a hex: "#feed".
 const names = /^(?:href|id|htmlFor|to)$/
 
-interface Context {
+export interface DesignContext {
   sourceCode: { getAllComments(): { value: string; loc?: object | null }[] }
   report(problem: object): void
 }
@@ -28,8 +28,8 @@ const noLiteralColors = {
       reason: "Say why the tokens do not fit: eslint-disable-next-line design-system/no-literal-colors -- <reason>",
     },
   },
-  create(context: Context) {
-    const report = (node: Node, value: unknown) => {
+  create(context: DesignContext) {
+    const report = (node: DesignNode, value: unknown) => {
       const within = attribute(node), holder = node.parent?.type === "TemplateLiteral" ? node.parent.parent : node.parent
       const style = within === "style" || holder?.type === "Property" && colored.test(holder.key?.name ?? "")
       if (typeof value === "string" && !names.test(within ?? "") && (style ? inStyle : anywhere).test(value.trim())) context.report({ node, messageId: "literal", data: { value } })
@@ -39,8 +39,8 @@ const noLiteralColors = {
         for (const comment of context.sourceCode.getAllComments())
           if (/eslint-disable.*design-system\/no-literal-colors(?!.* -- \S)/.test(comment.value) && comment.loc) context.report({ loc: comment.loc, messageId: "reason" })
       },
-      Literal: (node: Node & { value?: unknown }) => report(node, node.value),
-      TemplateElement: (node: Node & { value: { cooked?: string | null } }) => report(node, node.value.cooked),
+      Literal: (node: DesignNode & { value?: unknown }) => report(node, node.value),
+      TemplateElement: (node: DesignNode & { value: { cooked?: string | null } }) => report(node, node.value.cooked),
     }
   },
 }
@@ -90,6 +90,7 @@ export function designSystem<Plugin>({ tailwind, tokens, entryPoint }: { tailwin
     { pattern: `${variants}shadow-\\[.+\\]!?$`, message: `"$0" is an arbitrary shadow. ${shadow}` },
     { pattern: `${variants}shadow-(?:${besides(Object.keys(tokens.shadow))})!?$`, message: `"$0" is a shadow the tokens do not define. ${shadow}` },
     { pattern: `${variants}font-serif!?$`, message: `"$0" is a font the tokens do not define. Use a font token: ${names(tokens.font, "font-")}.` },
+    { pattern: `${variants}(?:drop-shadow-\\[.+\\]|\\[(?:box-shadow|filter):.+\\])$`, message: `"$0" is an arbitrary shadow or filter. Use a token: ${names(tokens.shadow, "shadow-")}, ${names(tokens.dropShadow, "drop-shadow-")}.` },
     ...declared,
   ]
   return [{

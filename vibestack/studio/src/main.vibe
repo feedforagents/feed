@@ -1,4 +1,4 @@
-// `spec studio`'s entry: ../../spec.ts starts it with the project directory and options, and it serves until stopped.
+// Standalone Vibestack Studio entry: starts the server with the project directory and options until stopped.
 // README, "Studio".
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime"
 import * as NodeServices from "@effect/platform-node/NodeServices"

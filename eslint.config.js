@@ -61,13 +61,19 @@ const guarded = (parser) => ({
 const within = (node) => Boolean(node) && (/Function/.test(node.type) || within(node.parent))
 const documented = (context, comment) => context.options[0]?.jsdoc && comment.type === "Block" && comment.value.startsWith("*") && !within(context.sourceCode.getNodeByRangeIndex(comment.range[0]))
 const left = { type: "object", additionalProperties: { type: "integer", minimum: 1 } }
-const excess = (context, found) => found.length > (context.options[0]?.left?.[relative(context.cwd, context.filename).split(sep).join("/")] ?? 0) && found.forEach((problem) => context.report(problem))
+const excess = (context, node, found, kind) => {
+  const rel = relative(context.cwd, context.filename).split(sep).join("/")
+  const limits = context.options[0]?.left
+  const allowed = limits && Object.hasOwn(limits, rel) ? limits[rel] : 0
+  if (found.length > allowed) found.forEach((problem) => context.report(problem))
+  else if (allowed > 0 && found.length < allowed) context.report({ node, message: found.length ? `Stale ${kind} ratchet (${allowed}) for "${rel}": ${found.length} remain; lower it to ${found.length}.` : `Stale ${kind} ratchet (${allowed}) for "${rel}": 0 remain; remove it.` })
+}
 const comments = {
   meta: { type: "problem", schema: [{ type: "object", properties: { jsdoc: { type: "boolean" }, left }, additionalProperties: false }] },
   create: (context) => ({
-    Program: () => excess(context, context.sourceCode.getAllComments()
+    Program: (node) => excess(context, node, context.sourceCode.getAllComments()
       .filter((comment) => !directives[comment.type].some((directive) => directive.test(comment.value)) && !documented(context, comment))
-      .map((comment) => ({ loc: comment.loc, message: `No code comments: only spec citations and tool directives (${writing}).` }))),
+      .map((comment) => ({ loc: comment.loc, message: `No code comments: only spec citations and tool directives (${writing}).` })), "commented"),
   }),
 }
 const uses = (names) => `:matches(Identifier[name=${names}]:not(ImportSpecifier[imported.name=${names}] > Identifier.local):not(ObjectExpression > Property[computed=false][shorthand=false] > Identifier.key), MemberExpression[computed=true] > Literal.property[value=${names}])`
@@ -79,7 +85,7 @@ const effects = {
   meta: { type: "problem", schema: [{ type: "object", properties: { left }, additionalProperties: false }] },
   create: (context) => {
     const found = []
-    return { ...Object.fromEntries(Object.entries(scheduling).map(([selector, message]) => [selector, (node) => found.push({ node, message })])), "Program:exit": () => excess(context, found) }
+    return { ...Object.fromEntries(Object.entries(scheduling).map(([selector, message]) => [selector, (node) => found.push({ node, message })])), "Program:exit": (node) => excess(context, node, found, "scheduled") }
   },
 }
 const code = { rules: { comments, effects } }

@@ -25,7 +25,7 @@ const TESTS = ["test/**/*.test.{ts,tsx,vibe}", "generated/stories/stories.test.t
 const BROWSER = ["test/**/*.browser.test.{ts,tsx,vibe}", "generated/stories/stories.browser.test.tsx"];
 
 /** The package's tests, and those generate.ts derives from its schemas and contracts, written first (its `main`). */
-export const project = ({ root, tests = TESTS, plugins = [] }: Project) =>
+export const project = ({ root, tests = TESTS, plugins = [] }: Project): ReturnType<typeof defineConfig> =>
   defineConfig(async ({ mode }) => {
     const browser = fs.globSync(BROWSER, { cwd: root }).length > 0;
     const selected = mode === "nightly" ? "nightly" : "normal", receipt = testReceipt(root, selected);
@@ -54,14 +54,17 @@ export const project = ({ root, tests = TESTS, plugins = [] }: Project) =>
     const generatedTests = {
       name: "vibestack-generated-tests",
       async configureVitest() {
-        if (fs.existsSync(path.join(root, GENERATED)) || fs.globSync("src/**/*.{schema,contract}.{ts,vibe}", { cwd: root }).length)
+        if (fs.existsSync(path.join(root, GENERATED)) || fs.globSync("src/**/*.{schema,contract}.{ts,vibe}", { cwd: root }).some((file) => !/(?:^|\/)test\/fixtures?\//.test(file.split(path.sep).join("/"))))
           await (await import("./generate.ts")).main(root);
       },
     };
     return {
       root,
       plugins: [vibelang(), ...plugins],
+      resolve: { dedupe: ["vitest"] },
       test: {
+        // Keep Effect's test adapter on the same runner instance as the owning package.
+        server: { deps: { inline: ["@effect/vitest"] } },
         reporters: ["default", record],
         allowOnly: false,
         passWithNoTests: true,

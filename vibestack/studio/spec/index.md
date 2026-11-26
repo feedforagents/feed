@@ -1,4 +1,4 @@
-# Spec Studio
+# Vibestack Studio
 
 A local page for building an application from its stories. A person edits
 the stories and rules of a project's specs, publishes them, has an agent

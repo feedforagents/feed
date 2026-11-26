@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadConfigFromFile } from "vite";
-import { deterministic, effectDriver, encodesStably, fuzz, holds, idempotent, invariant, inverse, roundTrips } from "../index.ts";
+import { deterministic, effectDriver, encodesStably, fuzz, holds, idempotent, invariant, inverse, planModel, roundTrips, runModel } from "../index.ts";
 import { generateTests } from "../generate.ts";
 import { testInputs, testReceipt } from "../../util.ts";
 import { Lamps, lamps } from "./fixture/good/src/lamps.ts";
@@ -25,6 +25,117 @@ describe("Effect drivers", () => {
     for (const step of [driver.observe, driver.reset, driver.observe]) await step("a");
     await driver[Symbol.asyncDispose]();
     expect([built, released]).toEqual([2, 2]);
+  });
+});
+
+describe("model-based testing", () => {
+  type Door = { status: "Closed" | "Open" | "Locked"; opens: number };
+  type DoorEvent = { type: "open" } | { type: "close" } | { type: "lock" } | { type: "unlock" };
+  const doorOracle = {
+    initial: { status: "Closed", opens: 0 } as Door,
+    enabled: (state: Door, event: DoorEvent) => {
+      if (event.type === "open") return state.status === "Closed";
+      if (event.type === "close") return state.status === "Open";
+      if (event.type === "lock") return state.status === "Closed";
+      return state.status === "Locked";
+    },
+    step: (state: Door, event: DoorEvent): Door => {
+      if (!doorOracle.enabled(state, event)) return state;
+      if (event.type === "open") return { status: "Open", opens: state.opens + 1 };
+      if (event.type === "close") return { ...state, status: "Closed" };
+      if (event.type === "lock") return { ...state, status: "Locked" };
+      return { ...state, status: "Closed" };
+    },
+    parseState: (raw: unknown): Door | undefined => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+      const value = raw as Record<string, unknown>;
+      if (!["Closed", "Open", "Locked"].includes(String(value.status)) || !Number.isSafeInteger(value.opens)) return undefined;
+      return { status: value.status as Door["status"], opens: value.opens as number };
+    },
+    parseEvent: (raw: unknown): DoorEvent | undefined => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+      const type = (raw as Record<string, unknown>).type;
+      return type === "open" || type === "close" || type === "lock" || type === "unlock" ? { type } : undefined;
+    },
+  };
+  const doorEvents: DoorEvent[] = [{ type: "open" }, { type: "close" }, { type: "lock" }, { type: "unlock" }];
+
+  it("plans shortest, transition-covering, and simple paths with bounded abstraction and prefix deduplication", () => {
+    const transitions = planModel(doorOracle, doorEvents, "scalar", { strategy: "transitions" });
+    expect(transitions.coverage.states).toBe(3);
+    expect(transitions.coverage.transitions).toEqual({
+      total: 4,
+      accepted: ["close", "lock", "open", "unlock"],
+      refused: ["close", "lock", "open", "unlock"],
+      uncovered: [],
+    });
+    expect(transitions.prefixForTransition.get("close")?.prefix).toEqual([{ type: "open" }]);
+    expect(transitions.prefixForTransition.get("unlock")?.prefix).toEqual([{ type: "lock" }]);
+
+    const shortest = planModel(doorOracle, doorEvents, "scalar", { strategy: "shortest" });
+    expect(shortest.paths.every((p) => p.steps.every((s) => s.allowed))).toBe(true);
+    expect(shortest.coverage.states).toBe(3);
+
+    const simple = planModel(doorOracle, doorEvents, "scalar", { strategy: "simple" });
+    expect(simple.paths.length).toBeGreaterThanOrEqual(2);
+    expect(simple.paths.every((p) => p.steps.length <= 2)).toBe(true);
+  });
+
+  it("handles emitting oracles, verifies state at every step, reports path on failure, and always tears down", async () => {
+    type EmitState = { count: number };
+    const emitOracle = {
+      initial: { count: 0 } as EmitState,
+      enabled: (s: EmitState, _e: { type: "bump" }, by: "A" | "B") => s.count < 2 && by === "A",
+      step: (s: EmitState, _e: { type: "bump" }, by: "A" | "B") =>
+        emitOracle.enabled(s, _e, by) ? { state: { count: s.count + 1 }, out: [{ tag: "Bumped", count: s.count + 1 }] } : { state: s, out: [] },
+      parseState: (raw: unknown): EmitState | undefined =>
+        raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw).length === 1 && Number.isSafeInteger((raw as Record<string, unknown>).count)
+          ? { count: (raw as Record<string, unknown>).count as number } : undefined,
+      parseEvent: (raw: unknown): { type: "bump" } | undefined =>
+        raw && typeof raw === "object" && (raw as Record<string, unknown>).type === "bump" ? { type: "bump" } : undefined,
+      parseSender: (raw: unknown): "A" | "B" | undefined => (raw === "A" || raw === "B" ? raw : undefined),
+    };
+
+    let setups = 0, teardowns = 0;
+    const report = await runModel(emitOracle, {
+      setup: () => { setups++; return { count: 0 }; },
+      teardown: () => { teardowns++; },
+      events: {
+        bump: (_event, ctx, { allowed, by, out }) => {
+          if (allowed) {
+            expect(by).toBe("A");
+            ctx.count++;
+            expect(out).toEqual([{ tag: "Bumped", count: ctx.count }]);
+          }
+        },
+      },
+      assertState: (state, ctx) => { expect(ctx.count).toBe(state.count); },
+    }, {
+      events: [{ type: "bump", by: "A" }, { type: "bump", by: "B" }],
+      assertCoverage: true,
+    });
+    expect(report.coverage.transitions).toEqual({ total: 1, accepted: ["bump"], refused: ["bump"], uncovered: [] });
+    expect(setups).toBe(teardowns);
+
+    let brokenTeardowns = 0;
+    await expect(runModel(doorOracle, {
+      setup: () => ({ status: "Closed" as Door["status"], opens: 0 }),
+      teardown: () => { brokenTeardowns++; },
+      events: {
+        open: (_e, ctx, { allowed }) => { if (allowed) ctx.status = "Open"; },
+        close: (_e, ctx, { allowed }) => { if (allowed) ctx.status = "Closed"; },
+        lock: (_e, ctx, { allowed }) => { if (allowed) ctx.status = "Locked"; },
+        unlock: (_e, ctx, { allowed }) => { if (allowed) ctx.status = "Open"; },
+      },
+      assertState: (state, ctx) => { expect(ctx.status).toBe(state.status); },
+    }, { events: doorEvents, assertCoverage: true })).rejects.toThrow(/Model test failed at path ".*unlock.*", step \d+ \(unlock\), state assertion/);
+    expect(brokenTeardowns).toBeGreaterThan(0);
+
+    await expect(runModel(doorOracle, {
+      setup: () => undefined,
+      events: { open: () => {}, close: () => {}, lock: () => {}, unlock: () => {} },
+      assertState: () => {},
+    }, { events: [{ type: "open" }], assertCoverage: true })).rejects.toThrow(/Model test uncovered transitions.*close, lock, unlock/);
   });
 });
 
@@ -121,7 +232,7 @@ describe.concurrent("generated tests", () => {
       fs.mkdirSync(path.join(plain, "node_modules"));
       fs.symlinkSync(path.join(root, "node_modules/effect"), path.join(plain, "node_modules/effect"), "dir");
       fs.writeFileSync(path.join(plain, "src/identity.contract.ts"), `import { Schema } from "effect";
-import { contract } from ${JSON.stringify(pathToFileURL(path.join(root, "vibestack/testing/index.ts")).href)};
+import { contract } from ${JSON.stringify(pathToFileURL(path.join(import.meta.dirname, "../index.ts")).href)};
 export const identity = contract({ input: Schema.Int, run: (value: number) => value, deterministic: true });
 `);
       expect(() => createRequire(path.join(plain, "package.json")).resolve("vibelang/register")).toThrowError(expect.objectContaining({ code: "MODULE_NOT_FOUND" }));
