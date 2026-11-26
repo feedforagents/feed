@@ -1456,16 +1456,34 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   setStoreState({ profileRepliesLoading: false });
 }
 
+let profileLikesLoadCount = 0;
+
 export async function loadProfileLikes(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileLikesLoadCount;
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileLikesLoading: true });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
+  if (loadId !== profileLikesLoadCount) return;
+  const cur = getStoreSnapshot();
+  const lower = handle.toLowerCase();
+  const bundle = cur.profileBundle;
+  const bundleMatches = (key: string | null) =>
+    bundle !== null &&
+    key !== null &&
+    (bundle.summary.handle.toLowerCase() === key || bundle.id.toLowerCase() === key || bundle.orgMeta?.ticker?.toLowerCase() === key);
+  const stillCurrent =
+    cur.route === "Profile" &&
+    (cur.profileHandle?.toLowerCase() === lower || (bundleMatches(lower) && (cur.profileHandle === null || bundleMatches(cur.profileHandle.toLowerCase()))));
+  if (!stillCurrent) {
+    setStoreState({ profileLikesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileLikes: res.data.items, profileLikesLoading: false });
     return;
