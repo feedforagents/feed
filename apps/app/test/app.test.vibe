@@ -1,4 +1,4 @@
-// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"; spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
+// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"; spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"
 import { assert, it } from "@effect/vitest"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
@@ -1005,12 +1005,22 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       [403, "old_phone_verification_required"]
     ))
 
+    const reauthStartRes = try callApp("/api/auth/phone/start", { json: { phoneE164: "+14155550111" } })
+    try check(() => assert.strictEqual(reauthStartRes.status, 200))
+    const reauthCodeBody = try readJson(try callApp(`/api/auth/dev/loopback-code?phone=${encodeURIComponent("+14155550111")}`))
+    const reauthVerifyRes = try callApp("/api/auth/phone/verify", { json: { phoneE164: "+14155550111", code: String(reauthCodeBody.code ?? "") } })
+    try check(() => assert.strictEqual(reauthVerifyRes.status, 200))
+    const secondCookie = extractSessionCookie(reauthVerifyRes)
+
     const logoutRes = try callApp("/api/auth/logout", { method: "POST", cookie: alice.cookie })
     const reusedCookieEconomyRes = try callApp("/api/economy/me", { cookie: alice.cookie })
     const reusedCookieMeBody = try readJson(try callApp("/api/auth/me", { cookie: alice.cookie }))
+    const repeatLogoutRes = try callApp("/api/auth/logout", { method: "POST", cookie: alice.cookie })
+    const secondCookieMeAfterLogout = try readJson(try callApp("/api/auth/me", { cookie: secondCookie }))
+    const logoutClearsCookie = (logoutRes.headers.get("set-cookie") ?? "").includes("Max-Age=0")
     try check(() => assert.deepStrictEqual(
-      [logoutRes.status, reusedCookieEconomyRes.status, reusedCookieMeBody.authenticated],
-      [200, 401, false]
+      [logoutRes.status, reusedCookieEconomyRes.status, reusedCookieMeBody.authenticated, repeatLogoutRes.status, secondCookieMeAfterLogout.authenticated, logoutClearsCookie],
+      [200, 401, false, 200, true, true]
     ))
   }
 }, 180_000)
