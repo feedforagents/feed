@@ -244,7 +244,7 @@ effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
   const prevDay = Math.max(1, safeNonNegInt(row.current_day, 1))
   const { nextDay, nextHour } = advanceDayHour(prevDay, prevTickAt, monotonicNow)
   const gameRunning = row.game_running !== false
-  const fundingCutoverPeriod = safeNonNegInt(row.funding_cutover_period, 0)
+  const fundingCutoverPeriod = try armFundingCutoverTx(tx, gameRunning, safeNonNegInt(row.funding_cutover_period, 0), monotonicNow)
   try tx.query(
     `UPDATE feed_world_state
      SET current_day = $1, current_hour = $2, last_tick_at = $3, updated_at = $3
@@ -252,6 +252,14 @@ effect function advanceWorldClockTx(tx: Tx, nowMs: number): {
     [nextDay, nextHour, monotonicNow],
   )
   return { nowMs: monotonicNow, gameRunning, fundingCutoverPeriod }
+}
+
+effect function armFundingCutoverTx(tx: Tx, gameRunning: boolean, cutover: number, nowMs: number): number!StoreFailure {
+  if (!gameRunning || cutover > 0) return cutover
+  const period = currentFundingPeriod(minuteIndexOf(nowMs))
+  try tx.query("UPDATE feed_world_state SET funding_cutover_period = $1, updated_at = $2 WHERE singleton = true", [period + 1, nowMs])
+  try tx.query("UPDATE feed_perp_markets SET last_funding_period = GREATEST(last_funding_period, $1)", [period])
+  return period + 1
 }
 
 effect function pendingResolutionStats(): { readonly pendingCount: number; readonly oldestPendingAt: number | null }!StoreFailure!Store {
@@ -908,12 +916,7 @@ export effect function runPerpFundingTick(nowMs?: number): {
         try ensureWorldStateTx(tx, resolvedNow)
         const rows = try tx.query("SELECT game_running, funding_cutover_period FROM feed_world_state WHERE singleton = true")
         const gameRunning = rows[0]?.game_running !== false
-        let cutover = safeNonNegInt(rows[0]?.funding_cutover_period, 0)
-        if (gameRunning && cutover === 0) {
-          cutover = period + 1
-          try tx.query("UPDATE feed_world_state SET funding_cutover_period = $1, updated_at = $2 WHERE singleton = true", [cutover, resolvedNow])
-          try tx.query("UPDATE feed_perp_markets SET last_funding_period = GREATEST(last_funding_period, $1)", [period])
-        }
+        const cutover = try armFundingCutoverTx(tx, gameRunning, safeNonNegInt(rows[0]?.funding_cutover_period, 0), resolvedNow)
         return { gameRunning, cutover }
       })
       if (!state.gameRunning) {

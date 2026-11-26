@@ -434,21 +434,27 @@ it.effect('Scheduled ticks run each core world job on its spec cadence (spec/eng
     try seedWorld()
     disableRssFeeds()
     const store = try Store
-    const cadenceJobs = ["article-tick", "markets-tick", "perp-funding", "world-facts"]
+    const cadenceByJob = new Map([
+      ["article-tick", 30],
+      ["markets-tick", 1],
+      ["npc-tick", 2],
+      ["organization-tick", 5],
+      ["perp-funding", 480],
+      ["rss-refresh", 5],
+      ["world-facts", 720]
+    ])
+    const cycles = [1, 2, 5, 10, 15, 30, 45, 60, 160, 240, 480, 720]
     const ranAt: Array<ReadonlyArray<string>> = []
-    for (const cycle of [1, 15, 30, 480, 720]) {
+    for (const cycle of cycles) {
       try store.transaction((tx: Tx) => tx.query("DELETE FROM feed_tick_health"))
       try runScheduledTicks(cycle)
       const rows = try store.transaction((tx: Tx) => tx.query("SELECT job_name FROM feed_tick_health ORDER BY job_name ASC"))
-      ranAt.push(rows.map((row) => String(row.job_name)).filter((job) => cadenceJobs.includes(job)))
+      ranAt.push(rows.map((row) => String(row.job_name)).filter((job) => cadenceByJob.has(job)))
     }
-    try check(() => assert.deepStrictEqual(ranAt, [
-      ["markets-tick"],
-      ["markets-tick"],
-      ["article-tick", "markets-tick"],
-      ["article-tick", "markets-tick", "perp-funding"],
-      ["article-tick", "markets-tick", "world-facts"]
-    ]))
+    try check(() => assert.deepStrictEqual(
+      ranAt,
+      cycles.map((cycle) => [...cadenceByJob].filter(([, every]) => cycle % every === 0).map(([job]) => job))
+    ))
 
     try store.transaction((tx: Tx) => tx.query("DELETE FROM feed_tick_health"))
     try runWorkerCronLane("fast", 480)
@@ -469,6 +475,19 @@ it.effect('Scheduled ticks run each core world job on its spec cadence (spec/eng
       fastLaneJobs: ["minute-tick", "perp-funding"],
       periodicSlowJobs: ["article-tick", "organization-tick", "rss-refresh", "world-facts"]
     }))
+  }
+}, 180_000)
+
+it.effect('The first scheduled minute arms perp funding for the next 8-hour UTC period (spec/engine/worldClock.md, "Story: Guard perpetual funding cutover across 8-hour UTC periods")', effect () => {
+  provide appLayer() {
+    const now = Date.UTC(2026, 10, 26, 9, 7)
+    try TestClock.setTime(now)
+    try seedWorld()
+    disableRssFeeds()
+    const store = try Store
+    try runScheduledTicks(Math.floor(now / 60_000))
+    const rows = try store.transaction((tx: Tx) => tx.query("SELECT funding_cutover_period FROM feed_world_state WHERE singleton = true"))
+    try check(() => assert.strictEqual(toInt(rows[0]?.funding_cutover_period), Math.floor(now / 60_000 / 480) + 1))
   }
 }, 180_000)
 
