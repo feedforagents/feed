@@ -90,6 +90,7 @@ export {
   fastForwardSimulatedHours,
   getEngineAdminStatus,
   interleaveRssFeedItems,
+  isRouteDue,
   resolveClockMode,
   runArticleTick,
   runGameTick,

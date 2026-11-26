@@ -5,10 +5,16 @@ import { localStoreLayer } from "@repo/db/node"
 import { realtimeBusLayer } from "@repo/social"
 import { TestClock } from "effect/testing"
 import { parseAppServerConfig, type AppServerConfig } from "../src/server/config.vibe"
-import { handleFeedRequest } from "../src/server/router.vibe"
+import { handleFeedRequest, runScheduledTicks } from "../src/server/router.vibe"
 
 module node {
   import { createHash } from "node:crypto"
+  import process from "node:process"
+
+  /** @throws {never} */
+  export function disableRssFeeds(): void {
+    process.env.FEED_RSS_URLS = "none"
+  }
 
   /** @throws {never} */
   export function sha256Hex(text: string): string {
@@ -59,7 +65,7 @@ module node {
     }
   }
 }
-import { decodeUtf8, extractMagicToken, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk } from node
+import { decodeUtf8, disableRssFeeds, extractMagicToken, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk } from node
 
 const APP_ORIGIN = "http://feed.localtest"
 
@@ -421,6 +427,30 @@ effect function readSseEventsUntil(
   }
   return frames
 }
+
+it.effect('Scheduled ticks run each core world job on its spec cadence (spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+    disableRssFeeds()
+    const store = try Store
+    const cadenceJobs = ["article-tick", "markets-tick", "perp-funding", "world-facts"]
+    const ranAt: Array<ReadonlyArray<string>> = []
+    for (const cycle of [1, 15, 30, 480, 720]) {
+      try store.transaction((tx: Tx) => tx.query("DELETE FROM feed_tick_health"))
+      try runScheduledTicks(cycle)
+      const rows = try store.transaction((tx: Tx) => tx.query("SELECT job_name FROM feed_tick_health ORDER BY job_name ASC"))
+      ranAt.push(rows.map((row) => String(row.job_name)).filter((job) => cadenceJobs.includes(job)))
+    }
+    try check(() => assert.deepStrictEqual(ranAt, [
+      ["markets-tick"],
+      ["markets-tick"],
+      ["article-tick", "markets-tick"],
+      ["article-tick", "markets-tick", "perp-funding"],
+      ["article-tick", "markets-tick", "world-facts"]
+    ]))
+  }
+}, 180_000)
 
 it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocation, leaderboard, perp preview/partial-close, chat invites/reactions, moderation, SSE isolation (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
   provide appLayer() {

@@ -50,6 +50,7 @@ import {
   fastForwardSimulatedHours,
   getDailySpendStatus,
   getEngineAdminStatus,
+  isRouteDue,
   overrideManualHold,
   runArticleTick,
   runGameTick,
@@ -2602,20 +2603,26 @@ effect function runScheduledJob(
 
 export effect function runScheduledTicks(cycle: number): void!!(Store | RealtimeBus) {
   try runScheduledJob("minute-tick", () => runMinuteTick())
-  try runScheduledJob("markets-tick", () => runMarketsTick())
   try runScheduledJob("markets-recovery", () => runMarketsRecovery())
-  try runScheduledJob("perp-funding-tick", () => runPerpFundingTick())
-  if (cycle % 2 === 0) {
+  if (isRouteDue("RouteNpcTick", cycle)) {
     try runScheduledJob("npc-tick", () => runNpcTick())
   }
-  if (cycle % 5 === 0) {
+  if (isRouteDue("RouteMarketsTick", cycle)) {
+    try runScheduledJob("markets-tick", () => runMarketsTick())
+  }
+  if (isRouteDue("RouteOrganizationTick", cycle)) {
     try runScheduledJob("organization-tick", () => runOrganizationTick())
+  }
+  if (isRouteDue("RouteRssRefresh", cycle)) {
     try runScheduledJob("rss-refresh-tick", () => runRssRefreshTick())
   }
-  if (cycle % 30 === 0) {
+  if (isRouteDue("RouteArticleTick", cycle)) {
     try runScheduledJob("article-tick", () => runArticleTick())
   }
-  if (cycle % 720 === 0) {
+  if (isRouteDue("RoutePerpFunding", cycle)) {
+    try runScheduledJob("perp-funding-tick", () => runPerpFundingTick())
+  }
+  if (isRouteDue("RouteWorldFacts", cycle)) {
     try runScheduledJob("world-facts-tick", () => runWorldFactsTick())
   }
 }
