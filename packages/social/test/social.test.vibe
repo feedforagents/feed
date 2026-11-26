@@ -1545,3 +1545,42 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'notification.created live events are not delivered for muted actors, matching the notification list (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player")
+    try seedAccount("bob", "bob", "Bob Trader")
+    try seedAccount("carol", "carol", "Carol Analyst")
+    const store = try Store
+    const likeEvent: FeedRealtimeEvent = {
+      type: "notification.created",
+      notificationId: "notif-like-1",
+      accountId: "alice",
+      kind: "like",
+      isGameOnly: false,
+      actorId: "bob",
+      recipientIds: ["alice"]
+    }
+    const carolEvent: FeedRealtimeEvent = {
+      type: "notification.created",
+      notificationId: "notif-like-2",
+      accountId: "alice",
+      kind: "like",
+      isGameOnly: false,
+      actorId: "carol",
+      recipientIds: ["alice"]
+    }
+    const unmuted = try canDeliverRealtimeEventToViewer(store, likeEvent, "alice")
+    const carolDelivered = try canDeliverRealtimeEventToViewer(store, carolEvent, "alice")
+    try muteAccount("alice", "bob")
+    const muted = try canDeliverRealtimeEventToViewer(store, likeEvent, "alice")
+    const carolWhileBobMuted = try canDeliverRealtimeEventToViewer(store, carolEvent, "alice")
+    try unmuteAccount("alice", "bob")
+    const unmutedAgain = try canDeliverRealtimeEventToViewer(store, likeEvent, "alice")
+    try check(() => assert.deepStrictEqual(
+      { unmuted, carolDelivered, muted, carolWhileBobMuted, unmutedAgain },
+      { unmuted: true, carolDelivered: true, muted: false, carolWhileBobMuted: true, unmutedAgain: true }
+    ))
+  })
+)

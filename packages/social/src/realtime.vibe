@@ -299,6 +299,11 @@ effect function isNotificationDeliverableInStore(
         [viewerId, actorId]
       )
       if (blockedRows.length > 0) return false
+      const mutedRows = try tx.query(
+        "SELECT 1 FROM feed_mutes WHERE muter_id = $1 AND muted_id = $2 LIMIT 1",
+        [viewerId, actorId]
+      )
+      if (mutedRows.length > 0) return false
     }
     return true
   }))
