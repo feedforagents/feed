@@ -26,6 +26,7 @@ import {
   getLoopbackCode,
   getLoopbackMagicLink,
   getRateLimitStatus,
+  hashEmail,
   hashReviewerPassword,
   isDisallowedRemoteHost,
   lookupDeviceCodeForUser,
@@ -1239,6 +1240,123 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
       }
     }))
 
+    const failedSendPrior = try requestEmailMagicLink({
+      email: "racefail@example.com",
+      ipAddress: "203.0.113.10",
+      config: emailConfig
+    })
+    const failedSendPriorToken = failedSendPrior.devToken ?? ""
+    try TestClock.adjust("31 seconds")
+    const failedSendRefusal = try refusedCode(requestEmailMagicLink({
+      email: "racefail@example.com",
+      ipAddress: "203.0.113.10",
+      config: {
+        ...cloudflareConfig,
+        cloudflareEmailSender: {
+          send: async () => {
+            throw new Error("downstream send_email error")
+          }
+        }
+      }
+    }))
+    const failedSendRows = try sqlQuery(
+      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_masked = $1 ORDER BY created_at",
+      ["r***@example.com"]
+    )
+    const failedSendPriorVerify = try verifyEmailMagicLink({
+      token: failedSendPriorToken,
+      config: emailConfig
+    })
+
+    const raceNested: Array<string> = []
+    const raceConfig: AuthRuntimeConfig = {
+      ...cloudflareConfig,
+      cloudflareEmailSender: {
+        send: async (message) => {
+          dispatchedMessages.push(message)
+          if (message.to === "raceparallel@example.com") {
+            await runPromise(Effect.provide(
+              requestEmailMagicLink({
+                email: "raceparallel@example.com",
+                ipAddress: "203.0.113.11",
+                config: cloudflareConfig
+              }),
+              Layer.succeed(Store, store)
+            )).then(
+              () => { raceNested.push("ok") },
+              (err: unknown) => { raceNested.push(failureCode(err)) }
+            )
+          }
+          return { messageId: "cf-msg-race" }
+        }
+      }
+    }
+    const raceFirst = try requestEmailMagicLink({
+      email: "raceparallel@example.com",
+      ipAddress: "203.0.113.11",
+      config: raceConfig
+    })
+    const raceHash = try hashEmail(emailConfig.digestKey, "raceparallel@example.com")
+    const raceRows = try sqlQuery(
+      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_hash = $1 ORDER BY created_at",
+      [raceHash]
+    )
+    const raceSends = dispatchedMessages.filter((message) => message.to === "raceparallel@example.com")
+
+    const testClock = try TestClock.testClockWith((clock) => Effect.succeed(clock))
+    const outOfOrderNested: Array<string> = []
+    const outOfOrderConfig: AuthRuntimeConfig = {
+      ...cloudflareConfig,
+      cloudflareEmailSender: {
+        send: async (message) => {
+          dispatchedMessages.push(message)
+          if (message.to === "raceoutoforder@example.com" && outOfOrderNested.length === 0) {
+            await runPromise(testClock.adjust("31 seconds"))
+            await runPromise(Effect.provide(
+              Effect.provide(
+                requestEmailMagicLink({
+                  email: "raceoutoforder@example.com",
+                  ipAddress: "203.0.113.13",
+                  config: emailConfig
+                }),
+                Layer.succeed(Store, store)
+              ),
+              Layer.succeed(Clock.Clock, testClock)
+            )).then(
+              () => { outOfOrderNested.push("ok") },
+              (err: unknown) => { outOfOrderNested.push(failureCode(err)) }
+            )
+          }
+          return { messageId: "cf-msg-outoforder" }
+        }
+      }
+    }
+    const outOfOrderFirst = try requestEmailMagicLink({
+      email: "raceoutoforder@example.com",
+      ipAddress: "203.0.113.13",
+      config: outOfOrderConfig
+    })
+    const outOfOrderHash = try hashEmail(emailConfig.digestKey, "raceoutoforder@example.com")
+    const outOfOrderRows = try sqlQuery(
+      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_hash = $1 ORDER BY created_at",
+      [outOfOrderHash]
+    )
+    const outOfOrderSends = dispatchedMessages.filter((message) => message.to === "raceoutoforder@example.com")
+    const outOfOrderMessage = dispatchedMessages.find((message) => message.to === "raceoutoforder@example.com")
+    const outOfOrderFirstToken = outOfOrderMessage?.text?.split("token=")[1]?.split("\n")[0] ?? ""
+    const outOfOrderFirstRefusal = try refusedCode(verifyEmailMagicLink({
+      token: outOfOrderFirstToken,
+      config: emailConfig
+    }))
+    const outOfOrderSecondLink = getLoopbackMagicLink("raceoutoforder@example.com", emailConfig)
+    if (outOfOrderSecondLink === undefined) {
+      return try Effect.die("Missing out-of-order second loopback magic link")
+    }
+    const outOfOrderSecondVerify = try verifyEmailMagicLink({
+      token: outOfOrderSecondLink.token,
+      config: emailConfig
+    })
+
     try check(() => assert.deepStrictEqual(
       {
         validation: [invalidEmail, disposableEmail, disabledMode, rapidResend, supersededRefusal, expiredRefusal, replayRefusal],
@@ -1285,7 +1403,7 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           cfSent.emailMasked,
           cfSent.devToken === undefined,
           cfSent.devMagicLinkUrl === undefined,
-          dispatchedMessages.length,
+          dispatchedMessages.length - raceSends.length - outOfOrderSends.length,
           dispatchedMessages[0]?.from,
           dispatchedMessages[0]?.to,
           dispatchedMessages[0]?.subject,
@@ -1293,6 +1411,27 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           Boolean(dispatchedMessages[0]?.text?.includes("https://feed.fun/auth/email?token=")),
           cfMissingBinding,
           cfBindingFailure
+        ],
+        failedSendPreservesPriorLink: [
+          failedSendRefusal,
+          failedSendRows.length,
+          failedSendRows[0]?.superseded_at ?? null,
+          failedSendPriorVerify.status
+        ],
+        parallelRace: [
+          raceNested[0] ?? "missing",
+          raceRows.length,
+          raceSends.length,
+          raceFirst.emailMasked
+        ],
+        outOfOrderSupersession: [
+          outOfOrderNested[0] ?? "missing",
+          outOfOrderRows.length,
+          outOfOrderRows[0]?.superseded_at !== null,
+          outOfOrderRows[1]?.superseded_at === null,
+          outOfOrderSecondVerify.status,
+          outOfOrderFirstRefusal,
+          outOfOrderFirst.emailMasked
         ]
       },
       {
@@ -1332,6 +1471,27 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           true,
           "email_provider_unavailable",
           "email_provider_unavailable"
+        ],
+        failedSendPreservesPriorLink: [
+          "email_provider_unavailable",
+          1,
+          null,
+          "needs_onboarding"
+        ],
+        parallelRace: [
+          "rate_limited:email_send",
+          1,
+          1,
+          "r***@example.com"
+        ],
+        outOfOrderSupersession: [
+          "ok",
+          2,
+          true,
+          true,
+          "needs_onboarding",
+          "magic_link_superseded",
+          "r***@example.com"
         ]
       }
     ))
