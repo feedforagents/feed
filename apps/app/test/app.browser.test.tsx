@@ -451,12 +451,17 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  installMockNetwork();
+async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
+  const network = installMockNetwork(options ?? {});
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
+  return network;
+}
+
+it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await mountApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   await expect.element(page.getByText("Prediction Market").first()).toBeInTheDocument();
@@ -531,11 +536,7 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
 });
 
 it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md, "Story: Request and consume a single-use email magic link safely")', async () => {
-  installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountApp();
   await act(() => storeActions.navigate("/"));
 
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
@@ -566,11 +567,7 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
 });
 
 it('Late likes never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  const network = installMockNetwork({ holdLikesFor: "alice" });
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  const network = await mountApp({ holdLikesFor: "alice" });
 
   await act(() => storeActions.navigate("/u/alice"));
   await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
