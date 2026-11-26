@@ -1302,19 +1302,23 @@ function PredictionClosedBanner({
         {isResolved && market.resolvedOutcome === "yes" ? (
           <CheckCircle2 aria-hidden className="size-5 shrink-0 text-ok" />
         ) : (
-          <XCircle aria-hidden className={cn("size-5 shrink-0", isResolved ? "text-destructive" : "text-muted-foreground")} />
+          <XCircle aria-hidden className={cn("size-5 shrink-0", isResolved && market.resolvedOutcome === "no" ? "text-destructive" : "text-muted-foreground")} />
         )}
         <div className="flex flex-col">
           <span className="text-sm font-semibold text-foreground">
             {isResolved
-              ? `Market Resolved: ${market.resolvedOutcome === "yes" ? "YES" : "NO"}`
+              ? market.resolvedOutcome
+                ? `Market Resolved: ${market.resolvedOutcome === "yes" ? "YES" : "NO"}`
+                : "Market Resolved"
               : isCancelled
                 ? "Market Cancelled"
                 : "Trading Closed"}
           </span>
           <span className="text-xs text-muted-foreground">
             {isResolved
-              ? "Settlement is complete and trading is disabled."
+              ? market.resolvedOutcome
+                ? "Settlement is complete and trading is disabled."
+                : "The outcome has not been published yet."
               : isCancelled
                 ? "This market was cancelled and shares were refunded."
                 : "This market has closed and is awaiting resolution."}

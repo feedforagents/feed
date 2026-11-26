@@ -44,6 +44,12 @@ export const meta: ComponentMeta<FeedMarketCardProps> = {
       yesOddsPct: 0,
       closesAt: "Ended Nov 24",
     },
+    ResolvedUnknown: {
+      status: "resolved",
+      resolvedOutcome: null,
+      yesOddsPct: 62,
+      closesAt: "Ended Nov 24",
+    },
     Cancelled: {
       status: "cancelled",
       resolvedOutcome: null,

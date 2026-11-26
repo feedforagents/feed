@@ -190,12 +190,12 @@ export function FeedMarketCard({
               variant="outline"
               className={cn(
                 "border-transparent font-semibold",
-                resolvedOutcome === "yes"
-                  ? "bg-ok-solid text-ok-solid-foreground"
-                  : "bg-danger-solid text-danger-solid-foreground",
+                resolvedOutcome === "yes" && "bg-ok-solid text-ok-solid-foreground",
+                resolvedOutcome === "no" && "bg-danger-solid text-danger-solid-foreground",
+                resolvedOutcome === null && "bg-muted text-muted-foreground",
               )}
             >
-              Resolved {resolvedOutcome === "yes" ? "YES" : "NO"}
+              {resolvedOutcome ? `Resolved ${resolvedOutcome === "yes" ? "YES" : "NO"}` : "Resolved"}
             </Badge>
           ) : isCancelled ? (
             <Badge variant="secondary">Cancelled</Badge>
@@ -265,15 +265,23 @@ export function FeedMarketCard({
                 "flex flex-1 flex-col items-center justify-center gap-1 rounded-md border border-border px-2.5 py-2 text-center text-xs font-semibold",
                 isResolved && resolvedOutcome === "yes" && "border-ok/40 bg-ok/10 text-ok",
                 isResolved && resolvedOutcome === "no" && "border-destructive/40 bg-destructive/10 text-destructive",
-                isCancelled && "bg-muted/40 text-muted-foreground",
+                (isCancelled || (isResolved && resolvedOutcome === null)) && "bg-muted/40 text-muted-foreground",
               )}
             >
               {isResolved && resolvedOutcome === "yes" ? (
                 <CheckCircle2 aria-hidden className="size-4" />
-              ) : (
+              ) : isResolved && resolvedOutcome === "no" ? (
                 <XCircle aria-hidden className="size-4" />
-              )}
-              <span>{isCancelled ? "Market Cancelled" : `Resolved ${resolvedOutcome === "yes" ? "YES" : "NO"}`}</span>
+              ) : isCancelled ? (
+                <XCircle aria-hidden className="size-4" />
+              ) : null}
+              <span>
+                {isCancelled
+                  ? "Market Cancelled"
+                  : isResolved && resolvedOutcome
+                    ? `Resolved ${resolvedOutcome === "yes" ? "YES" : "NO"}`
+                    : "Resolved"}
+              </span>
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-1">

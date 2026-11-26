@@ -324,12 +324,12 @@ function PredictionsMarketsTable({
                       variant="outline"
                       className={cn(
                         "border-transparent font-semibold",
-                        market.resolvedOutcome === "yes"
-                          ? "bg-ok-solid text-ok-solid-foreground"
-                          : "bg-danger-solid text-danger-solid-foreground",
+                        market.resolvedOutcome === "yes" && "bg-ok-solid text-ok-solid-foreground",
+                        market.resolvedOutcome === "no" && "bg-danger-solid text-danger-solid-foreground",
+                        !market.resolvedOutcome && "bg-muted text-muted-foreground",
                       )}
                     >
-                      Resolved {market.resolvedOutcome === "yes" ? "YES" : "NO"}
+                      {market.resolvedOutcome ? `Resolved ${market.resolvedOutcome === "yes" ? "YES" : "NO"}` : "Resolved"}
                     </Badge>
                   ) : market.status === "cancelled" ? (
                     <Badge variant="secondary">Cancelled</Badge>
