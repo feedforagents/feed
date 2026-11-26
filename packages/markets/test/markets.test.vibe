@@ -4,6 +4,7 @@ import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, type Tx }
 import { localStoreLayer } from "@repo/db/node"
 import { TestClock } from "effect/testing"
 import {
+  CENT_SHARES_PER_SHARE,
   INITIAL_GRANT_CENTS,
   MarketFailure,
   MarketRealtimeBus,
@@ -22,6 +23,7 @@ import {
   getPredictionMarket,
   getUserPositions,
   liquidateEligiblePositions,
+  listClosedPositions,
   listMarketTrades,
   listPerpMarkets,
   listPerpPositions,
@@ -29,6 +31,7 @@ import {
   listUserClosedPositions,
   markToMarketPredictionCents,
   openPerpPosition,
+  parseClosedOutcomeFilter,
   previewPerpOrder,
   previewPredictionBuy,
   previewPredictionSell,
@@ -479,22 +482,63 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
       collateralCents: 400,
       leverage: 5
     })
+    const flipPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5
+    })
+    const flipSlippageBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      maxSlippageBps: 600
+    }))
+    const modeFlipPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip"
+    })
+    const modeFlipSlippageBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip",
+      maxSlippageBps: 600
+    }))
+    const heldAfterBlockedModeFlip = try listPerpPositions("user-alice")
     const flipped = try openPerpPosition({
       ownerId: "user-alice",
       ownerKind: "user",
       ticker: "XTRPC",
       side: "short",
       collateralCents: 2_000,
-      leverage: 5
+      leverage: 5,
+      maxSlippageBps: flipPreview.priceImpactBps
     })
 
     // spec/markets/spotPerp.md, "UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods"
     try TestClock.adjust(Duration.seconds(2 * 3_600))
+    const samePeriodTime = try Clock.currentTimeMillis
     const samePeriodFunding = try accruePerpFunding()
     try TestClock.adjust(Duration.seconds(6 * 3_600))
     const nextPeriodFunding = try accruePerpFunding()
+    const marketAfterFunding = try getPerpMarket("XTRPC")
     try TestClock.adjust(Duration.seconds(3_600))
     const duplicatePeriodFunding = try accruePerpFunding()
+    const marketAfterDuplicateFunding = try getPerpMarket("XTRPC")
+    try accruePerpFunding(samePeriodTime)
+    const marketAfterStaleFunding = try getPerpMarket("XTRPC")
     const aliceHeldAfterFunding = try listPerpPositions("user-alice")
 
     const bobLong = try openPerpPosition({
@@ -527,6 +571,25 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
     )
     const bobClosed = try listUserClosedPositions("user-bob")
 
+    const modeFlipBackPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip"
+    })
+    const modeFlippedBack = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip",
+      maxSlippageBps: modeFlipBackPreview.priceImpactBps
+    })
+
     try check(() => assert.deepStrictEqual(
       {
         initialPrice: initialXtrpc.indexPriceCents,
@@ -547,16 +610,44 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
           reduced.position.sizeCents
         ],
         flipFlow: [
+          flipPreview.action,
+          flipPreview.priceImpactBps,
+          flipSlippageBlockedCode,
           flipped.action,
           flipped.position.side,
           flipped.position.sizeCents,
+          flipped.executionPriceCents === flipPreview.executionPriceCents,
           flipped.closedPositionId === opened.positionId
+        ],
+        modeFlipPreview: [
+          modeFlipPreview.action,
+          modeFlipPreview.executionPriceCents,
+          modeFlipPreview.priceImpactBps,
+          modeFlipPreview.feeCents
+        ],
+        modeFlipBlocked: [
+          modeFlipSlippageBlockedCode,
+          heldAfterBlockedModeFlip.length,
+          heldAfterBlockedModeFlip[0]?.side,
+          heldAfterBlockedModeFlip[0]?.sizeCents
+        ],
+        modeFlipBack: [
+          modeFlipBackPreview.action,
+          modeFlipBackPreview.executionPriceCents,
+          modeFlipBackPreview.priceImpactBps,
+          modeFlippedBack.action,
+          modeFlippedBack.position.side,
+          modeFlippedBack.position.sizeCents,
+          modeFlippedBack.feeCents,
+          modeFlippedBack.closedPositionId === flipped.positionId
         ],
         funding: [
           samePeriodFunding.accruedCount,
           nextPeriodFunding.accruedCount,
           duplicatePeriodFunding.accruedCount,
-          aliceHeldAfterFunding.length
+          aliceHeldAfterFunding.length,
+          [marketAfterFunding.lastFundingPeriod, marketAfterDuplicateFunding.lastFundingPeriod, marketAfterStaleFunding.lastFundingPeriod],
+          [marketAfterFunding.updatedAt, marketAfterDuplicateFunding.updatedAt, marketAfterStaleFunding.updatedAt]
         ],
         liquidation: [
           liqSummary.liquidatedCount,
@@ -574,8 +665,18 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
         slippageBlockedCode: "SLIPPAGE_EXCEEDED",
         addFlow: ["open", "add", "add", 10_000, 2_000],
         partialAndReduce: [false, 4_000, 6_000, "reduce", 4_000],
-        flipFlow: ["flip", "short", 6_000, true],
-        funding: [0, 1, 0, 1],
+        flipFlow: ["flip", 952, "SLIPPAGE_EXCEEDED", "flip", "short", 6_000, true, true],
+        modeFlipPreview: ["flip", 1_140, 952, 14],
+        modeFlipBlocked: ["SLIPPAGE_EXCEEDED", 1, "long", 4_000],
+        modeFlipBack: ["flip", 525, 1_053, "flip", "long", 10_000, 16, true],
+        funding: [
+          0,
+          1,
+          0,
+          1,
+          [nextPeriodFunding.period, nextPeriodFunding.period, nextPeriodFunding.period],
+          [marketAfterFunding.updatedAt, marketAfterFunding.updatedAt, marketAfterFunding.updatedAt]
+        ],
         liquidation: [1, true, 1, "liquidate", true, 1, "liquidated"]
       }
     ))
@@ -1061,3 +1162,266 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
   })
 )
 
+it.effect('Closed perp positions report payout equal to cash credited with open fees in cost basis (spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    const store = try Store
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
+         VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
+         VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
+         VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+    })
+
+    const longOpen = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
+    })
+    const longClose = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: longOpen.positionId
+    })
+    const closed = try listClosedPositions({ accountId: "user-alice" })
+    const ledger = try getPointLedger("user-alice", 10)
+    const closeLedgerDelta = ledger.find((entry) => entry.kind === "perp_close")?.deltaCents ?? null
+    const item = closed.items[0]
+
+    try check(() => assert.deepStrictEqual(
+      {
+        totalCount: closed.totalCount,
+        itemKind: item?.kind,
+        itemTicker: item?.ticker,
+        itemSide: item?.side,
+        itemCostBasisCents: item?.costBasisCents,
+        itemPayoutCents: item?.payoutCents,
+        itemRealizedPnlCents: item?.realizedPnlCents,
+        payoutEqualsCashCredited: item?.payoutCents === longClose.netCreditCents,
+        payoutEqualsLedgerCloseCredit: item?.payoutCents === closeLedgerDelta,
+        payoutMinusCostEqualsRealizedPnl: (item?.payoutCents ?? 0) - (item?.costBasisCents ?? 0) === item?.realizedPnlCents,
+        realizedMatchesReceipt: item?.realizedPnlCents === longClose.realizedPnlCents
+      },
+      {
+        totalCount: 1,
+        itemKind: "perp",
+        itemTicker: "HUND",
+        itemSide: "long",
+        itemCostBasisCents: 510,
+        itemPayoutCents: longClose.netCreditCents,
+        itemRealizedPnlCents: longClose.realizedPnlCents,
+        payoutEqualsCashCredited: true,
+        payoutEqualsLedgerCloseCredit: true,
+        payoutMinusCostEqualsRealizedPnl: true,
+        realizedMatchesReceipt: true
+      }
+    ))
+  })
+)
+
+it.effect('Closed prediction positions report the average entry price in listClosedPositions (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (_now) => {
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+    const bobBuy = try buyPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 4_000
+    })
+    try resolvePredictionMarket({ marketId: "seed-market-1" })
+    const all = try listClosedPositions({ accountId: "user-bob" })
+    const expectedEntryPriceCents = Math.round((4_000 * CENT_SHARES_PER_SHARE) / bobBuy.shares)
+    try check(() => assert.deepStrictEqual(
+      {
+        totalCount: all.totalCount,
+        itemKind: all.items[0]?.kind,
+        itemMarketId: all.items[0]?.marketId,
+        itemSide: all.items[0]?.side,
+        itemOutcome: all.items[0]?.outcome,
+        itemShares: all.items[0]?.sharesOrSize,
+        itemEntryPriceCents: all.items[0]?.entryPriceCents,
+        expectedEntryPriceCents,
+        itemExitPriceCents: all.items[0]?.exitPriceCents
+      },
+      {
+        totalCount: 1,
+        itemKind: "prediction",
+        itemMarketId: "seed-market-1",
+        itemSide: "yes",
+        itemOutcome: "won",
+        itemShares: bobBuy.shares,
+        itemEntryPriceCents: expectedEntryPriceCents,
+        expectedEntryPriceCents,
+        itemExitPriceCents: 100
+      }
+    ))
+  })
+)
+
+it.effect('Cancelled prediction positions read cancelled in listClosedPositions (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (_now) => {
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+    try buyPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 4_000
+    })
+    try cancelPredictionMarket("seed-market-1")
+    const all = try listClosedPositions({ accountId: "user-bob" })
+    const cancelled = try listClosedPositions({ accountId: "user-bob", outcome: "cancelled" })
+    const lost = try listClosedPositions({ accountId: "user-bob", outcome: "lost" })
+    const canonical = try listUserClosedPositions("user-bob")
+    const payoutEqualsCostBasis = all.items[0]?.payoutCents === all.items[0]?.costBasisCents
+    try check(() => assert.deepStrictEqual(
+      {
+        parseCancelled: parseClosedOutcomeFilter("cancelled"),
+        parseBogus: parseClosedOutcomeFilter("bogus"),
+        allTotalCount: all.totalCount,
+        itemKind: all.items[0]?.kind,
+        itemMarketId: all.items[0]?.marketId,
+        itemSide: all.items[0]?.side,
+        itemOutcome: all.items[0]?.outcome,
+        itemStatus: all.items[0]?.status,
+        itemRealizedPnlCents: all.items[0]?.realizedPnlCents,
+        payoutEqualsCostBasis: payoutEqualsCostBasis,
+        cancelledTotalCount: cancelled.totalCount,
+        lostTotalCount: lost.totalCount,
+        canonicalOutcome: canonical.predictionPositions[0]?.outcome
+      },
+      {
+        parseCancelled: "cancelled",
+        parseBogus: "all",
+        allTotalCount: 1,
+        itemKind: "prediction",
+        itemMarketId: "seed-market-1",
+        itemSide: "yes",
+        itemOutcome: "cancelled",
+        itemStatus: "cancelled",
+        itemRealizedPnlCents: 0,
+        payoutEqualsCostBasis: true,
+        cancelledTotalCount: 1,
+        lostTotalCount: 0,
+        canonicalOutcome: "cancelled"
+      }
+    ))
+  })
+)
+
+it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded pair before any buy, unseeded sells are refused, buys accrue holdings (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 1, 0, 0))
+  try runWithSeededDb(effect {
+    const store = try Store
+    const holdingsFor = (actorId: string, ticker: string) => store.transaction((tx: Tx) =>
+      tx.query("SELECT base_units FROM feed_npc_spot_holdings WHERE actor_id = $1 AND ticker = $2", [actorId, ticker])
+    )
+    const seededTslaHoldings = try holdingsFor("ailon-musk", "TSLAI")
+    const seededXtrpcHoldings = try holdingsFor("ailon-musk", "XTRPC")
+    // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
+    const freshSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "TSLAI",
+      side: "sell",
+      quoteCents: 100
+    })
+    const holdingsAfterFreshSell = try holdingsFor("ailon-musk", "TSLAI")
+    const sellWithNoHoldingsCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 100
+    }))
+    const spotBuy = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "buy",
+      quoteCents: 3_000_000
+    })
+    const holdingsAfterBuy = try holdingsFor("ailon-musk", "XTRPC")
+    const spotSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 1_000_000
+    })
+    const holdingsAfterSell = try holdingsFor("ailon-musk", "XTRPC")
+    const sellBeyondHoldingsCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 2_500_000
+    }))
+    const exactLimitSell = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 1_999_920
+    })
+    const holdingsAfterExactSell = try holdingsFor("ailon-musk", "XTRPC")
+    const secondNpcSellCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "dairiio-amodei",
+      ticker: "XTRPC",
+      side: "sell",
+      quoteCents: 100
+    }))
+    const secondTickerSellCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "SEQ",
+      side: "sell",
+      quoteCents: 100
+    }))
+    try check(() => assert.deepStrictEqual(
+      {
+        seededTslaHoldings: seededTslaHoldings.map((row) => toInt(row.base_units)),
+        seededXtrpcHoldings: seededXtrpcHoldings.map((row) => toInt(row.base_units)),
+        freshSell: [freshSell.baseDelta, freshSell.baseReserve, freshSell.quoteReserveCents, freshSell.indexPriceCents, freshSell.markPriceCents, freshSell.balanceAfterCents],
+        holdingsAfterFreshSell: holdingsAfterFreshSell.map((row) => toInt(row.base_units)),
+        sellWithNoHoldingsCode,
+        spotBuy: [spotBuy.baseDelta, spotBuy.baseReserve, spotBuy.quoteReserveCents, spotBuy.indexPriceCents, spotBuy.markPriceCents, spotBuy.balanceAfterCents],
+        holdingsAfterBuy: holdingsAfterBuy.map((row) => toInt(row.base_units)),
+        spotSell: [spotSell.baseDelta, spotSell.baseReserve, spotSell.quoteReserveCents, spotSell.indexPriceCents, spotSell.markPriceCents, spotSell.balanceAfterCents],
+        holdingsAfterSell: holdingsAfterSell.map((row) => toInt(row.base_units)),
+        sellBeyondHoldingsCode,
+        exactLimitSell: [exactLimitSell.baseDelta, exactLimitSell.baseReserve, exactLimitSell.quoteReserveCents, exactLimitSell.indexPriceCents, exactLimitSell.markPriceCents, exactLimitSell.balanceAfterCents],
+        holdingsAfterExactSell: holdingsAfterExactSell.map((row) => toInt(row.base_units)),
+        secondNpcSellCode,
+        secondTickerSellCode
+      },
+      {
+        seededTslaHoldings: [8_164],
+        seededXtrpcHoldings: [],
+        freshSell: [1, 50_001, 12_249_900, 24_499, 24_499, 25_000_100],
+        holdingsAfterFreshSell: [8_163],
+        sellWithNoHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
+        spotBuy: [41_666, 8_334, 3_600_000, 43_196, 43_196, 22_000_100],
+        holdingsAfterBuy: [41_666],
+        spotSell: [3_206, 11_540, 2_600_000, 22_530, 22_530, 23_000_100],
+        holdingsAfterSell: [38_460],
+        sellBeyondHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
+        exactLimitSell: [38_460, 50_000, 600_080, 1_200, 1_200, 25_000_020],
+        holdingsAfterExactSell: [0],
+        secondNpcSellCode: "INSUFFICIENT_SPOT_INVENTORY",
+        secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY"
+      }
+    ))
+  })
+})

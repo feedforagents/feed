@@ -238,6 +238,26 @@ function computePriceImpactBps(beforeMark: number, afterMark: number): number {
   return Math.round((Math.abs(afterMark - beforeMark) * BPS_DENOMINATOR) / beforeMark)
 }
 
+function computeFlippedOiAndMark(
+  indexPriceCents: number,
+  longOiCents: number,
+  shortOiCents: number,
+  existingSide: PerpSide,
+  existingSizeCents: number,
+  nextSide: PerpSide,
+  flipSizeCents: number
+): { readonly finalLong: number; readonly finalShort: number; readonly executionPriceCents: number } {
+  const afterCloseLong = existingSide === "long" ? Math.max(0, longOiCents - existingSizeCents) : longOiCents
+  const afterCloseShort = existingSide === "short" ? Math.max(0, shortOiCents - existingSizeCents) : shortOiCents
+  const finalLong = nextSide === "long" ? afterCloseLong + flipSizeCents : afterCloseLong
+  const finalShort = nextSide === "short" ? afterCloseShort + flipSizeCents : afterCloseShort
+  return {
+    finalLong,
+    finalShort,
+    executionPriceCents: computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+  }
+}
+
 effect function assertSlippageWithinCap(beforeMark: number, afterMark: number, maxSlippageBps?: number): void!MarketFailure {
   if (maxSlippageBps === undefined) return
   if (!Number.isFinite(maxSlippageBps) || maxSlippageBps < 0) {
@@ -476,6 +496,7 @@ export effect function listPerpPositions(ownerId: string): ReadonlyArray<PerpPos
   return try store.transaction((tx) => listPerpPositionsIn(tx, ownerId))
 }
 
+// spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
 export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeReceipt!(MarketFailure | StoreFailure)!Store {
   try assertSafePositiveInt(input.quoteCents, "INVALID_AMOUNT", "Spot trade quoteCents must be a positive integer")
   if (input.side !== "buy" && input.side !== "sell") {
@@ -1131,11 +1152,15 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
         }
       }
       if (input.mode === "flip") {
-        const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
-        const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
-        const finalLong = input.side === "long" ? afterCloseLong + sizeCents : afterCloseLong
-        const finalShort = input.side === "short" ? afterCloseShort + sizeCents : afterCloseShort
-        const executionPriceCents = computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+        const { finalLong, finalShort, executionPriceCents } = computeFlippedOiAndMark(
+          indexPriceCents,
+          longOi,
+          shortOi,
+          existingSide,
+          existing.sizeCents,
+          input.side,
+          sizeCents
+        )
         const closeFeeCents = canonicalTradingFee(existing.sizeCents)
         const openFeeCents = canonicalTradingFee(sizeCents)
         const feeCents = closeFeeCents + openFeeCents
@@ -1209,11 +1234,15 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
         throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
       }
       const flipMargin = ceilDiv(flipSize, input.leverage)
-      const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
-      const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
-      const finalLong = input.side === "long" ? afterCloseLong + flipSize : afterCloseLong
-      const finalShort = input.side === "short" ? afterCloseShort + flipSize : afterCloseShort
-      const executionPriceCents = computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+      const { finalLong, finalShort, executionPriceCents } = computeFlippedOiAndMark(
+        indexPriceCents,
+        longOi,
+        shortOi,
+        existingSide,
+        existing.sizeCents,
+        input.side,
+        flipSize
+      )
       const feeCents = canonicalTradingFee(existing.sizeCents) + canonicalTradingFee(flipSize)
       const estLiq = computeLiquidationPriceCents({
         posId: 1,
@@ -1334,11 +1363,20 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       })
     }
     if (input.mode === "flip") {
+      const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
+        market.indexPriceCents,
+        market.longOiCents,
+        market.shortOiCents,
+        existingSide,
+        existing.sizeCents,
+        input.side,
+        sizeCents
+      )
+      try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
       const closedOld = try settlePerpCloseSliceTx(tx, {
         posRow: existingRow,
         market,
         closeSizeCents: existing.sizeCents,
-        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
         viaClientName,
         now
       })
@@ -1357,7 +1395,6 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
         collateralCents: input.collateralCents,
         sizeCents,
         leverage: input.leverage,
-        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
         viaClientName,
         currentPeriod,
         action: "flip",
@@ -1401,12 +1438,21 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
     if (flipSizeCents < MIN_ORDER_SIZE_CENTS) {
       throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
     }
+    const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
+      market.indexPriceCents,
+      market.longOiCents,
+      market.shortOiCents,
+      existingSide,
+      existing.sizeCents,
+      input.side,
+      flipSizeCents
+    )
+    try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
     const flipCollateralCents = ceilDiv(flipSizeCents, input.leverage)
     const closedOld = try settlePerpCloseSliceTx(tx, {
       posRow: existingRow,
       market,
       closeSizeCents: existing.sizeCents,
-      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
       viaClientName,
       now
     })
@@ -1425,7 +1471,6 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       collateralCents: flipCollateralCents,
       sizeCents: flipSizeCents,
       leverage: input.leverage,
-      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
       viaClientName,
       currentPeriod,
       action: "flip",
@@ -1670,7 +1715,7 @@ export effect function accruePerpFunding(nowMs?: number): FundingAccrualSummary!
       try tx.query(
         `UPDATE feed_perp_markets
          SET funding_rate_bps = $2, last_funding_period = $3, updated_at = $4
-         WHERE ticker = $1`,
+         WHERE ticker = $1 AND last_funding_period < $3`,
         [ticker, premBps, period, now]
       )
     }
