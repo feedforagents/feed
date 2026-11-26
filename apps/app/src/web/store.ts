@@ -308,8 +308,14 @@ function guardRouteAccess(parsed: ReturnType<typeof parseLocation>, rawPath: str
   return "allow";
 }
 
-async function redirectToHome(): Promise<void> {
-  pushBrowserRoute("Home");
+async function redirectToHome(options?: { readonly replace?: boolean }): Promise<void> {
+  if (options?.replace) {
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", "/");
+    }
+  } else {
+    pushBrowserRoute("Home");
+  }
   sendNav({ type: "navigateTo", targetRoute: "Home" });
   sendApp({ type: "navigateApp", targetRoute: "Home" });
   setStoreState({
@@ -602,7 +608,7 @@ export function bootStore(): void {
       const guard = guardRouteAccess(parsed, `${window.location.pathname}${window.location.search}`);
       if (guard === "blocked_auth") return;
       if (guard === "blocked_redirect") {
-        void redirectToHome();
+        void redirectToHome({ replace: true });
         return;
       }
       sendNav({ type: "navigateTo", targetRoute: parsed.route });

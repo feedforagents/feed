@@ -2024,3 +2024,50 @@ it('Phone SMS door sends national numbers as E.164 (spec/app/onboarding.md, "Sto
   expect(phoneStartRequests).toHaveLength(2);
   expect(phoneStartRequests[1]?.phoneE164).toBe("+33612345678");
 });
+
+it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  await mountApp();
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  const marketsButton = page.getByRole("button", { name: "Markets", exact: true }).first();
+  await act(() => userEvent.click(marketsButton));
+  await expect.element(page.getByRole("heading", { name: "Markets", exact: true }).first()).toBeInTheDocument();
+  await vi.waitFor(() => {
+    expect(window.location.pathname).toBe("/markets");
+  });
+
+  const modeSwitch = page.getByRole("switch", { name: "Social mode" }).first();
+  await act(() => userEvent.click(modeSwitch));
+  await vi.waitFor(() => {
+    expect(window.location.pathname).toBe("/");
+  });
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  const pushState = vi.spyOn(window.history, "pushState");
+  const replaceState = vi.spyOn(window.history, "replaceState");
+  const popped = new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => resolve(), { once: true });
+  });
+  window.history.back();
+  await act(() => popped);
+  expect(window.location.pathname).toBe("/");
+  expect(pushState).not.toHaveBeenCalled();
+  expect(replaceState).toHaveBeenCalledTimes(1);
+  expect(getStoreSnapshot().route).toBe("Home");
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Markets", exact: true }).first()).not.toBeInTheDocument();
+
+  const poppedAgain = new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => resolve(), { once: true });
+  });
+  window.history.back();
+  await act(() => poppedAgain);
+  expect(window.location.pathname).toBe("/");
+  expect(pushState).not.toHaveBeenCalled();
+  expect(getStoreSnapshot().route).toBe("Home");
+  pushState.mockRestore();
+  replaceState.mockRestore();
+});
