@@ -1139,14 +1139,18 @@ export async function markChatRead(chatId: string): Promise<void> {
   });
 }
 
+let chatsLoadCount = 0;
+
 export async function loadChats(loadMessages = true, preferredChatId?: string | null): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
+  const loadId = ++chatsLoadCount;
   if (loadMessages) setStoreState({ chatsLoading: true });
   const [chatsRes, invitesRes] = await Promise.all([
     requestJson("/api/chats", { parse: (raw) => decodeChats(raw, viewerId) }),
     requestJson("/api/chats/invites", { parse: decodeAlphaInvites }),
   ]);
+  if (loadId !== chatsLoadCount) return;
   const s = getStoreSnapshot();
   const nextChats = chatsRes.ok ? chatsRes.data : s.chats;
   const preferred = preferredChatId ?? s.selectedChatId;

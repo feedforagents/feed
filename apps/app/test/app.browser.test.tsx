@@ -6,6 +6,7 @@ import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { hydrateAuth } from "../src/web/store-auth.ts";
 
 const opened: Root[] = [];
 const predictionBuyBodies: string[] = [];
@@ -1274,4 +1275,94 @@ it('Explore search "$PRED" lists the PRED market in the Markets tab (spec/app/na
   await act(() => userEvent.click(page.getByRole("tab", { name: "Markets" })));
   await expect.element(page.getByText("No matching markets")).not.toBeInTheDocument();
   await expect.element(page.getByText("Max 20x")).toBeInTheDocument();
+});
+
+// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+it('Stale chats response is dropped when a newer load lands first', async () => {
+  const chatSummary = (id: string, title: string) => ({ id, title, kind: "direct" });
+  const chatMessage = (id: string, content: string) => ({
+    id,
+    senderId: "acc-alice",
+    senderHandle: "alice",
+    senderDisplayName: "Alice Aardvark",
+    senderKind: "user",
+    content,
+    createdAt: Date.now() - 60_000,
+    reactions: [],
+  });
+  const messageRequests: string[] = [];
+  let holdChats = false;
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/chats") {
+      if (holdChats) {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json({ chats: [chatSummary("chat-stale", "Stale Chat")] }));
+        });
+      }
+      return json({ chats: [chatSummary("chat-fresh-a", "Fresh Chat A"), chatSummary("chat-fresh-b", "Fresh Chat B")] });
+    }
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/chats/chat-fresh-a/messages") {
+      messageRequests.push("chat-fresh-a");
+      return json({ messages: [chatMessage("msg-fa1", "Fresh A message")] });
+    }
+    if (path === "/api/chats/chat-fresh-b/messages") {
+      messageRequests.push("chat-fresh-b");
+      return json({ messages: [chatMessage("msg-fb1", "Fresh B message")] });
+    }
+    if (path === "/api/chats/chat-stale/messages") {
+      messageRequests.push("chat-stale");
+      return json({ messages: [chatMessage("msg-st1", "Stale chat message")] });
+    }
+    if (path === "/api/notifications") return json({ notifications: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  holdChats = true;
+  const loading = storeActions.loadChats();
+  holdChats = false;
+  await act(() => storeActions.loadChats());
+  expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+  expect(messageRequests).not.toContain("chat-stale");
+  expect(getStoreSnapshot().chatsLoading).toBe(false);
 });
