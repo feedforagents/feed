@@ -2574,13 +2574,13 @@ export effect function resolveOptionalRouteResponse(
   options?: RouteRequestOptions
 ): (Response | undefined)!!(Store | RealtimeBus) {
   const path = new URL(request.url).pathname
-  const shouldPreAuthenticate = path.startsWith("/api/") && path !== "/api/skills/hosts" && path !== "/api/health"
+  const shouldPreAuthenticate = path.startsWith("/api/") && path !== "/api/skills/hosts" && path !== "/api/health" && path !== "/api/auth/me"
   if (!shouldPreAuthenticate) {
-    const publicResponse = routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
+    const publicResponse = routeOptionalResponse(request, config, options) catch (err) => mapDomainError(err)
     return publicResponse
   }
   const session = optionalSession(request, config) catch () => null
-  const response = routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
+  const response = routeOptionalResponse(request, config, options) catch (err) => mapDomainError(err)
   if (response === undefined) return undefined
   return withRefreshedSessionCookie(response, session)
 }
