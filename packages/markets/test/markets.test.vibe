@@ -930,7 +930,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
 )
 
 it.effect('Open positions stop marking expired prediction markets to market (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', () =>
-  runWithSeededMarketDay(effect (now) => {
+  runWithSeededMarketDay(effect (_now) => {
     try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
     const buy = try buyPredictionShares({
       actorId: "user-alice",
