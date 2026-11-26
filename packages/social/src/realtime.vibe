@@ -202,7 +202,7 @@ effect function visibleParentReplyCountForViewer(
   store: Store.Shape,
   parentPostId: string,
   viewerId: string
-): number | null!! {
+): (number | null)!! {
   const res = try exit(store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       `SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")}`,
