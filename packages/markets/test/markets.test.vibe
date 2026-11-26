@@ -4,6 +4,7 @@ import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, type Tx }
 import { localStoreLayer } from "@repo/db/node"
 import { TestClock } from "effect/testing"
 import {
+  CENT_SHARES_PER_SHARE,
   INITIAL_GRANT_CENTS,
   MarketFailure,
   MarketRealtimeBus,
@@ -1220,3 +1221,42 @@ it.effect('Closed perp positions report payout equal to cash credited with open 
   })
 )
 
+it.effect('Closed prediction positions report the average entry price in listClosedPositions (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (_now) => {
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+    const bobBuy = try buyPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 4_000
+    })
+    try resolvePredictionMarket({ marketId: "seed-market-1" })
+    const all = try listClosedPositions({ accountId: "user-bob" })
+    const expectedEntryPriceCents = Math.round((4_000 * CENT_SHARES_PER_SHARE) / bobBuy.shares)
+    try check(() => assert.deepStrictEqual(
+      {
+        totalCount: all.totalCount,
+        itemKind: all.items[0]?.kind,
+        itemMarketId: all.items[0]?.marketId,
+        itemSide: all.items[0]?.side,
+        itemOutcome: all.items[0]?.outcome,
+        itemShares: all.items[0]?.sharesOrSize,
+        itemEntryPriceCents: all.items[0]?.entryPriceCents,
+        expectedEntryPriceCents,
+        itemExitPriceCents: all.items[0]?.exitPriceCents
+      },
+      {
+        totalCount: 1,
+        itemKind: "prediction",
+        itemMarketId: "seed-market-1",
+        itemSide: "yes",
+        itemOutcome: "won",
+        itemShares: bobBuy.shares,
+        itemEntryPriceCents: expectedEntryPriceCents,
+        expectedEntryPriceCents,
+        itemExitPriceCents: 100
+      }
+    ))
+  })
+)

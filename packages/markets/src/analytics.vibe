@@ -1,6 +1,6 @@
 // spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
 import { Store, type StoreFailure, resolveActorAvatarUrl, toInt, toText, type Row, type Tx } from "@repo/db"
-import { yesOddsBps } from "../gen/markets__prediction.effect.vibe"
+import { CENT_SHARES_PER_SHARE, yesOddsBps } from "../gen/markets__prediction.effect.vibe"
 import { getAccountEconomyIn } from "./economy.vibe"
 import {
   type MarketFailure,
@@ -598,6 +598,11 @@ export effect function listClosedPositions(input: {
       const outcome: "won" | "lost" = realizedPnlCents > 0 || (marketStatus === "resolved" && resolvedOutcome === sideRaw && payoutCents > 0)
         ? "won"
         : "lost"
+      const shares = toInt(row.shares)
+      const entryPriceCents =
+      shares > 0
+        ? Math.max(0, Math.min(100, Math.round((costBasisCents * CENT_SHARES_PER_SHARE) / shares)))
+        : null
       combined.push({
         id: `pred:${marketId}:${sideRaw}`,
         kind: "prediction",
@@ -605,8 +610,8 @@ export effect function listClosedPositions(input: {
         ticker: null,
         title: requiredText(row.question, marketId),
         side: sideRaw,
-        sharesOrSize: toInt(row.shares),
-        entryPriceCents: null,
+        sharesOrSize: shares,
+        entryPriceCents,
         exitPriceCents: marketStatus === "resolved" ? (resolvedOutcome === sideRaw ? 100 : 0) : null,
         costBasisCents,
         payoutCents,
