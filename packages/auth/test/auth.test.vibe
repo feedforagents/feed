@@ -21,6 +21,7 @@ import {
   createAuthorizationCode,
   deleteAccountSelfServe,
   exchangeOAuthToken,
+  fetchClientMetadata,
   getAccountProfile,
   getActiveAgentGrant,
   getLoopbackCode,
@@ -53,13 +54,38 @@ import { insertCloudAccountTx } from "../src/phone-auth.vibe"
 
 module node {
   import { createHash } from "node:crypto"
+  import { createServer } from "node:net"
 
   /** @throws {never} */
   export function pkceChallengeS256(verifier: string): string {
     return createHash("sha256").update(verifier, "utf8").digest("base64url")
   }
+
+  /** @throws {unknown} */
+  export async function startCountingTcpProbe(): Promise<{
+    readonly port: number
+    readonly getHits: () => number
+    readonly close: () => Promise<void>
+  }> {
+    let hits = 0
+    const server = createServer((socket) => {
+      hits += 1
+      socket.destroy()
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => resolve())
+    })
+    const addr = server.address()
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0
+    return {
+      port,
+      getHits: () => hits,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }
 }
-import { pkceChallengeS256 } from node
+import { pkceChallengeS256, startCountingTcpProbe } from node
 
 const localnetConfig: AuthRuntimeConfig = {
   digestKey: "dev-digest-key-change-in-production-32-bytes",
@@ -103,6 +129,13 @@ effect function refusedCode<A, E, R>(program: A!E!R): string!!R {
     const value = try program
     return `unexpected_success:${JSON.stringify(value)}`
   } catch (err) => failureCode(err)
+}
+
+effect function refusedStatusAndCode<A, E, R>(program: A!E!R): string!!R {
+  return effect {
+    const value = try program
+    return `unexpected_success:${JSON.stringify(value)}`
+  } catch (err) => err instanceof AuthFailure ? `${err.status}:${err.code}` : failureCode(err)
 }
 
 function rateLimitDetail(err: unknown): { readonly tag: string; readonly action: string | undefined; readonly retryAfterPositive: boolean } {
@@ -1396,3 +1429,86 @@ it.effect('Security hardening (handle hijack, reviewer lockout, RFC 8252 loopbac
     ))
   })
 }, 180_000)
+
+it.effect('Refuse trailing-dot local FQDNs, *.localhost, and non-public IPv4 ranges in OAuth DCR and CIMD host checks (spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const blockedRedirects = [
+      "https://localhost./cb",
+      "https://sub.localhost/cb",
+      "https://sub.localhost./cb",
+      "https://metadata.google.internal./cb",
+      "https://redis.local./cb",
+      "https://intranet./cb",
+      "https://router.home.arpa/cb",
+      "https://0.0.0.0/cb",
+      "https://100.64.0.1/cb",
+      "https://100.100.100.200/cb",
+      "https://100.127.255.254/cb",
+      "https://192.0.0.1/cb",
+      "https://192.0.2.1/cb",
+      "https://192.88.99.1/cb",
+      "https://198.18.0.1/cb",
+      "https://198.19.255.254/cb",
+      "https://198.51.100.1/cb",
+      "https://203.0.113.1/cb",
+      "https://224.0.0.1/cb",
+      "https://240.0.0.1/cb",
+      "https://255.255.255.255/cb"
+    ]
+    const blockedResults: string[] = []
+    for (const uri of blockedRedirects) {
+      blockedResults.push(try refusedCode(registerDynamicClient({
+        clientName: "Disallowed Host Probe",
+        redirectUris: [uri]
+      })))
+    }
+
+    const allowedPublicBoundaries = [
+      "https://100.63.255.254/cb",
+      "https://100.128.0.1/cb",
+      "https://172.15.255.254/cb",
+      "https://172.32.0.1/cb",
+      "https://198.17.255.254/cb",
+      "https://198.20.0.1/cb",
+      "https://223.255.255.254/cb"
+    ]
+    const allowedCount = (try registerDynamicClient({
+      clientName: "Public Boundary Client",
+      redirectUris: allowedPublicBoundaries
+    })).redirect_uris.length
+
+    const probe = try tryPromise(() => startCountingTcpProbe())
+    const cimdStatuses: Array<string> = []
+    for (const target of [
+      `https://0.0.0.0:${probe.port}/client.json`,
+      `https://localhost.:${probe.port}/client.json`,
+      `https://sub.localhost:${probe.port}/client.json`
+    ]) {
+      cimdStatuses.push(try refusedStatusAndCode(fetchClientMetadata(target)))
+    }
+    const tcpHits = try Effect.try(() => probe.getHits())
+    try tryPromise(() => probe.close())
+
+    try check(() => assert.deepStrictEqual(
+      {
+        allBlockedRefused: blockedResults.every((code) => code === "invalid_redirect_uri"),
+        sampleBlocked: blockedResults.slice(0, 9),
+        allowedCount,
+        cimdProbe: {
+          statuses: cimdStatuses,
+          tcpHits
+        }
+      },
+      {
+        allBlockedRefused: true,
+        sampleBlocked: Array(9).fill("invalid_redirect_uri"),
+        allowedCount: allowedPublicBoundaries.length,
+        cimdProbe: {
+          statuses: ["400:invalid_client", "400:invalid_client", "400:invalid_client"],
+          tcpHits: 0
+        }
+      }
+    ))
+  })
+}, 60_000)
