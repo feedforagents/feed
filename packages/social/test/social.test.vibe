@@ -500,6 +500,13 @@ it.effect(
     try respondGroupInvite({ accountId: "bob", inviteId: bobInviteId, accept: true })
     const invitedCarol = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
     try respondGroupInvite({ accountId: "carol", inviteId: invitedCarol.inviteId, accept: true })
+    try seedAccount("dave", "dave", "Dave Observer")
+    try seedAccount("eve", "eve", "Eve Stranger")
+    const nonMemberInvitesMemberCode = try expectSocialCode(inviteToUserGroupChat({ accountId: "dave", chatId: group.id, targetHandleOrId: "bob" }))
+    const invitedEve = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "eve" })
+    const nonMemberInvitesPendingCode = try expectSocialCode(inviteToUserGroupChat({ accountId: "dave", chatId: group.id, targetHandleOrId: "eve" }))
+    const memberReinvitesMember = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "bob" })
+    const memberReinvitesPending = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "eve" })
     const groupMsg = try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Group signal" })
     const groupReact = try reactToMessage({ accountId: "carol", messageId: groupMsg.id, emoji: "👀" })
     const groupMsgs = try getChatMessages("alice", group.id)
@@ -554,6 +561,11 @@ it.effect(
         group.title,
         group.memberCount,
         invitedCarol.status,
+        nonMemberInvitesMemberCode,
+        invitedEve.status,
+        nonMemberInvitesPendingCode,
+        [memberReinvitesMember.status, memberReinvitesMember.added],
+        [memberReinvitesPending.status, memberReinvitesPending.added, memberReinvitesPending.inviteId === invitedEve.inviteId],
         groupReact.added,
         groupMsgs[0]?.reactions,
         carolLeft.left,
@@ -595,6 +607,11 @@ it.effect(
         "Trading Desk",
         1,
         "pending",
+        "Forbidden",
+        "pending",
+        "Forbidden",
+        ["accepted", true],
+        ["pending", false, true],
         true,
         [{ emoji: "👀", count: 1, reactedByViewer: false }],
         true,
