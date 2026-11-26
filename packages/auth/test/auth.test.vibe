@@ -474,13 +474,13 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
     const racePhone = "+14155550155"
     const raceOutcomes = try Effect.all(
       [
-        Effect.either(startPhoneVerification({ phoneE164: racePhone, config: localnetConfig })),
-        Effect.either(startPhoneVerification({ phoneE164: racePhone, config: localnetConfig }))
+        Effect.result(startPhoneVerification({ phoneE164: racePhone, config: localnetConfig })),
+        Effect.result(startPhoneVerification({ phoneE164: racePhone, config: localnetConfig }))
       ],
       { concurrency: "unbounded" }
     )
     const raceResults = [...raceOutcomes.map((outcome) =>
-      outcome._tag === "Left" ? failureCode(outcome.left) : "ok"
+      outcome._tag === "Failure" ? failureCode(outcome.failure) : "ok"
     )].sort()
     const racePhoneHash = hmacSha256Hex(localnetConfig.digestKey, racePhone)
     const raceRows = try sqlQuery(
