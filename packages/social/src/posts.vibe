@@ -1557,23 +1557,29 @@ export effect function deletePost(accountId: string, postId: string): DeletePost
     }
     try tx.query("UPDATE feed_posts SET deleted_at = $2 WHERE id = $1 AND deleted_at IS NULL", [postId, now])
     let parentReplyCount: number | null = null
+    let eventParentReplyCount: number | null = null
     if (replyToPostId !== null) {
       try tx.query(
         "UPDATE feed_posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1",
         [replyToPostId]
       )
+      const visibleReplyRows = try tx.query(
+        `SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")}`,
+        [replyToPostId, accountId]
+      )
+      parentReplyCount = visibleReplyRows[0] === undefined ? 0 : safeInt(visibleReplyRows[0].visible_count, 0)
       const totalReplyRows = try tx.query(
         "SELECT count(*)::int AS total_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL",
         [replyToPostId]
       )
-      parentReplyCount = totalReplyRows[0] === undefined ? 0 : safeInt(totalReplyRows[0].total_count, 0)
+      eventParentReplyCount = totalReplyRows[0] === undefined ? 0 : safeInt(totalReplyRows[0].total_count, 0)
     }
     const events: FeedRealtimeEvent[] = [{
       type: "post.deleted",
       postId,
       authorId: postAuthorId,
       replyToPostId,
-      parentReplyCount
+      parentReplyCount: eventParentReplyCount
     }]
     return { value: { postId, deleted: true, replyToPostId, parentReplyCount }, events }
   })

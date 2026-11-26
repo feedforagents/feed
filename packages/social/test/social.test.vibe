@@ -40,6 +40,7 @@ import {
   markChatRead,
   markNotificationsRead,
   muteAccount,
+  personalizePostDeletedEvent,
   reactToMessage,
   realtimeBusLayer,
   removeGroupMember,
@@ -51,6 +52,7 @@ import {
   respondGroupInvite,
   searchWorld,
   sendChatMessage,
+  subscribeViewerFeedEvents,
   transferGroupOwnership,
   unblockAccount,
   unfollowAccount,
@@ -200,9 +202,24 @@ it.effect(
 
     const nonAuthorDeleteCode = try expectSocialCode(deletePost("alice", reply.id))
     try muteAccount("bob", "carol")
+    const aliceEvents = try subscribeViewerFeedEvents("alice")
+    const bobEvents = try subscribeViewerFeedEvents("bob")
+    const anonEvents = try subscribeViewerFeedEvents(null)
+    const aliceHead = fork Stream.runHead(aliceEvents)
+    const bobHead = fork Stream.runHead(bobEvents)
+    const anonHead = fork Stream.runHead(anonEvents)
+    try Effect.yieldNow
     const deletedReply = try deletePost("bob", reply.id)
+    const aliceEvent = try join aliceHead
+    const bobEvent = try join bobHead
+    const anonEvent = try join anonHead
     const deletedLookupCode = try expectSocialCode(getPostThread(reply.id, "alice", "game"))
     const threadAfterDelete = try getPostThread(root.id, "alice", "game")
+    const threadAfterDeleteBob = try getPostThread(root.id, "bob", "game")
+    const store = try Store
+    const deletedEvent: FeedRealtimeEvent = { type: "post.deleted", postId: reply.id, authorId: "bob", replyToPostId: root.id, parentReplyCount: 1 }
+    const sseForAlice = try personalizePostDeletedEvent(store, deletedEvent, "alice")
+    const sseForBob = try personalizePostDeletedEvent(store, deletedEvent, "bob")
 
     const proofTime = try Clock.currentTimeMillis
     try queryStore(
@@ -226,6 +243,16 @@ it.effect(
       threadCounts: [threadBeforeDelete.post.replyCount, threadBeforeDelete.replies.map((r) => r.id), replyThread.parentPost?.id, threadAfterDelete.post.replyCount, threadAfterDelete.replies.length],
       engagement: [liked.likeCount, unliked.likeCount, reliked.liked, reposted.repostCount, unreposted.repostCount, rereposted.reposted],
       deletedReply,
+      deleterThreadAfterDelete: [threadAfterDeleteBob.post.replyCount, threadAfterDeleteBob.replies.length],
+      sseDeletedCounts: [
+        sseForAlice.type === "post.deleted" ? sseForAlice.parentReplyCount : null,
+        sseForBob.type === "post.deleted" ? sseForBob.parentReplyCount : null
+      ],
+      sseEventCounts: [
+        aliceEvent._tag === "Some" && aliceEvent.value.type === "post.deleted" ? aliceEvent.value.parentReplyCount : null,
+        bobEvent._tag === "Some" && bobEvent.value.type === "post.deleted" ? bobEvent.value.parentReplyCount : null,
+        anonEvent._tag === "Some" && anonEvent.value.type === "post.deleted" ? anonEvent.value.parentReplyCount : null
+      ],
       gameRoot: gameRoot === undefined ? undefined : {
         viaClientName: gameRoot.viaClientName,
         marketId: gameRoot.marketId,
@@ -279,7 +306,10 @@ it.effect(
       rootLength: 280,
       threadCounts: [2, [reply.id, carolReply.id], root.id, 1, 1],
       engagement: [1, 0, true, 1, 0, true],
-      deletedReply: { postId: reply.id, deleted: true, replyToPostId: root.id, parentReplyCount: 1 },
+      deletedReply: { postId: reply.id, deleted: true, replyToPostId: root.id, parentReplyCount: 0 },
+      deleterThreadAfterDelete: [0, 0],
+      sseDeletedCounts: [1, 0],
+      sseEventCounts: [1, 0, 1],
       gameRoot: {
         viaClientName: "Claude",
         marketId: "seed-market-1",

@@ -1,5 +1,5 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
-import { Store, toText, type Tx } from "@repo/db"
+import { Store, toInt, toText, type Tx } from "@repo/db"
 
 export type FeedRealtimeEvent =
   | {
@@ -194,6 +194,40 @@ effect function runFailClosedLookup(lookup: boolean!unknown!never): boolean!! {
   return Exit.isSuccess(res) ? res.value : false
 }
 
+function viewerAuthorVisibilitySql(viewerParam: string, authorColumn: string): string {
+  return `NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = ${viewerParam} AND b.blocked_id = ${authorColumn}) OR (b.blocker_id = ${authorColumn} AND b.blocked_id = ${viewerParam})) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = ${viewerParam} AND m.muted_id = ${authorColumn})`
+}
+
+effect function visibleParentReplyCountForViewer(
+  store: Store.Shape,
+  parentPostId: string,
+  viewerId: string
+): number | null!! {
+  const res = try exit(store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")}`,
+      [parentPostId, viewerId]
+    )
+    const row = rows[0]
+    return row === undefined ? 0 : toInt(row.visible_count)
+  }))
+  return Exit.isSuccess(res) ? res.value : null
+}
+
+export effect function personalizePostDeletedEvent(
+  store: Store.Shape | undefined,
+  event: FeedRealtimeEvent,
+  viewerAccountId: string | null | undefined
+): FeedRealtimeEvent!! {
+  if (event.type !== "post.deleted") return event
+  const viewerId = normalizeViewerId(viewerAccountId)
+  const parentId = event.replyToPostId ?? null
+  if (viewerId === undefined || parentId === null || parentId === "" || store === undefined) return event
+  const count = try visibleParentReplyCountForViewer(store, parentId, viewerId)
+  if (count === null) return event
+  return { type: "post.deleted", postId: event.postId, authorId: event.authorId, replyToPostId: event.replyToPostId, parentReplyCount: count }
+}
+
 effect function isAuthorVisibleInStore(
   store: Store.Shape | undefined,
   viewerId: string,
@@ -381,7 +415,8 @@ export effect function subscribeViewerFeedEvents(
   const maybeStore = try Effect.serviceOption(Store)
   const store = storeOverride ?? (Option.isSome(maybeStore) ? maybeStore.value : undefined)
   const events = try subscribeFeedEvents()
-  return Stream.filterEffect(events, (event) => canDeliverRealtimeEventToViewer(store, event, viewerAccountId))
+  const delivered = Stream.filterEffect(events, (event) => canDeliverRealtimeEventToViewer(store, event, viewerAccountId))
+  return Stream.mapEffect(delivered, (event) => personalizePostDeletedEvent(store, event, viewerAccountId))
 }
 
 export function encodeSseEvent(event: FeedRealtimeEvent): Uint8Array {
