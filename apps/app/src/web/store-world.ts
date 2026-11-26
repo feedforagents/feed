@@ -338,16 +338,21 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   await loadFeed(tab);
 }
 
+let threadRequestSeq = 0;
+
 export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
   const s = getStoreSnapshot();
   const sort = sortOverride ?? s.threadSort;
   const viewerId = s.viewer?.accountId ?? null;
+  threadRequestSeq += 1;
+  const requestSeq = threadRequestSeq;
   setStoreState({ threadLoading: true, activePostId: postId, threadSort: sort });
   recordPublicView("PostDetail");
   const baseUrl = `/api/posts/${encodeURIComponent(postId)}?sort=${encodeURIComponent(sort)}`;
   const res = await requestJson(appendAnonymousModeParam(baseUrl, s), {
     parse: (raw) => decodePostThread(raw, viewerId),
   });
+  if (requestSeq !== threadRequestSeq) return;
   if (res.ok && res.data) {
     setStoreState({ activeThread: res.data, threadLoading: false });
     return;
@@ -357,7 +362,8 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
 }
 
 export function closeThread(): void {
-  setStoreState({ activeThread: null, activePostId: null });
+  threadRequestSeq += 1;
+  setStoreState({ activeThread: null, activePostId: null, threadLoading: false });
 }
 
 export async function loadArticle(articleId: string): Promise<void> {

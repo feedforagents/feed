@@ -257,6 +257,9 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
 }
 
 function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
+  if (getStoreSnapshot().route === "PostDetail" && parsed.route !== "PostDetail") {
+    closeThread();
+  }
   const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
   setStoreState({
     route: parsed.route,

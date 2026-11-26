@@ -272,6 +272,7 @@ function installMockNetwork(
     holdPnlRange?: string;
     holdProfileReplies?: boolean;
     readonly perps?: ReadonlyArray<Record<string, unknown>>;
+    readonly threadFetch?: (path: string) => Promise<Response> | null;
   } = {},
 ) {
   const heldHistory = new Map<string, Array<() => void>>();
@@ -309,6 +310,8 @@ function installMockNetwork(
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
     fetchPaths.push(path);
+    const delayedThread = options.threadFetch?.(path) ?? null;
+    if (delayedThread) return delayedThread;
     if (path === "/api/auth/phone/start") {
       try {
         phoneStartRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
@@ -2070,4 +2073,92 @@ it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, 
   expect(getStoreSnapshot().route).toBe("Home");
   pushState.mockRestore();
   replaceState.mockRestore();
+});
+
+const SAMPLE_THREAD = {
+  post: SAMPLE_POSTS[0],
+  parentPost: null,
+  replies: [],
+};
+
+const SAMPLE_THREAD_B = {
+  post: { ...SAMPLE_POSTS[0], id: "browser-post-2", content: "Second post for the stale thread fetch probe.", createdAt: Date.now() - 30_000 },
+  parentPost: null,
+  replies: [],
+};
+
+async function openThreadDetail() {
+  await renderApp();
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
+  await act(() => userEvent.click(replyButton));
+  await expect.element(page.getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
+}
+
+it('Thread close during load stays closed (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const threadGate = { release: () => {} };
+  let threadConsumed = false;
+  const threadBody = Response.json(SAMPLE_THREAD);
+  const readThreadBody = threadBody.text.bind(threadBody);
+  threadBody.text = async () => {
+    threadConsumed = true;
+    return readThreadBody();
+  };
+  const threadResponse = new Promise<Response>((resolve) => {
+    threadGate.release = () => resolve(threadBody);
+  });
+  installMockNetwork({ threadFetch: (path) => (path.startsWith("/api/posts/") ? threadResponse : null) });
+  await openThreadDetail();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Back" }).first()));
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().route).toBe("Home");
+  });
+
+  threadGate.release();
+  await vi.waitFor(() => {
+    expect(threadConsumed).toBe(true);
+  });
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().activeThread).toBeNull();
+  expect(getStoreSnapshot().threadLoading).toBe(false);
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+});
+
+it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const gates = new Map<string, { release: () => void }>();
+  const threadResponses = new Map<string, Promise<Response>>();
+  for (const [id, thread] of [
+    ["browser-post-1", SAMPLE_THREAD],
+    ["browser-post-2", SAMPLE_THREAD_B],
+  ] as const) {
+    const gate = { release: () => {} };
+    threadResponses.set(
+      id,
+      new Promise<Response>((resolve) => {
+        gate.release = () => resolve(Response.json(thread));
+      }),
+    );
+    gates.set(id, gate);
+  }
+  installMockNetwork({
+    threadFetch: (path) => {
+      const id = path.startsWith("/api/posts/") ? decodeURIComponent(path.slice("/api/posts/".length)) : null;
+      return id === null ? null : (threadResponses.get(id) ?? null);
+    },
+  });
+  await openThreadDetail();
+
+  act(() => {
+    void storeActions.openThread("browser-post-2");
+  });
+  gates.get("browser-post-2")?.release();
+  gates.get("browser-post-1")?.release();
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().activeThread?.post.card.id).toBe("browser-post-2");
+  });
+  await expect.element(page.getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
 });
