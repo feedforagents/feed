@@ -262,7 +262,7 @@ export interface PredictionOrderPanelProps {
   yesPositionShares?: number;
   /** Owned NO shares on this market (used for Sell + Max button). */
   noPositionShares?: number;
-  /** Side the ticket opens on (default `YES`). */
+  /** Side the ticket opens on (default `YES`); a new value moves an open ticket to that side. */
   initialSide?: "YES" | "NO";
   /** Submits a buy or sell prediction order. */
   onSubmitOrder: (order: PredictionOrderInput) => void;
@@ -311,7 +311,7 @@ export type MarketsTradingTerminalProps = Omit<ComponentProps<"div">, "children"
   onRebalancePerp?: (order: PerpRebalanceOrderInput) => void;
   /** Closes an open perp position by ID. */
   onClosePerp?: (positionId: string) => void;
-  /** Side the prediction ticket opens on (default `YES`). */
+  /** Side the prediction ticket opens on (default `YES`); a new value moves an open ticket to that side. */
   initialPredictionSide?: "YES" | "NO";
   /** Submits a prediction buy or sell order. */
   onSubmitPrediction?: (order: PredictionOrderInput) => void;
@@ -1436,6 +1436,11 @@ export function PredictionOrderPanel({
 
   const [action, setAction] = useState<"buy" | "sell">("buy");
   const [side, setSide] = useState<"YES" | "NO">(initialSide);
+  const [prevInitialSide, setPrevInitialSide] = useState(initialSide);
+  if (initialSide !== prevInitialSide) {
+    setPrevInitialSide(initialSide);
+    setSide(initialSide);
+  }
   const [amountText, setAmountText] = useState("10");
   const [resolutionOpen, setResolutionOpen] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<TradeConfirmationDetails | null>(null);
