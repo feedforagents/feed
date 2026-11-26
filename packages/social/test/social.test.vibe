@@ -1472,3 +1472,77 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'clears and hides chat notifications after removal, leave, and group deletion (spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => withSocialWorld(effect {
+    try seedAccount("erin", "erin", "Erin Observer")
+    try seedChatParticipants()
+
+    const group = try createUserGroupChat("alice", "Ops Desk", ["bob", "carol"])
+    const bobInvite = (try listAlphaInvites("bob"))[0]
+    const carolInvite = (try listAlphaInvites("carol"))[0]
+    try respondGroupInvite({ accountId: "bob", inviteId: bobInvite?.id ?? "", accept: true })
+    try respondGroupInvite({ accountId: "carol", inviteId: carolInvite?.id ?? "", accept: true })
+    try markNotificationsRead("bob")
+    try markNotificationsRead("carol")
+
+    // Alice sends a message: Bob and Carol each receive an unread chat_message notification.
+    try sendChatMessage({ senderId: "alice", senderKind: "user", chatId: group.id, content: "Desk briefing" })
+    const carolUnreadBeforeRemove = try getUnreadNotificationCount("carol", "game")
+    try removeGroupMember("alice", group.id, "carol")
+    const carolUnreadAfterRemove = try getUnreadNotificationCount("carol", "game")
+    const carolChatNotifsAfterRemove = (try listNotifications("carol", 50, "game")).filter(
+      (n) => n.kind === "chat_message" && n.chatId === group.id
+    )
+
+    // Re-inviting Carol must not resurrect pre-removal chat_message notifications.
+    const carolReinvite = try inviteToUserGroupChat({ accountId: "alice", chatId: group.id, targetHandleOrId: "carol" })
+    try respondGroupInvite({ accountId: "carol", inviteId: carolReinvite.inviteId, accept: true })
+    const carolChatNotifsAfterRejoin = (try listNotifications("carol", 50, "game")).filter(
+      (n) => n.kind === "chat_message" && n.chatId === group.id
+    )
+
+    // Bob sends a message so Alice has an unread chat_message notification, then Alice transfers and leaves.
+    try sendChatMessage({ senderId: "bob", senderKind: "user", chatId: group.id, content: "Handing off" })
+    const aliceUnreadBeforeLeave = try getUnreadNotificationCount("alice", "game")
+    try transferGroupOwnership("alice", group.id, "bob")
+    try leaveGroupChat("alice", group.id)
+    const aliceUnreadAfterLeave = try getUnreadNotificationCount("alice", "game")
+    const aliceChatNotifsAfterLeave = (try listNotifications("alice", 50, "game")).filter(
+      (n) => n.kind === "chat_message" && n.chatId === group.id
+    )
+
+    // Erin has a pending group_invite notification and Carol has an unread chat_message notification; deleting the group clears both.
+    try inviteToUserGroupChat({ accountId: "bob", chatId: group.id, targetHandleOrId: "erin" })
+    const erinUnreadBeforeDelete = try getUnreadNotificationCount("erin", "game")
+    try deleteGroupChat("bob", group.id)
+    const erinUnreadAfterDelete = try getUnreadNotificationCount("erin", "game")
+    const erinNotifsAfterDelete = (try listNotifications("erin", 50, "game")).filter((n) => n.chatId === group.id)
+    const carolNotifsAfterDelete = (try listNotifications("carol", 50, "game")).filter((n) => n.chatId === group.id)
+
+    // Direct visibility guard: orphaned notification rows for a nonexistent chat stay hidden.
+    const store = try Store
+    try store.transaction((tx) =>
+      tx.query(
+        `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, chat_id, invite_id, title, body, is_game_only, read_at, created_at)
+         VALUES ($1, $2, 'chat_message', $3, NULL, NULL, $4, NULL, 'Orphaned chat', 'stale preview', false, NULL, $5)`,
+        ["orphan-chat-notif", "erin", "bob", "missing-chat-id", 1_700_000_000_000]
+      )
+    )
+    const erinUnreadWithOrphan = try getUnreadNotificationCount("erin", "game")
+    const erinNotifsWithOrphan = (try listNotifications("erin", 50, "game")).filter((n) => n.id === "orphan-chat-notif")
+
+    try check(() => assert.deepStrictEqual({
+      afterRemove: [carolUnreadBeforeRemove, carolUnreadAfterRemove, carolChatNotifsAfterRemove.length, carolChatNotifsAfterRejoin.length],
+      afterLeave: [aliceUnreadBeforeLeave, aliceUnreadAfterLeave, aliceChatNotifsAfterLeave.length],
+      afterDelete: [erinUnreadBeforeDelete, erinUnreadAfterDelete, erinNotifsAfterDelete.length, carolNotifsAfterDelete.length],
+      orphanHidden: [erinUnreadWithOrphan, erinNotifsWithOrphan.length]
+    }, {
+      afterRemove: [1, 0, 0, 0],
+      afterLeave: [1, 0, 0],
+      afterDelete: [1, 0, 0, 0],
+      orphanHidden: [0, 0]
+    }))
+  })
+)

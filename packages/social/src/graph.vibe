@@ -856,7 +856,7 @@ function notificationVisibilityWhereSql(mode: SocialPresentationMode): string {
   const modeFilter = mode === "social"
     ? " AND n.is_game_only = false AND n.kind NOT IN ('market_resolved', 'pnl_digest')"
     : ""
-  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.actor_id IS NULL OR (NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = n.actor_id)))`
+  return `n.account_id = $1${modeFilter} AND (n.post_id IS NULL OR (p.id IS NOT NULL AND p.deleted_at IS NULL)) AND (n.chat_id IS NULL OR (EXISTS (SELECT 1 FROM feed_chats c WHERE c.id = n.chat_id) AND (n.kind <> 'chat_message' OR EXISTS (SELECT 1 FROM feed_chat_members cm WHERE cm.chat_id = n.chat_id AND cm.member_id = $1)))) AND (n.actor_id IS NULL OR (NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = n.actor_id) OR (b.blocker_id = n.actor_id AND b.blocked_id = $1)) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = n.actor_id)))`
 }
 
 export effect function listNotifications(
