@@ -1,5 +1,6 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
 import { Store, toInt, toText, type Tx } from "@repo/db"
+import { viewerAuthorVisibilitySql } from "./visibility.vibe"
 
 export type FeedRealtimeEvent =
   | {
@@ -192,10 +193,6 @@ function recipientListAllows(recipientIds: ReadonlyArray<string> | undefined, vi
 effect function runFailClosedLookup(lookup: boolean!unknown!never): boolean!! {
   const res = try exit(lookup)
   return Exit.isSuccess(res) ? res.value : false
-}
-
-function viewerAuthorVisibilitySql(viewerParam: string, authorColumn: string): string {
-  return `NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = ${viewerParam} AND b.blocked_id = ${authorColumn}) OR (b.blocker_id = ${authorColumn} AND b.blocked_id = ${viewerParam})) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = ${viewerParam} AND m.muted_id = ${authorColumn})`
 }
 
 effect function visibleParentReplyCountForViewer(

@@ -50,6 +50,7 @@ import {
   type SubjectKind,
   type SubjectProfile
 } from "./shared.vibe"
+import { viewerAuthorVisibilitySql } from "./visibility.vibe"
 
 export { SocialFailure, type SocialPresentationMode } from "./shared.vibe"
 
@@ -295,10 +296,6 @@ const TOP_RECENCY_WINDOW_MS = 24 * HOUR_MS
 function toAuthorKind(raw: unknown): PostAuthorKind {
   const value = toText(raw)
   return value === "npc" ? "npc" : value === "org" ? "org" : "user"
-}
-
-function viewerAuthorVisibilitySql(viewerParam: string, authorColumn: string): string {
-  return `NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = ${viewerParam} AND b.blocked_id = ${authorColumn}) OR (b.blocker_id = ${authorColumn} AND b.blocked_id = ${viewerParam})) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = ${viewerParam} AND m.muted_id = ${authorColumn})`
 }
 
 function socialModeMarketExclusionSql(alias: string): string {
