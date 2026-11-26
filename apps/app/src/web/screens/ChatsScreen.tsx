@@ -375,7 +375,7 @@ export function ChatsScreen() {
 
   const handleSelectChat = (chatId: string) => {
     setMobileShowThread(true);
-    void storeActions.loadChatMessages(chatId);
+    void storeActions.selectChat(chatId);
   };
 
   return (

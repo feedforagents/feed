@@ -1175,18 +1175,27 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
   }
 }
 
+let chatMessagesLoadCount = 0;
+
 export async function loadChatMessages(chatId: string): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
+  const loadId = ++chatMessagesLoadCount;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
     parse: (raw) => decodeChatMessages(raw, viewerId),
   });
-  if (res.ok) {
-    setStoreState({ selectedChatId: chatId, chatMessages: res.data });
+  if (loadId !== chatMessagesLoadCount) return;
+  if (res.ok && getStoreSnapshot().selectedChatId === chatId) {
+    setStoreState({ chatMessages: res.data });
     if (res.data.length > 0) {
       await markChatRead(chatId);
     }
   }
+}
+
+export async function selectChat(chatId: string): Promise<void> {
+  setStoreState({ selectedChatId: chatId });
+  await loadChatMessages(chatId);
 }
 
 export async function startDirectChat(targetHandleOrId: string): Promise<boolean> {
@@ -1210,7 +1219,7 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
   }
   await loadChats(false, createdId);
   if (createdId) {
-    await loadChatMessages(createdId);
+    await selectChat(createdId);
   }
   return true;
 }
@@ -1230,7 +1239,7 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
   const chatId = optStr(rec.id);
   setStatusNotice(`Created group "${title}".`);
   await loadChats(false, chatId);
-  if (chatId) await loadChatMessages(chatId);
+  if (chatId) await selectChat(chatId);
   return true;
 }
 
