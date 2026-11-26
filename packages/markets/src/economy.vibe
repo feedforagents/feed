@@ -325,18 +325,20 @@ effect function loadTradingAggregatesTx(
 }!StoreFailure {
   const now = try Clock.currentTimeMillis
   const predRows = try tx.query(
-    `SELECT p.holder_id, p.side, p.shares, p.cost_basis_cents, m.yes_shares, m.no_shares
+    `SELECT p.holder_id, p.side, p.shares, p.cost_basis_cents, m.yes_shares, m.no_shares, m.status, m.expires_at
      FROM feed_prediction_positions p
      JOIN feed_prediction_markets m ON m.id = p.market_id
-     WHERE p.holder_kind = $1 AND p.settled_at IS NULL AND p.shares > 0
-       AND m.status = 'open' AND m.expires_at > $2`,
-    [holderKind, now]
+     WHERE p.holder_kind = $1 AND p.settled_at IS NULL AND p.shares > 0`,
+    [holderKind]
   )
   const predValueMap = new Map<string, number>()
   const openUnrealizedMap = new Map<string, number>()
   for (const row of predRows) {
     const holderId = requiredText(row.holder_id)
-    const mtm = markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+    const tradeable = requiredText(row.status) === "open" && toInt(row.expires_at) > now
+    const mtm = tradeable
+      ? markToMarketPredictionCents(row.side, toInt(row.shares), toInt(row.yes_shares), toInt(row.no_shares))
+      : 0
     const costBasis = toInt(row.cost_basis_cents)
     predValueMap.set(holderId, (predValueMap.get(holderId) ?? 0) + mtm)
     openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + (mtm - costBasis))

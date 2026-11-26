@@ -14,6 +14,7 @@ import {
   executeNpcSpotTrade,
   getAccountEconomy,
   getAccountLeaderboardRank,
+  getFilteredLeaderboardPage,
   getLeaderboard,
   getMarketPriceHistory,
   getPerpMarket,
@@ -930,7 +931,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
 )
 
 it.effect('Open positions stop marking expired prediction markets to market (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', () =>
-  runWithSeededMarketDay(effect (_now) => {
+  runWithSeededMarketDay(effect (now) => {
     try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
     const buy = try buyPredictionShares({
       actorId: "user-alice",
@@ -940,17 +941,17 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
       amountCents: 2_000
     })
     const expectedMtm = markToMarketPredictionCents("yes", buy.shares, buy.market.yesShares, buy.market.noShares)
+    const expectedProfitBefore = expectedMtm - 2_000
+    const expectedProfitAfter = -2_000
     const beforeExpiry = try getUserPositions("user-alice")
     const beforeItem = beforeExpiry.predictionPositions[0]
     const econBefore = try getAccountEconomy("user-alice")
     const boardBefore = try getLeaderboard()
     const boardBeforeAlice = boardBefore.entries.find((e) => e.accountId === "user-alice")
-    try TestClock.adjust(Duration.seconds(4 * 86_400))
-    const afterExpiry = try getUserPositions("user-alice")
-    const afterItem = afterExpiry.predictionPositions[0]
-    const econAfter = try getAccountEconomy("user-alice")
-    const boardAfter = try getLeaderboard()
-    const boardAfterAlice = boardAfter.entries.find((e) => e.accountId === "user-alice")
+    const board7dBefore = try getFilteredLeaderboardPage({ timeframe: "7d", viewerAccountId: "user-alice" })
+    const board7dBeforeAlice = board7dBefore.currentUser
+    const board30dBefore = try getFilteredLeaderboardPage({ timeframe: "30d", viewerAccountId: "user-alice" })
+    const board30dBeforeAlice = board30dBefore.currentUser
     try check(() => assert.deepStrictEqual(
       {
         listedBeforeExpiry: beforeExpiry.predictionPositions.length,
@@ -958,14 +959,12 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
         expectedMtm,
         estimatedMatchesMtmBeforeExpiry: beforeItem?.estimatedValueCents === expectedMtm,
         mtmPositiveBeforeExpiry: (beforeItem?.estimatedValueCents ?? 0) > 0,
-        stillListedAfterExpiry: afterExpiry.predictionPositions.length,
-        sharesAfterExpiry: afterItem?.shares,
-        marketStatusAfterExpiry: afterItem?.marketStatus,
-        estimatedAfterExpiry: afterItem?.estimatedValueCents,
         econBeforeExpiry: econBefore.positionValueCents,
         boardBeforeExpiry: boardBeforeAlice?.positionValueCents,
-        econAfterExpiry: econAfter.positionValueCents,
-        boardAfterExpiry: boardAfterAlice?.positionValueCents
+        econProfitBeforeExpiry: econBefore.netProfitCents,
+        boardProfitBeforeExpiry: boardBeforeAlice?.netProfitCents,
+        board7dProfitBeforeExpiry: board7dBeforeAlice?.netProfitCents,
+        board30dProfitBeforeExpiry: board30dBeforeAlice?.netProfitCents
       },
       {
         listedBeforeExpiry: 1,
@@ -973,14 +972,84 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
         expectedMtm,
         estimatedMatchesMtmBeforeExpiry: true,
         mtmPositiveBeforeExpiry: true,
+        econBeforeExpiry: expectedMtm,
+        boardBeforeExpiry: expectedMtm,
+        econProfitBeforeExpiry: expectedProfitBefore,
+        boardProfitBeforeExpiry: expectedProfitBefore,
+        board7dProfitBeforeExpiry: expectedProfitBefore,
+        board30dProfitBeforeExpiry: expectedProfitBefore
+      }
+    ))
+    try TestClock.adjust(Duration.millis(buy.market.expiresAt - now))
+    const atExpiry = try getUserPositions("user-alice")
+    const atItem = atExpiry.predictionPositions[0]
+    const econAt = try getAccountEconomy("user-alice")
+    const boardAt = try getLeaderboard()
+    const boardAtAlice = boardAt.entries.find((e) => e.accountId === "user-alice")
+    const board7dAt = try getFilteredLeaderboardPage({ timeframe: "7d", viewerAccountId: "user-alice" })
+    const board7dAtAlice = board7dAt.currentUser
+    const board30dAt = try getFilteredLeaderboardPage({ timeframe: "30d", viewerAccountId: "user-alice" })
+    const board30dAtAlice = board30dAt.currentUser
+    try check(() => assert.deepStrictEqual(
+      {
+        stillListedAtExpiry: atExpiry.predictionPositions.length,
+        sharesAtExpiry: atItem?.shares,
+        marketStatusAtExpiry: atItem?.marketStatus,
+        estimatedAtExpiry: atItem?.estimatedValueCents,
+        econAtExpiry: econAt.positionValueCents,
+        boardAtExpiry: boardAtAlice?.positionValueCents,
+        econProfitAtExpiry: econAt.netProfitCents,
+        boardProfitAtExpiry: boardAtAlice?.netProfitCents,
+        board7dProfitAtExpiry: board7dAtAlice?.netProfitCents,
+        board30dProfitAtExpiry: board30dAtAlice?.netProfitCents
+      },
+      {
+        stillListedAtExpiry: 1,
+        sharesAtExpiry: buy.shares,
+        marketStatusAtExpiry: "open",
+        estimatedAtExpiry: 0,
+        econAtExpiry: 0,
+        boardAtExpiry: 0,
+        econProfitAtExpiry: expectedProfitAfter,
+        boardProfitAtExpiry: expectedProfitAfter,
+        board7dProfitAtExpiry: expectedProfitAfter,
+        board30dProfitAtExpiry: expectedProfitAfter
+      }
+    ))
+    try TestClock.adjust(Duration.seconds(24 * 86_400))
+    const afterExpiry = try getUserPositions("user-alice")
+    const afterItem = afterExpiry.predictionPositions[0]
+    const econAfter = try getAccountEconomy("user-alice")
+    const boardAfter = try getLeaderboard()
+    const boardAfterAlice = boardAfter.entries.find((e) => e.accountId === "user-alice")
+    const board7dAfter = try getFilteredLeaderboardPage({ timeframe: "7d", viewerAccountId: "user-alice" })
+    const board7dAfterAlice = board7dAfter.currentUser
+    const board30dAfter = try getFilteredLeaderboardPage({ timeframe: "30d", viewerAccountId: "user-alice" })
+    const board30dAfterAlice = board30dAfter.currentUser
+    try check(() => assert.deepStrictEqual(
+      {
+        stillListedAfterExpiry: afterExpiry.predictionPositions.length,
+        sharesAfterExpiry: afterItem?.shares,
+        marketStatusAfterExpiry: afterItem?.marketStatus,
+        estimatedAfterExpiry: afterItem?.estimatedValueCents,
+        econAfterExpiry: econAfter.positionValueCents,
+        boardAfterExpiry: boardAfterAlice?.positionValueCents,
+        econProfitAfterExpiry: econAfter.netProfitCents,
+        boardProfitAfterExpiry: boardAfterAlice?.netProfitCents,
+        board7dProfitAfterExpiry: board7dAfterAlice?.netProfitCents,
+        board30dProfitAfterExpiry: board30dAfterAlice?.netProfitCents
+      },
+      {
         stillListedAfterExpiry: 1,
         sharesAfterExpiry: buy.shares,
         marketStatusAfterExpiry: "open",
         estimatedAfterExpiry: 0,
-        econBeforeExpiry: expectedMtm,
-        boardBeforeExpiry: expectedMtm,
         econAfterExpiry: 0,
-        boardAfterExpiry: 0
+        boardAfterExpiry: 0,
+        econProfitAfterExpiry: expectedProfitAfter,
+        boardProfitAfterExpiry: expectedProfitAfter,
+        board7dProfitAfterExpiry: expectedProfitAfter,
+        board30dProfitAfterExpiry: expectedProfitAfter
       }
     ))
   })
