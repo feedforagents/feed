@@ -1233,11 +1233,15 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
         throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
       }
       const flipMargin = ceilDiv(flipSize, input.leverage)
-      const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
-      const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
-      const finalLong = input.side === "long" ? afterCloseLong + flipSize : afterCloseLong
-      const finalShort = input.side === "short" ? afterCloseShort + flipSize : afterCloseShort
-      const executionPriceCents = computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+      const { finalLong, finalShort, executionPriceCents } = computeFlippedOiAndMark(
+        indexPriceCents,
+        longOi,
+        shortOi,
+        existingSide,
+        existing.sizeCents,
+        input.side,
+        flipSize
+      )
       const feeCents = canonicalTradingFee(existing.sizeCents) + canonicalTradingFee(flipSize)
       const estLiq = computeLiquidationPriceCents({
         posId: 1,
@@ -1433,12 +1437,21 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
     if (flipSizeCents < MIN_ORDER_SIZE_CENTS) {
       throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
     }
+    const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
+      market.indexPriceCents,
+      market.longOiCents,
+      market.shortOiCents,
+      existingSide,
+      existing.sizeCents,
+      input.side,
+      flipSizeCents
+    )
+    try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
     const flipCollateralCents = ceilDiv(flipSizeCents, input.leverage)
     const closedOld = try settlePerpCloseSliceTx(tx, {
       posRow: existingRow,
       market,
       closeSizeCents: existing.sizeCents,
-      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
       viaClientName,
       now
     })
@@ -1457,7 +1470,6 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       collateralCents: flipCollateralCents,
       sizeCents: flipSizeCents,
       leverage: input.leverage,
-      ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
       viaClientName,
       currentPeriod,
       action: "flip",

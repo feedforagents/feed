@@ -480,6 +480,22 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
       collateralCents: 400,
       leverage: 5
     })
+    const flipPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5
+    })
+    const flipSlippageBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      maxSlippageBps: 600
+    }))
     const modeFlipPreview = try previewPerpOrder({
       ownerId: "user-alice",
       ticker: "XTRPC",
@@ -505,7 +521,8 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
       ticker: "XTRPC",
       side: "short",
       collateralCents: 2_000,
-      leverage: 5
+      leverage: 5,
+      maxSlippageBps: flipPreview.priceImpactBps
     })
 
     // spec/markets/spotPerp.md, "UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods"
@@ -586,9 +603,13 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
           reduced.position.sizeCents
         ],
         flipFlow: [
+          flipPreview.action,
+          flipPreview.priceImpactBps,
+          flipSlippageBlockedCode,
           flipped.action,
           flipped.position.side,
           flipped.position.sizeCents,
+          flipped.executionPriceCents === flipPreview.executionPriceCents,
           flipped.closedPositionId === opened.positionId
         ],
         modeFlipPreview: [
@@ -635,7 +656,7 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
         slippageBlockedCode: "SLIPPAGE_EXCEEDED",
         addFlow: ["open", "add", "add", 10_000, 2_000],
         partialAndReduce: [false, 4_000, 6_000, "reduce", 4_000],
-        flipFlow: ["flip", "short", 6_000, true],
+        flipFlow: ["flip", 952, "SLIPPAGE_EXCEEDED", "flip", "short", 6_000, true, true],
         modeFlipPreview: ["flip", 1_140, 952, 14],
         modeFlipBlocked: ["SLIPPAGE_EXCEEDED", 1, "long", 4_000],
         modeFlipBack: ["flip", 525, 1_053, "flip", "long", 10_000, 16, true],
