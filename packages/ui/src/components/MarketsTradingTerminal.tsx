@@ -1485,6 +1485,14 @@ export function PredictionOrderPanel({
     onSubmitOrder({ marketId: market.id, action, side, amountOrShares: numericValue });
   };
 
+  const executeConfirmedOrder = () => {
+    if (pendingConfirm?.kind === "buy-prediction") {
+      onSubmitOrder({ marketId: market.id, action: "buy", side: pendingConfirm.side, amountOrShares: pendingConfirm.amountPts });
+    } else if (pendingConfirm?.kind === "sell-prediction") {
+      onSubmitOrder({ marketId: market.id, action: "sell", side: pendingConfirm.side, amountOrShares: pendingConfirm.shares });
+    }
+  };
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (cannotSubmit) return;
@@ -1672,7 +1680,7 @@ export function PredictionOrderPanel({
         details={pendingConfirm}
         submitting={submitting}
         onClear={() => setPendingConfirm(null)}
-        onExecute={executeOrder}
+        onExecute={executeConfirmedOrder}
       />
     </div>
   );
