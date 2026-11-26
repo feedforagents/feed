@@ -1090,6 +1090,7 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
   }
 }))
 
+
 it.effect(
 'get_market returns related articles for a perp ticker (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
 () => withSeededWorld(effect (authConfig) => {
@@ -1112,4 +1113,40 @@ it.effect(
     assert.strictEqual(relatedArticles.some((a) => a.id === "perp-related-article"), true)
   })
 })
+)
+
+it.effect(
+  'get_market does not return a memecoin-index article for the COIN perp (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (ticker) DO NOTHING",
+        ["COIN", 100, 100, now]
+      )
+      try tx.query(
+        "INSERT INTO feed_prediction_markets (id, slot_index, question, description, category, timeframe, phase, yes_shares, no_shares, liquidity_cents, secret_outcome, status, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, 'opening', 50000, 50000, 50000, $7, 'open', $8, $9)",
+        ["perp-memecoin-market", 99, "Will the memecoin index rise this hour?", "Resolves YES if the memecoin index closes higher at the end of the hour.", "crypto", "1h", "yes", now + 3600000, now]
+      )
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["perp-memecoin-article", "Memecoin index watch", "Memecoin index summary", "Memecoin index body", "the-new-york-taimes", "perp-memecoin-market", false, now]
+      )
+    })
+    const marketRes = try callMcpTool(202, "get_market", { marketId: "COIN", kind: "perp" }, authConfig)
+    const marketPayload = unwrapToolPayload(marketRes)
+    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(relatedArticles.some((a) => a.id === "perp-memecoin-article"), false)
+      assert.strictEqual(relatedArticles.some((a) => a.id === "seed-article-4"), true)
+    })
+    const fallbackRes = try callMcpTool(203, "get_market", { marketId: "COIN", kind: "prediction" }, authConfig)
+    const fallbackPayload = unwrapToolPayload(fallbackRes)
+    const fallbackArticles = (fallbackPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(fallbackArticles.some((a) => a.id === "perp-memecoin-article"), false)
+      assert.strictEqual(fallbackArticles.some((a) => a.id === "seed-article-4"), true)
+    })
+  })
 )
