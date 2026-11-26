@@ -1732,7 +1732,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         : ""
       const postMatch = mode === "social"
         ? `(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\'${authorMatchClause}) AND ${socialModeMarketExclusionSql("p")}`
-        : `(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\' OR p.ticker ILIKE $2 ESCAPE '\\'${authorMatchClause})`
+        : `(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\' OR (p.ticker ILIKE $2 ESCAPE '\\' AND p.market_id IS NOT NULL)${authorMatchClause})`
       const plainWhere = viewerId === undefined
         ? `p.deleted_at IS NULL AND ${postMatch}`
         : `p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql(`$${postParams.length + 1}`, "p.author_id")}`
