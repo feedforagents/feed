@@ -1537,18 +1537,26 @@ export effect function leaveGroupChat(accountId: string, chatId: string): LeaveG
     }
     try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, account.id])
     try clearMemberChatMessageNotificationsTx(tx, account.id, chatId)
-    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
-    const events: FeedRealtimeEvent[] = [{
-      type: "chat.updated",
-      chatId,
-      action: "member_left",
-      actorId: account.id,
-      recipientIds
-    }]
+    const events = chatUpdatedEvents(chatId, "member_left", account.id, memberRows)
     return { result: { chatId, accountId: account.id, left: true }, events }
   })
   try emitAfterCommit(committed.events)
   return committed.result
+}
+
+function chatUpdatedEvents(
+  chatId: string,
+  action: Extract<FeedRealtimeEvent, { type: "chat.updated" }>["action"],
+  actorId: string,
+  memberRows: ReadonlyArray<Row>
+): FeedRealtimeEvent[] {
+  return [{
+    type: "chat.updated",
+    chatId,
+    action,
+    actorId,
+    recipientIds: memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+  }]
 }
 
 export effect function renameGroupChat(
@@ -1567,14 +1575,7 @@ export effect function renameGroupChat(
     }
     try tx.query("UPDATE feed_chats SET name = $2 WHERE id = $1", [chatId, cleanTitle])
     const updated = try reloadHydratedChatTx(tx, chatId, actor.id)
-    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
-    const events: FeedRealtimeEvent[] = [{
-      type: "chat.updated",
-      chatId,
-      action: "renamed",
-      actorId: actor.id,
-      recipientIds
-    }]
+    const events = chatUpdatedEvents(chatId, "renamed", actor.id, memberRows)
     return { chat: updated, events }
   })
   try emitAfterCommit(committed.events)
@@ -1608,14 +1609,7 @@ export effect function removeGroupMember(
     }
     try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, target.id])
     try clearMemberChatMessageNotificationsTx(tx, target.id, chatId)
-    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
-    const events: FeedRealtimeEvent[] = [{
-      type: "chat.updated",
-      chatId,
-      action: "member_removed",
-      actorId: actor.id,
-      recipientIds
-    }]
+    const events = chatUpdatedEvents(chatId, "member_removed", actor.id, memberRows)
     return { result: { chatId, memberId: target.id, removed: true }, events }
   })
   try emitAfterCommit(committed.events)
@@ -1646,14 +1640,7 @@ export effect function transferGroupOwnership(
     try tx.query("UPDATE feed_chat_members SET role = 'owner' WHERE chat_id = $1 AND member_id = $2", [chatId, nextOwner.id])
     try tx.query("UPDATE feed_chats SET created_by = $2 WHERE id = $1", [chatId, nextOwner.id])
     const updated = try reloadHydratedChatTx(tx, chatId, actor.id)
-    const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
-    const events: FeedRealtimeEvent[] = [{
-      type: "chat.updated",
-      chatId,
-      action: "ownership_transferred",
-      actorId: actor.id,
-      recipientIds
-    }]
+    const events = chatUpdatedEvents(chatId, "ownership_transferred", actor.id, memberRows)
     return { chat: updated, events }
   })
   try emitAfterCommit(committed.events)

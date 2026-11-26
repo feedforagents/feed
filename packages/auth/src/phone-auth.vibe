@@ -286,6 +286,10 @@ module runtimeEnv {
 }
 import { readEnvVar } from runtimeEnv
 
+export function readRuntimeEnvVar(name: string): string | undefined {
+  return readEnvVar(name)
+}
+
 function isProductionEnv(config: Pick<AuthRuntimeConfig, "publicAppUrl">): boolean {
   const deploymentEnv = readEnvVar("DEPLOYMENT_ENV")
   if (deploymentEnv === "production") return true
@@ -511,6 +515,24 @@ export function rowToAccountProfile(row: Row): AccountProfile {
   }
 }
 
+function commonAccountAuthFields(row: Row, now: number) {
+  const ageConfirmed = row.age_confirmed_at !== null && row.age_confirmed_at !== undefined
+  const hasStartingGrant = toInt(row.starting_grant_cents) > 0
+  return {
+    userId: toText(row.account_id) ?? "",
+    username: toText(row.handle) ?? "",
+    isReviewer: row.is_reviewer === true,
+    ageConfirmed,
+    termsAccepted: ageConfirmed,
+    pointsBalance: Math.floor(toInt(row.balance_cents) / 100),
+    startingGrantIssued: hasStartingGrant,
+    startingGrantCount: hasStartingGrant ? 1 : 0,
+    sessionsEpoch: Math.max(1, toInt(row.sessions_revoked_before ?? 1)),
+    lastSignInAt: now,
+    now
+  }
+}
+
 export function emailAuthFromAccount(row: Row | undefined, now: number): EmailAuth {
   if (row === undefined) return { ...initialEmailAuth, now }
   const accountStatus: EmailAccountStatus = toText(row.status) === "active"
@@ -521,20 +543,10 @@ export function emailAuthFromAccount(row: Row | undefined, now: number): EmailAu
   return {
     ...initialEmailAuth,
     status: accountStatus,
-    userId: toText(row.account_id) ?? "",
-    username: toText(row.handle) ?? "",
-    isReviewer: row.is_reviewer === true,
-    ageConfirmed: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
-    termsAccepted: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
+    ...commonAccountAuthFields(row, now),
     emailVerified: row.email_verified_at !== null && row.email_verified_at !== undefined,
     emailHash: toText(row.email_hash) ?? "",
-    emailMasked: toText(row.email_masked) ?? "",
-    pointsBalance: Math.floor(toInt(row.balance_cents) / 100),
-    startingGrantIssued: toInt(row.starting_grant_cents) > 0,
-    startingGrantCount: toInt(row.starting_grant_cents) > 0 ? 1 : 0,
-    sessionsEpoch: Math.max(1, toInt(row.sessions_revoked_before ?? 1)),
-    lastSignInAt: now,
-    now
+    emailMasked: toText(row.email_masked) ?? ""
   }
 }
 
@@ -548,24 +560,22 @@ function phoneAuthFromAccount(row: Row | undefined, now: number): PhoneAuth {
   return {
     ...initial,
     status: accountStatus,
-    userId: toText(row.account_id) ?? "",
-    username: toText(row.handle) ?? "",
-    isReviewer: row.is_reviewer === true,
-    ageConfirmed: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
-    termsAccepted: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
+    ...commonAccountAuthFields(row, now),
     phoneVerified: row.phone_verified_at !== null && row.phone_verified_at !== undefined,
     phoneHash: toText(row.phone_hash) ?? "",
-    phoneLast2: toText(row.phone_last2) ?? "",
-    pointsBalance: Math.floor(toInt(row.balance_cents) / 100),
-    startingGrantIssued: toInt(row.starting_grant_cents) > 0,
-    startingGrantCount: toInt(row.starting_grant_cents) > 0 ? 1 : 0,
-    sessionsEpoch: Math.max(1, toInt(row.sessions_revoked_before ?? 1)),
-    lastSignInAt: now,
-    now
+    phoneLast2: toText(row.phone_last2) ?? ""
   }
 }
 
-function buildSendRateState(accountState: PhoneAuth, sentTimestamps: ReadonlyArray<number>, now: number): PhoneAuth {
+export function buildSendRateState<T extends {
+  readonly hasSentBefore: boolean
+  readonly lastSentAt: number
+  readonly hourWindowStart: number
+  readonly hourSends: number
+  readonly dayWindowStart: number
+  readonly daySends: number
+  readonly now: number
+}>(accountState: T, sentTimestamps: ReadonlyArray<number>, now: number): T {
   if (sentTimestamps.length === 0) return { ...accountState, now }
   const lastSentAt = sentTimestamps[0]
   const inHour = sentTimestamps.filter((ts) => ts > now - HOUR_MS)
@@ -579,6 +589,192 @@ function buildSendRateState(accountState: PhoneAuth, sentTimestamps: ReadonlyArr
     dayWindowStart: inDay.length > 0 ? inDay[inDay.length - 1] : now - DAY_MS,
     daySends: inDay.length,
     now
+  }
+}
+
+export effect function requireTurnstilePassed(input: {
+  readonly token?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): true!AuthFailure {
+  const passed = try verifyTurnstile(input)
+  if (!passed) {
+    throw new AuthFailure({ code: "turnstile_failed", message: "Human verification failed.", status: 400 })
+  }
+  return true
+}
+
+export effect function requireLockedAccountByIdInTx(
+  tx: Tx,
+  accountId: string | null
+): { readonly accountId: string; readonly row: Row }!(AuthFailure | StoreFailure) {
+  if (accountId === null || accountId === "") {
+    throw new AuthFailure({ code: "unauthorized", message: "Account is required.", status: 401 })
+  }
+  const existingRow = try lockFeedAccountByIdInTx(tx, accountId)
+  if (existingRow === undefined) {
+    throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
+  }
+  return { accountId, row: existingRow }
+}
+
+export effect function requireActiveNonReviewerAccount(
+  row: Row
+): { readonly accountId: string; readonly epoch: number }!AuthFailure {
+  if (toText(row.status) !== "active") {
+    throw new AuthFailure({ code: "account_inactive", message: "Account is not active.", status: 403 })
+  }
+  if (row.is_reviewer === true) {
+    throw new AuthFailure({ code: "reviewer_password_only", message: "Reviewer accounts must use reviewer sign-in.", status: 403 })
+  }
+  return {
+    accountId: toText(row.account_id) ?? "",
+    epoch: Math.max(1, toInt(row.sessions_revoked_before))
+  }
+}
+
+export interface CompleteOnboardingInput {
+  readonly pendingToken: string
+  readonly username: string
+  readonly accepted18Plus: boolean
+  readonly acceptedTerms: boolean
+  readonly bio?: string | undefined
+  readonly displayName?: string | undefined
+  readonly config: AuthRuntimeConfig
+}
+
+effect function parseOnboardingInputAndVerifyJwt<C>(
+  input: CompleteOnboardingInput,
+  expiredMessage: string,
+  decodeClaims: (payload: unknown) => C | undefined
+): {
+  readonly username: string
+  readonly bio: string
+  readonly displayName: string
+  readonly claims: C
+}!AuthFailure {
+  if (!input.accepted18Plus || !input.acceptedTerms) {
+    throw new AuthFailure({
+      code: "attestation_required",
+      message: "You must confirm you are 18+ and accept the Terms of Service.",
+      status: 400
+    })
+  }
+  const username = input.username.trim().toLowerCase()
+  if (!USERNAME_PATTERN.test(username)) {
+    throw new AuthFailure({
+      code: "invalid_username",
+      message: "Username must be 2-32 lowercase letters, numbers, or underscores.",
+      status: 400
+    })
+  }
+  const secret = try signingSecretBytes(input.config)
+  const verifiedJwt = try tryPromise({
+    try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),
+    catch: () => new AuthFailure({ code: "invalid_onboarding_token", message: expiredMessage, status: 401 })
+  })
+  const claims = decodeClaims(verifiedJwt.payload)
+  if (claims === undefined) {
+    throw new AuthFailure({ code: "invalid_onboarding_token", message: "Invalid onboarding token.", status: 401 })
+  }
+  const bio = (input.bio ?? "").trim().slice(0, 280)
+  const displayName = (input.displayName?.trim() ?? "") !== "" ? input.displayName!.trim().slice(0, 80) : username
+  return { username, bio, displayName, claims }
+}
+
+export effect function runOnboardingTx<C, R>(
+  input: CompleteOnboardingInput,
+  expiredMessage: string,
+  decodeClaims: (payload: unknown) => C | undefined,
+  lockKey: (claims: C) => string,
+  run: (
+    tx: Tx,
+    ctx: {
+      readonly username: string
+      readonly bio: string
+      readonly displayName: string
+      readonly claims: C
+      readonly now: number
+    }
+  ) => R!(AuthFailure | StoreFailure)
+): R!(AuthFailure | StoreFailure)!Store {
+  const { username, bio, displayName, claims } = try parseOnboardingInputAndVerifyJwt(input, expiredMessage, decodeClaims)
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockKey(claims)])
+    return try run(tx, { username, bio, displayName, claims, now })
+  })
+}
+
+export effect function finalizeOnboardedAccountTx(
+  tx: Tx,
+  input: {
+    readonly accountId: string
+    readonly organizationId: string
+    readonly username: string
+    readonly displayName: string
+    readonly bio: string
+    readonly identityMethod: "PhoneSignIn" | "EmailMagicLink"
+    readonly identitySubject: string
+    readonly phoneHash: string | null
+    readonly phoneLast2: string | null
+    readonly phoneVerifiedAt: number | null
+    readonly emailHash: string | null
+    readonly emailMasked: string | null
+    readonly emailVerifiedAt: number | null
+    readonly challengeId: string
+    readonly config: AuthRuntimeConfig
+    readonly now: number
+  }
+): AuthenticatedAccountResult!(AuthFailure | StoreFailure) {
+  const cloudAccountState = JSON.stringify({
+    status: "Active",
+    userId: input.accountId,
+    organizationId: input.organizationId,
+    identities: [{ method: input.identityMethod, subject: input.identitySubject }]
+  })
+  try insertCloudAccountTx(tx, {
+    accountId: input.accountId,
+    organizationId: input.organizationId,
+    displayName: input.displayName,
+    stateJson: cloudAccountState,
+    now: input.now
+  })
+  const defaultAvatarUrl = resolveUserPresetAvatarUrl(input.accountId)
+  const defaultBannerUrl = resolveUserPresetBannerUrl(input.accountId)
+  const insertedRows = try tx.query(
+    `INSERT INTO feed_accounts
+       (account_id, handle, display_name, bio, avatar_url, banner_url, phone_hash, phone_last2, phone_verified_at, email_hash, email_masked, email_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'game', $14, $14, 0, false, false, NULL, $13, $13)
+     RETURNING *`,
+    [
+      input.accountId,
+      input.username,
+      input.displayName,
+      input.bio,
+      defaultAvatarUrl,
+      defaultBannerUrl,
+      input.phoneHash,
+      input.phoneLast2,
+      input.phoneVerifiedAt,
+      input.emailHash,
+      input.emailMasked,
+      input.emailVerifiedAt,
+      input.now,
+      STARTING_GRANT_CENTS
+    ]
+  )
+  try tx.query(
+    `INSERT INTO feed_point_ledger
+       (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
+     VALUES ($1, $2, 'starting_grant', $3, $3, $4, $5)`,
+    [newUuid(), input.accountId, STARTING_GRANT_CENTS, input.challengeId, input.now]
+  )
+  const session = try issueSessionInTx(tx, input.accountId, 1, input.config, input.now)
+  return {
+    account: rowToAccountProfile(insertedRows[0]),
+    ...session
   }
 }
 
@@ -737,14 +933,11 @@ effect function sendPhoneChallenge(input: {
   readonly config: AuthRuntimeConfig
 }): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
   const normalizedPhone = try normalizePhoneE164(input.phoneE164)
-  const turnstilePassed = try verifyTurnstile({
+  const turnstilePassed = try requireTurnstilePassed({
     token: input.turnstileToken,
     ipAddress: input.ipAddress,
     config: input.config
   })
-  if (!turnstilePassed) {
-    throw new AuthFailure({ code: "turnstile_failed", message: "Human verification failed.", status: 400 })
-  }
   const country = resolveCountryEligibility(normalizedPhone, input.config.allowedCountries)
   const isPremiumOrTollFree = isBlockedPrefix(normalizedPhone)
   if (!countryAllowed(country)) {
@@ -795,15 +988,9 @@ effect function sendPhoneChallenge(input: {
     }
     let baseState: PhoneAuth
     if (input.purposeKey === "feed_phone_change") {
-      if (input.accountId === null || input.accountId === "") {
-        throw new AuthFailure({ code: "unauthorized", message: "Account is required.", status: 401 })
-      }
-      const existingRow = try lockFeedAccountByIdInTx(tx, input.accountId)
-      if (existingRow === undefined) {
-        throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
-      }
+      const { accountId, row: existingRow } = try requireLockedAccountByIdInTx(tx, input.accountId)
       baseState = phoneAuthFromAccount(existingRow, now)
-      try ensurePhoneUnusedByOtherInTx(tx, phoneHash, input.accountId)
+      try ensurePhoneUnusedByOtherInTx(tx, phoneHash, accountId)
       if (!canRequestPhoneChangeCode(
         baseState,
         phoneHash,
@@ -1113,14 +1300,7 @@ export effect function verifyPhoneCode(input: {
       if (existing === undefined) {
         return { kind: "onboarding" as const, meta }
       }
-      if (toText(existing.status) !== "active") {
-        throw new AuthFailure({ code: "account_inactive", message: "Account is not active.", status: 403 })
-      }
-      if (existing.is_reviewer === true) {
-        throw new AuthFailure({ code: "reviewer_password_only", message: "Reviewer accounts must use reviewer sign-in.", status: 403 })
-      }
-      const accountId = toText(existing.account_id) ?? ""
-      const epoch = Math.max(1, toInt(existing.sessions_revoked_before))
+      const { accountId, epoch } = try requireActiveNonReviewerAccount(existing)
       try tx.query("UPDATE feed_accounts SET phone_verified_at = $2, updated_at = $2 WHERE account_id = $1", [accountId, meta.now])
       const session = try issueSessionInTx(tx, accountId, epoch, input.config, meta.now)
       return {
@@ -1162,105 +1342,64 @@ export effect function verifyPhoneCode(input: {
   }
 }
 
-export effect function completePhoneOnboarding(input: {
-  readonly pendingToken: string
-  readonly username: string
-  readonly accepted18Plus: boolean
-  readonly acceptedTerms: boolean
-  readonly bio?: string | undefined
-  readonly displayName?: string | undefined
-  readonly config: AuthRuntimeConfig
-}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
-  if (!input.accepted18Plus || !input.acceptedTerms) {
-    throw new AuthFailure({
-      code: "attestation_required",
-      message: "You must confirm you are 18+ and accept the Terms of Service.",
-      status: 400
-    })
-  }
-  const username = input.username.trim().toLowerCase()
-  if (!USERNAME_PATTERN.test(username)) {
-    throw new AuthFailure({
-      code: "invalid_username",
-      message: "Username must be 2-32 lowercase letters, numbers, or underscores.",
-      status: 400
-    })
-  }
-  const secret = try signingSecretBytes(input.config)
-  const verifiedJwt = try tryPromise({
-    try: () => jwtVerify(input.pendingToken, secret, { algorithms: ["HS256"] }),
-    catch: () => new AuthFailure({ code: "invalid_onboarding_token", message: "Onboarding session expired. Verify your phone again.", status: 401 })
-  })
-  const claims = Option.getOrUndefined(Schema.decodeUnknownOption(PendingOnboardingClaims)(verifiedJwt.payload))
-  if (claims === undefined || claims.phoneHash === "") {
-    throw new AuthFailure({ code: "invalid_onboarding_token", message: "Invalid onboarding token.", status: 401 })
-  }
-  const bio = (input.bio ?? "").trim().slice(0, 280)
-  const displayName = (input.displayName?.trim() ?? "") !== "" ? input.displayName!.trim().slice(0, 80) : username
-  const store = try Store
-  const now = try Clock.currentTimeMillis
-  return try store.transaction(effect (tx: Tx) => {
-    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:onboard:${claims.phoneHash}`])
-    const cooldownRows = try tx.query("SELECT expires_at FROM feed_phone_cooldowns WHERE phone_hash = $1", [claims.phoneHash])
-    if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
-      throw new AuthFailure({ code: "phone_cooldown", message: "This phone number is in a 30-day deletion cooldown.", status: 403 })
+export effect function completePhoneOnboarding(
+  input: CompleteOnboardingInput
+): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+  return try runOnboardingTx(
+    input,
+    "Onboarding session expired. Verify your phone again.",
+    (payload) => {
+      const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(PendingOnboardingClaims)(payload))
+      return decoded !== undefined && decoded.phoneHash !== "" ? decoded : undefined
+    },
+    (claims) => `feed:onboard:${claims.phoneHash}`,
+    effect (tx, { username, bio, displayName, claims, now }) => {
+      const cooldownRows = try tx.query("SELECT expires_at FROM feed_phone_cooldowns WHERE phone_hash = $1", [claims.phoneHash])
+      if (cooldownRows[0] !== undefined && toInt(cooldownRows[0].expires_at) > now) {
+        throw new AuthFailure({ code: "phone_cooldown", message: "This phone number is in a 30-day deletion cooldown.", status: 403 })
+      }
+      const existingPhone = try tx.query("SELECT account_id FROM feed_accounts WHERE phone_hash = $1 FOR UPDATE", [claims.phoneHash])
+      if (existingPhone.length > 0) {
+        throw new AuthFailure({ code: "account_exists", message: "An account for this phone number already exists.", status: 409 })
+      }
+      try ensureHandleAvailableInTx(tx, username)
+      const accountId = newUuid()
+      const organizationId = newUuid()
+      const pendingState: PhoneAuth = {
+        ...initial,
+        status: "AccountPendingOnboarding",
+        userId: accountId,
+        phoneVerified: true,
+        phoneHash: claims.phoneHash,
+        phoneLast2: claims.last2,
+        sessionsEpoch: 1,
+        lastSignInAt: now,
+        now
+      }
+      if (!canCompleteOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)) {
+        throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
+      }
+      completeOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
+      return try finalizeOnboardedAccountTx(tx, {
+        accountId,
+        organizationId,
+        username,
+        displayName,
+        bio,
+        identityMethod: "PhoneSignIn",
+        identitySubject: claims.phoneHash,
+        phoneHash: claims.phoneHash,
+        phoneLast2: claims.last2,
+        phoneVerifiedAt: now,
+        emailHash: null,
+        emailMasked: null,
+        emailVerifiedAt: null,
+        challengeId: claims.challengeId,
+        config: input.config,
+        now
+      })
     }
-    const existingPhone = try tx.query("SELECT account_id FROM feed_accounts WHERE phone_hash = $1 FOR UPDATE", [claims.phoneHash])
-    if (existingPhone.length > 0) {
-      throw new AuthFailure({ code: "account_exists", message: "An account for this phone number already exists.", status: 409 })
-    }
-    try ensureHandleAvailableInTx(tx, username)
-    const accountId = newUuid()
-    const organizationId = newUuid()
-    const pendingState: PhoneAuth = {
-      ...initial,
-      status: "AccountPendingOnboarding",
-      userId: accountId,
-      phoneVerified: true,
-      phoneHash: claims.phoneHash,
-      phoneLast2: claims.last2,
-      sessionsEpoch: 1,
-      lastSignInAt: now,
-      now
-    }
-    if (!canCompleteOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)) {
-      throw new AuthFailure({ code: "onboarding_refused", message: "Cannot complete onboarding.", status: 400 })
-    }
-    completeOnboarding(pendingState, username, input.accepted18Plus, input.acceptedTerms)
-    const cloudAccountState = JSON.stringify({
-      status: "Active",
-      userId: accountId,
-      organizationId,
-      identities: [{ method: "PhoneSignIn", subject: claims.phoneHash }]
-    })
-    try insertCloudAccountTx(tx, {
-      accountId,
-      organizationId,
-      displayName,
-      stateJson: cloudAccountState,
-      now
-    })
-    const defaultAvatarUrl = resolveUserPresetAvatarUrl(accountId)
-    const defaultBannerUrl = resolveUserPresetBannerUrl(accountId)
-    const insertedRows = try tx.query(
-      `INSERT INTO feed_accounts
-         (account_id, handle, display_name, bio, avatar_url, banner_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, 'game', $10, $10, 0, false, false, NULL, $9, $9)
-       RETURNING *`,
-      [accountId, username, displayName, bio, defaultAvatarUrl, defaultBannerUrl, claims.phoneHash, claims.last2, now, STARTING_GRANT_CENTS]
-    )
-    try tx.query(
-      `INSERT INTO feed_point_ledger
-         (id, account_id, kind, delta_cents, balance_after_cents, ref_id, created_at)
-       VALUES ($1, $2, 'starting_grant', $3, $3, $4, $5)`,
-      [newUuid(), accountId, STARTING_GRANT_CENTS, claims.challengeId, now]
-    )
-    const session = try issueSessionInTx(tx, accountId, 1, input.config, now)
-    return {
-      account: rowToAccountProfile(insertedRows[0]),
-      ...session
-    }
-  })
+  )
 }
 
 export effect function hashReviewerPassword(password: string): string!AuthFailure {

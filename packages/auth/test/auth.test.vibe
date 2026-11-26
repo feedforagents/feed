@@ -1645,25 +1645,23 @@ it.effect('Security hardening (handle hijack, reviewer lockout, RFC 8252 loopbac
     })
     const user = try onboardViaPhone("+14155550177", "loopback_user")
     const verifier = "loopback-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
-    const dynamicPortCode = try createAuthorizationCode({
+    const baseLoopbackCodeInput = {
       accountId: user.account.accountId,
       clientId: dcrClient.client_id,
       redirectUri: "http://127.0.0.1:59123/callback",
       codeChallenge: pkceChallengeS256(verifier),
-      codeChallengeMethod: "S256",
-      scope: "read",
-      state: "state-loopback",
+      codeChallengeMethod: "S256" as const,
       resource: "https://feed.fun/mcp"
+    }
+    const dynamicPortCode = try createAuthorizationCode({
+      ...baseLoopbackCodeInput,
+      scope: "read",
+      state: "state-loopback"
     })
     const emptyAuthScopeRefusal = try refusedCode(createAuthorizationCode({
-      accountId: user.account.accountId,
-      clientId: dcrClient.client_id,
-      redirectUri: "http://127.0.0.1:59123/callback",
-      codeChallenge: pkceChallengeS256(verifier),
-      codeChallengeMethod: "S256",
+      ...baseLoopbackCodeInput,
       scope: "",
-      state: "state-empty-scope",
-      resource: "https://feed.fun/mcp"
+      state: "state-empty-scope"
     }))
 
     const ssrfChecks = [

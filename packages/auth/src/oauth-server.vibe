@@ -1,5 +1,5 @@
 // spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen"; spec/auth/oauth.md, "Rotating refresh tokens cap grants at 90 days and revoke the entire grant family on reuse"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent"
-import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
+import { type Row, Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
 import { HttpClientRequest } from "effect/http"
 import { SignJWT, jwtVerify } from "jose"
 import {
@@ -569,6 +569,25 @@ effect function registerAndSaveOAuthClient(input: {
   return now
 }
 
+effect function enforceOAuthRateLimitIfConfigured(
+  endpoint: Parameters<typeof checkOAuthEndpointRateLimit>[0]["endpoint"],
+  ipAddress: string | undefined,
+  digestKey: string | undefined
+): void!(AuthFailure | StoreFailure)!Store {
+  if (ipAddress !== undefined && digestKey !== undefined && digestKey.trim() !== "") {
+    checkOAuthEndpointRateLimit({
+      endpoint,
+      ipAddress,
+      digestKey
+    }) catch effect (err) => {
+      if (err instanceof RateLimited) {
+        throw new AuthFailure({ code: "rate_limited", message: err.message, status: 429 })
+      }
+      throw err
+    }
+  }
+}
+
 export effect function registerDynamicClient(input: {
   readonly clientName: string
   readonly redirectUris: ReadonlyArray<string>
@@ -580,18 +599,7 @@ export effect function registerDynamicClient(input: {
   readonly ipAddress?: string | undefined
   readonly digestKey?: string | undefined
 }): RegisteredOAuthClient!(AuthFailure | StoreFailure)!Store {
-  if (input.ipAddress !== undefined && input.digestKey !== undefined && input.digestKey.trim() !== "") {
-    checkOAuthEndpointRateLimit({
-      endpoint: "register",
-      ipAddress: input.ipAddress,
-      digestKey: input.digestKey
-    }) catch effect (err) => {
-      if (err instanceof RateLimited) {
-        throw new AuthFailure({ code: "rate_limited", message: err.message, status: 429 })
-      }
-      throw err
-    }
-  }
+  try enforceOAuthRateLimitIfConfigured("register", input.ipAddress, input.digestKey)
   const clientName = input.clientName.trim()
   if (clientName.length === 0 || clientName.length > 128) {
     throw new AuthFailure({ code: "invalid_client_metadata", message: "client_name must be 1-128 characters.", status: 400 })
@@ -1199,18 +1207,7 @@ export effect function startDeviceAuthorization(input: {
   readonly ipAddress?: string | undefined
   readonly digestKey?: string | undefined
 }): DeviceAuthorizationResponse!(AuthFailure | StoreFailure)!Store {
-  if (input.ipAddress !== undefined && input.digestKey !== undefined && input.digestKey.trim() !== "") {
-    checkOAuthEndpointRateLimit({
-      endpoint: "device_code",
-      ipAddress: input.ipAddress,
-      digestKey: input.digestKey
-    }) catch effect (err) => {
-      if (err instanceof RateLimited) {
-        throw new AuthFailure({ code: "rate_limited", message: err.message, status: 429 })
-      }
-      throw err
-    }
-  }
+  try enforceOAuthRateLimitIfConfigured("device_code", input.ipAddress, input.digestKey)
   const clientId = input.clientId.trim()
   if (clientId === "") {
     throw new AuthFailure({ code: "invalid_client", message: "client_id is required.", status: 400 })
@@ -1287,33 +1284,49 @@ export effect function startDeviceAuthorization(input: {
   })
 }
 
-export effect function lookupDeviceCodeForUser(userCodeRaw: string): DeviceCodeLookupResult!(AuthFailure | StoreFailure)!Store {
+effect function normalizeDeviceUserCode(userCodeRaw: string): string!AuthFailure {
   const userCode = userCodeRaw.trim().toUpperCase()
   if (userCode === "") {
     throw new AuthFailure({ code: "invalid_user_code", message: "Enter a valid pairing code.", status: 400 })
   }
+  return userCode
+}
+
+effect function loadPendingDeviceCodeRowTx(
+  tx: Tx,
+  userCode: string,
+  now: number,
+  forUpdate: boolean
+): { readonly row: Row; readonly expiresAt: number }!(AuthFailure | StoreFailure) {
+  const suffix = forUpdate ? " FOR UPDATE" : ""
+  const rows = try tx.query(
+    `SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at
+     FROM feed_device_codes
+     WHERE user_code = $1
+     ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, expires_at DESC
+     LIMIT 1${suffix}`,
+    [userCode]
+  )
+  const row = rows[0]
+  if (row === undefined) {
+    throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code not found.", status: 404 })
+  }
+  const expiresAt = toInt(row.expires_at)
+  if (now >= expiresAt) {
+    throw new AuthFailure({ code: "expired_token", message: "Pairing code expired.", status: 400 })
+  }
+  if (toText(row.status) !== "pending") {
+    throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code has already been used.", status: 400 })
+  }
+  return { row, expiresAt }
+}
+
+export effect function lookupDeviceCodeForUser(userCodeRaw: string): DeviceCodeLookupResult!(AuthFailure | StoreFailure)!Store {
+  const userCode = try normalizeDeviceUserCode(userCodeRaw)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `SELECT user_code, client_id, client_name, scope, status, expires_at
-       FROM feed_device_codes
-       WHERE user_code = $1
-       ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, expires_at DESC
-       LIMIT 1`,
-      [userCode]
-    )
-    const row = rows[0]
-    if (row === undefined) {
-      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code not found.", status: 404 })
-    }
-    const expiresAt = toInt(row.expires_at)
-    if (now >= expiresAt) {
-      throw new AuthFailure({ code: "expired_token", message: "Pairing code expired.", status: 400 })
-    }
-    if (toText(row.status) !== "pending") {
-      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code has already been used.", status: 400 })
-    }
+    const { row, expiresAt } = try loadPendingDeviceCodeRowTx(tx, userCode, now, false)
     const { scopes } = try parseAgentScopes(toText(row.scope) ?? "", false)
     return {
       userCode: toText(row.user_code) ?? userCode,
@@ -1335,10 +1348,7 @@ export effect function approveDeviceAuthorization(input: {
   readonly scopes?: ReadonlyArray<string> | string | undefined
   readonly deny?: boolean | undefined
 }): DeviceApprovalResult!(AuthFailure | RateLimited | StoreFailure)!Store {
-  const userCode = input.userCode.trim().toUpperCase()
-  if (userCode === "") {
-    throw new AuthFailure({ code: "invalid_user_code", message: "Enter a valid pairing code.", status: 400 })
-  }
+  const userCode = try normalizeDeviceUserCode(input.userCode)
   const store = try Store
   const now = try Clock.currentTimeMillis
   try store.transaction((tx: Tx) =>
@@ -1352,24 +1362,7 @@ export effect function approveDeviceAuthorization(input: {
     })
   )
   return try store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at
-       FROM feed_device_codes
-       WHERE user_code = $1
-       ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, expires_at DESC
-       LIMIT 1 FOR UPDATE`,
-      [userCode]
-    )
-    const row = rows[0]
-    if (row === undefined) {
-      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code not found.", status: 404 })
-    }
-    if (now >= toInt(row.expires_at)) {
-      throw new AuthFailure({ code: "expired_token", message: "Pairing code expired.", status: 400 })
-    }
-    if (toText(row.status) !== "pending") {
-      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code has already been used.", status: 400 })
-    }
+    const { row } = try loadPendingDeviceCodeRowTx(tx, userCode, now, true)
     const clientId = toText(row.client_id) ?? ""
     const clientName = toText(row.client_name) ?? ""
     const deviceCodeHash = toText(row.device_code_hash) ?? ""
