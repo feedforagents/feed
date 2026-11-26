@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import type { AppChatSummary, ViewerSession } from "../src/web/types.ts";
@@ -60,6 +60,22 @@ const serverChatAfterLeave = {
   members: [member("alice", "alice"), member("bob", "bob")],
 };
 
+const serverSecondChat = {
+  id: "chat-2",
+  kind: "group",
+  title: "Second Chat",
+  createdBy: "alice",
+  memberCount: 2,
+  unreadCount: 0,
+  members: [member("alice", "alice"), member("bob", "bob")],
+};
+
+function seedSecondChat(): AppChatSummary {
+  return { ...seedGroup(), id: "chat-2", title: "Second Chat", memberCount: 2 };
+}
+
+let removedFromOpenChat = false;
+
 class StubEventSource extends EventTarget {
   static latest: StubEventSource | null = null;
   constructor() {
@@ -70,14 +86,23 @@ class StubEventSource extends EventTarget {
 }
 
 beforeEach(() => {
+  removedFromOpenChat = false;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL): Promise<Response> => {
       const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const url = new URL(raw, "http://localhost");
-      if (url.pathname === "/api/chats") return Promise.resolve(Response.json({ chats: [serverChatAfterLeave] }));
+      if (url.pathname === "/api/chats")
+        return Promise.resolve(Response.json({ chats: removedFromOpenChat ? [serverSecondChat] : [serverChatAfterLeave] }));
       if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
-      if (url.pathname === "/api/chats/chat-1/messages") return Promise.resolve(Response.json({ messages: [] }));
+      if (url.pathname === "/api/chats/chat-1/messages")
+        return Promise.resolve(
+          removedFromOpenChat ? Response.json({}, { status: 403 }) : Response.json({ messages: [] }),
+        );
+      if (url.pathname === "/api/chats/chat-2/messages")
+        return Promise.resolve(
+          Response.json({ messages: [{ id: "m2", senderId: "bob", senderHandle: "bob", content: "second chat hello" }] }),
+        );
       return Promise.resolve(Response.json({}, { status: 404 }));
     }),
   );
@@ -90,6 +115,12 @@ beforeEach(() => {
     chatMessages: [],
   });
   reconnectRealtime();
+});
+
+afterEach(() => {
+  StubEventSource.latest?.close();
+  StubEventSource.latest = null;
+  vi.unstubAllGlobals();
 });
 
 async function waitForMemberCount(count: number): Promise<void> {
@@ -109,6 +140,39 @@ it("drops a member who left from the open group roster and count (spec/social/me
   const chat = getStoreSnapshot().chats.find((c) => c.id === "chat-1");
   expect(chat?.memberCount).toBe(2);
   expect(chat?.members.map((m) => m.memberId)).toEqual(["alice", "bob"]);
+});
+
+it("shows the surviving chat's messages, not the removed chat's, when the viewer is removed from the open group (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  removedFromOpenChat = true;
+  setStoreState({
+    chats: [seedGroup(), seedSecondChat()],
+    selectedChatId: "chat-1",
+    chatMessages: [
+      {
+        id: "m1",
+        senderName: "Bob",
+        senderHandle: "bob",
+        isNpc: false,
+        isOwn: false,
+        timestamp: "",
+        content: "removed chat secret",
+        reactions: [],
+      },
+    ],
+  });
+  StubEventSource.latest?.dispatchEvent(
+    new MessageEvent("chat.updated", {
+      data: JSON.stringify({ type: "chat.updated", chatId: "chat-1", action: "member_removed", actorId: "bob" }),
+    }),
+  );
+  for (let round = 0; round < 200; round += 1) {
+    const s = getStoreSnapshot();
+    if (s.selectedChatId === "chat-2" && s.chatMessages.length > 0 && s.chatMessages[0]?.id === "m2") break;
+    await Promise.resolve();
+  }
+  const s = getStoreSnapshot();
+  expect(s.selectedChatId).toBe("chat-2");
+  expect(s.chatMessages.map((m) => m.content)).toEqual(["second chat hello"]);
 });
 
 it("still reloads chats on a chat.message event (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {

@@ -1095,6 +1095,7 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
     chatsLoading: false,
     chats: nextChats,
     selectedChatId: selectedId,
+    ...(selectedId !== s.selectedChatId ? { chatMessages: [] } : {}),
     alphaInvites: invitesRes.ok ? invitesRes.data : s.alphaInvites,
   });
   if (loadMessages && selectedId) {
