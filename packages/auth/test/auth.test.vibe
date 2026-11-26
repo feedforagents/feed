@@ -1146,6 +1146,40 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
       config: emailConfig
     })
 
+    const raceNested: Array<string> = []
+    const raceConfig: AuthRuntimeConfig = {
+      ...cloudflareConfig,
+      cloudflareEmailSender: {
+        send: async (message) => {
+          dispatchedMessages.push(message)
+          if (message.to === "raceparallel@example.com") {
+            await runPromise(Effect.provide(
+              requestEmailMagicLink({
+                email: "raceparallel@example.com",
+                ipAddress: "203.0.113.11",
+                config: cloudflareConfig
+              }),
+              Layer.succeed(Store, store)
+            )).then(
+              () => { raceNested.push("ok") },
+              (err: unknown) => { raceNested.push(failureCode(err)) }
+            )
+          }
+          return { messageId: "cf-msg-race" }
+        }
+      }
+    }
+    const raceFirst = try requestEmailMagicLink({
+      email: "raceparallel@example.com",
+      ipAddress: "203.0.113.11",
+      config: raceConfig
+    })
+    const raceRows = try sqlQuery(
+      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_masked = $1 ORDER BY created_at",
+      ["r***@example.com"]
+    )
+    const raceSends = dispatchedMessages.filter((message) => message.to === "raceparallel@example.com")
+
     try check(() => assert.deepStrictEqual(
       {
         validation: [invalidEmail, disposableEmail, disabledMode, rapidResend, supersededRefusal, expiredRefusal, replayRefusal],
@@ -1192,7 +1226,7 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           cfSent.emailMasked,
           cfSent.devToken === undefined,
           cfSent.devMagicLinkUrl === undefined,
-          dispatchedMessages.length,
+          dispatchedMessages.length - raceSends.length,
           dispatchedMessages[0]?.from,
           dispatchedMessages[0]?.to,
           dispatchedMessages[0]?.subject,
@@ -1206,6 +1240,12 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           failedSendRows.length,
           failedSendRows[0]?.superseded_at ?? null,
           failedSendPriorVerify.status
+        ],
+        parallelRace: [
+          raceNested[0] ?? "missing",
+          raceRows.length,
+          raceSends.length,
+          raceFirst.emailMasked
         ]
       },
       {
@@ -1251,6 +1291,12 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           1,
           null,
           "needs_onboarding"
+        ],
+        parallelRace: [
+          "rate_limited:email_send",
+          1,
+          1,
+          "r***@example.com"
         ]
       }
     ))
