@@ -1,7 +1,8 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { deletePost, loadProfile, removePostAcrossStore } from "../src/web/store-world.ts";
+import { deletePost, loadProfile, loadProfileReplies, removePostAcrossStore } from "../src/web/store-world.ts";
+import type { ViewerSession } from "../src/web/types.ts";
 
 const createdAt = Date.now() - 60_000;
 
@@ -58,6 +59,33 @@ function profileRaw(postsCount: number, posts: ReadonlyArray<Record<string, unkn
   };
 }
 
+const aliceViewer: ViewerSession = {
+  accountId: "alice",
+  handle: "alice",
+  displayName: "Alice Player",
+  bio: "",
+  avatarUrl: null,
+  bannerUrl: null,
+  phoneLast2: null,
+  phoneVerifiedAt: null,
+  emailMasked: null,
+  emailVerifiedAt: null,
+  uiMode: "game",
+  balanceCents: 0,
+  startingGrantCents: 0,
+  isAdmin: false,
+  isReviewer: false,
+  agentGrant: null,
+};
+
+function signInAsAlice(): void {
+  setStoreState({
+    viewer: aliceViewer,
+    route: "Profile",
+    profileHandle: "alice",
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   setStoreState({
@@ -83,25 +111,7 @@ it('Deleting an own post from the profile drops the header post count with the l
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
 
-  setStoreState({
-    viewer: {
-      accountId: "alice",
-      handle: "alice",
-      displayName: "Alice Player",
-      bio: "",
-      avatarUrl: null,
-      phoneLast2: null,
-      uiMode: "game",
-      balanceCents: 0,
-      startingGrantCents: 0,
-      purchasedCents: 0,
-      isAdmin: false,
-      isReviewer: false,
-      agentGrant: null,
-    },
-    route: "Profile",
-    profileHandle: "alice",
-  });
+  signInAsAlice();
   await loadProfile("alice");
   const before = getStoreSnapshot().profileBundle;
   expect(before?.postsCount).toBe(2);
@@ -137,25 +147,7 @@ it('Removing another author\'s reposted post from the profile list leaves the he
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
 
-  setStoreState({
-    viewer: {
-      accountId: "alice",
-      handle: "alice",
-      displayName: "Alice Player",
-      bio: "",
-      avatarUrl: null,
-      phoneLast2: null,
-      uiMode: "game",
-      balanceCents: 0,
-      startingGrantCents: 0,
-      purchasedCents: 0,
-      isAdmin: false,
-      isReviewer: false,
-      agentGrant: null,
-    },
-    route: "Profile",
-    profileHandle: "alice",
-  });
+  signInAsAlice();
   await loadProfile("alice");
   expect(getStoreSnapshot().profileBundle?.postsCount).toBe(1);
 
@@ -164,4 +156,43 @@ it('Removing another author\'s reposted post from the profile list leaves the he
   const after = getStoreSnapshot().profileBundle;
   expect(after?.posts).toHaveLength(0);
   expect(after?.postsCount).toBe(1);
+});
+
+it('Deleting an own reply from the profile replies tab drops the header post count with the reply list (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const replyRaw = rawPost({
+    id: "alice-reply-1",
+    content: "Alice reply note",
+    replyToPostId: "carol-post-9",
+  });
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+    const method = init?.method ?? "GET";
+    if (url.includes("/api/posts/alice-reply-1") && method === "DELETE") {
+      return Promise.resolve(Response.json({ postId: "alice-reply-1", deleted: true, replyToPostId: "carol-post-9", parentReplyCount: 0 }));
+    }
+    if (url.includes("filter=replies")) {
+      return Promise.resolve(Response.json({ items: [replyRaw], nextCursor: null }));
+    }
+    if (url.startsWith("/api/users/alice")) {
+      return Promise.resolve(Response.json(profileRaw(2, [firstRaw])));
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  });
+
+  signInAsAlice();
+  await loadProfile("alice");
+  await loadProfileReplies("alice");
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.id)).toEqual(["alice-reply-1"]);
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-1"]);
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+
+  await deletePost("alice-reply-1");
+
+  expect(getStoreSnapshot().profileReplies).toHaveLength(0);
+  const afterDelete = getStoreSnapshot().profileBundle;
+  expect(afterDelete?.posts.map((p) => p.card.id)).toEqual(["alice-post-1"]);
+  expect(afterDelete?.postsCount).toBe(1);
+
+  removePostAcrossStore("alice-reply-1", { replyToPostId: "carol-post-9", parentReplyCount: 0 });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(1);
 });
