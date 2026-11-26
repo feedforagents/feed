@@ -720,9 +720,7 @@ effect function handleAuthRoute(
       )
     }
     const grant = try getActiveAgentGrant(session.accountId)
-    const refreshedCookie = session.refreshedSessionCookieHeader
-    return jsonResponse(
-      {
+          {
         authenticated: true,
         viewer: {
           accountId: profile.accountId,
@@ -733,7 +731,6 @@ effect function handleAuthRoute(
           bannerUrl: profile.bannerUrl,
           phoneLast2: profile.phoneLast2,
           uiMode: profile.uiMode,
-          balanceCents: profile.balanceCents,
           startingGrantCents: profile.startingGrantCents,
           isAdmin: profile.isAdmin,
           isReviewer: profile.isReviewer,
@@ -743,7 +740,7 @@ effect function handleAuthRoute(
       },
       200,
       {},
-      refreshedCookie !== undefined ? [refreshedCookie] : []
+      []
     )
   }
   if (method === "POST" && path === "/api/auth/phone/start") {
@@ -2197,6 +2194,12 @@ export effect function resolveOptionalRouteResponse(
   request: Request,
   config: AppServerConfig
 ): (Response | undefined)!!(Store | RealtimeBus) {
+  const path = new URL(request.url).pathname
+  const shouldPreAuthenticate = path.startsWith("/api/") && path !== "/api/skills/hosts" && path !== "/api/health"
+  if (!shouldPreAuthenticate) {
+    const publicResponse = routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
+    return publicResponse
+  }
   const session = optionalSession(request, config) catch () => null
   const response = routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
   if (response === undefined) return undefined
