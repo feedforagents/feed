@@ -254,7 +254,7 @@ function TradeTicketSummary({
             <div className="flex items-center justify-between">
               <dt className="text-muted-foreground">Est. net proceeds</dt>
               <dd className="font-mono font-medium text-foreground tabular-nums">
-                {validAmount ? `${(sellNetCents / 100).toFixed(2)} pts` : "—"}
+                {validAmount ? formatPts(sellNetCents / 100) : "—"}
               </dd>
             </div>
           </>
@@ -263,7 +263,7 @@ function TradeTicketSummary({
         <>
           <div className="flex items-center justify-between">
             <dt className="text-muted-foreground">Notional size</dt>
-            <dd className="font-mono font-medium text-foreground tabular-nums">{validAmount ? `${notionalPts.toFixed(2)} pts` : "—"}</dd>
+            <dd className="font-mono font-medium text-foreground tabular-nums">{validAmount ? formatPts(notionalPts) : "—"}</dd>
           </div>
           {markPricePts || indexPricePts ? (
             <div className="flex items-center justify-between">
@@ -292,7 +292,7 @@ function TradeTicketSummary({
       )}
       <div className="flex items-center justify-between">
         <dt className="text-muted-foreground">Fee ({feeBps} bps)</dt>
-        <dd className="font-mono text-foreground tabular-nums">{validAmount ? `${estimatedFeePts.toFixed(2)} pts` : "—"}</dd>
+        <dd className="font-mono text-foreground tabular-nums">{validAmount ? formatPts(estimatedFeePts) : "—"}</dd>
       </div>
     </dl>
   );

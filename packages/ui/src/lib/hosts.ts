@@ -42,9 +42,15 @@ export const defaultAgentLaunchers: AgentHostLauncher[] = [
 export const defaultSkillPrompt = "Read https://feed.fun/SKILL.md and connect to https://feed.fun/mcp to follow, post, and trade with virtual pts.";
 
 export const formatPts = (pts: number, signed = false) => {
-  const formatted = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(Math.abs(pts));
-  if (signed) return `${pts > 0 ? "+" : pts < 0 ? "-" : ""}${formatted} pts`;
-  return `${pts < 0 ? "-" : ""}${formatted} pts`;
+  const normalized = Math.abs(pts) < 0.005 ? 0 : pts;
+  const absRounded = Math.round(Math.abs(normalized) * 100) / 100;
+  const fractionDigits = Number.isInteger(absRounded) ? 0 : 2;
+  const formatted = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(absRounded);
+  if (signed) return `${normalized > 0 ? "+" : normalized < 0 ? "-" : ""}${formatted} pts`;
+  return `${normalized < 0 ? "-" : ""}${formatted} pts`;
 };
 
 export const splitTextSegments = (text: string, pattern: RegExp): { key: string; text: string; matched: boolean }[] => {

@@ -336,10 +336,6 @@ const PERCENT_PRESETS = [
   { label: "MAX", ratio: 1 },
 ] as const;
 
-function formatPricePts(value: number): string {
-  return `${new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)} pts`;
-}
-
 function calcFeePts(notionalPts: number, feeBps: number): number {
   if (notionalPts <= 0 || feeBps <= 0) return 0;
   const notionalCents = Math.round(notionalPts * 100);
@@ -643,16 +639,16 @@ function ExistingPositionSummaryCard({ position }: { position: ExistingPerpPosit
         </div>
         <div className="flex justify-between gap-1">
           <dt className="text-muted-foreground">Entry</dt>
-          <dd className="text-foreground">{formatPricePts(position.entryPrice)}</dd>
+          <dd className="text-foreground">{formatPts(position.entryPrice)}</dd>
         </div>
         <div className="flex justify-between gap-1">
           <dt className="text-muted-foreground">Mark</dt>
-          <dd className="text-foreground">{formatPricePts(position.markPrice)}</dd>
+          <dd className="text-foreground">{formatPts(position.markPrice)}</dd>
         </div>
         <div className="flex justify-between gap-1">
           <dt className="text-muted-foreground">Est. Liq</dt>
           <dd className={cn(nearLiquidation ? "font-bold text-warn" : "text-foreground")}>
-            {formatPricePts(position.liquidationPrice)}
+            {formatPts(position.liquidationPrice)}
           </dd>
         </div>
       </dl>
@@ -1003,7 +999,7 @@ function PerpOrderSummary({
       </div>
       <div className="flex justify-between">
         <dt className="text-muted-foreground">{liveQuote ? "Est. Entry (Live)" : "Est. Entry"}</dt>
-        <dd className="font-semibold text-foreground">{formatPricePts(estEntryPrice)}</dd>
+        <dd className="font-semibold text-foreground">{formatPts(estEntryPrice)}</dd>
       </div>
       <div className="flex justify-between">
         <dt className="text-muted-foreground">Price Impact</dt>
@@ -1012,7 +1008,7 @@ function PerpOrderSummary({
       <div className="flex justify-between">
         <dt className="text-muted-foreground">Est. Liquidation</dt>
         <dd className={cn(liqDistPct < 10 ? "font-semibold text-warn" : "text-foreground")}>
-          {formatPricePts(liqPrice)} ({liqDistPct.toFixed(1)}%)
+          {formatPts(liqPrice)} ({liqDistPct.toFixed(1)}%)
         </dd>
       </div>
       <div className="flex justify-between">
@@ -1721,7 +1717,7 @@ function PositionsSidebarList({
             </div>
             <div className="flex flex-wrap justify-between gap-2 font-mono text-xs text-muted-foreground tabular-nums">
               <span>Size {formatPts(pos.notionalPts)}</span>
-              <span>Liq {formatPricePts(pos.liquidationPrice)}</span>
+              <span>Liq {formatPts(pos.liquidationPrice)}</span>
             </div>
             {nearLiq ? (
               <Badge variant="warn" className="self-start">Near Liq ({liqDist.toFixed(1)}%)</Badge>

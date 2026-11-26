@@ -94,10 +94,6 @@ export interface TradeConfirmationDialogProps {
   submitting?: boolean;
 }
 
-function formatPrice(value: number): string {
-  return `${new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)} pts`;
-}
-
 function SummaryRow({ label, value, tone }: { label: string; value: string; tone?: "ok" | "destructive" | "warn" }) {
   return (
     <div className="flex items-center justify-between gap-4 text-sm">
@@ -190,10 +186,10 @@ function DetailsSummary({ details }: { details: TradeConfirmationDetails }) {
           <SummaryRow label="Direction" value={`${details.side.toUpperCase()} · ${details.leverage}x`} tone={details.side === "long" ? "ok" : "destructive"} />
           <SummaryRow label="Margin" value={formatPts(details.marginPts)} />
           <SummaryRow label="Notional Size" value={formatPts(details.notionalPts)} />
-          <SummaryRow label="Est. Entry" value={formatPrice(details.entryPrice)} />
+          <SummaryRow label="Est. Entry" value={formatPts(details.entryPrice)} />
           <SummaryRow
             label="Est. Liquidation"
-            value={`${formatPrice(details.liquidationPrice)} (${details.liquidationDistancePct.toFixed(1)}%)`}
+            value={`${formatPts(details.liquidationPrice)} (${details.liquidationDistancePct.toFixed(1)}%)`}
             tone={details.liquidationDistancePct < 10 ? "warn" : undefined}
           />
           <SummaryRow label="Fee" value={formatPts(details.estimatedFeePts)} />
@@ -204,7 +200,7 @@ function DetailsSummary({ details }: { details: TradeConfirmationDetails }) {
       return (
         <dl className="flex flex-col gap-2 rounded-lg border border-border bg-muted/40 p-3.5">
           <SummaryRow label="Position" value={`${details.side.toUpperCase()} ${details.leverage}x · ${formatPts(details.notionalPts)}`} />
-          <SummaryRow label="Entry / Mark" value={`${formatPrice(details.entryPrice)} / ${formatPrice(details.markPrice)}`} />
+          <SummaryRow label="Entry / Mark" value={`${formatPts(details.entryPrice)} / ${formatPts(details.markPrice)}`} />
           <SummaryRow label="Est. Fee" value={formatPts(details.estimatedFeePts)} />
           <SummaryRow
             label="Est. Realized PnL"
@@ -220,11 +216,11 @@ function DetailsSummary({ details }: { details: TradeConfirmationDetails }) {
           <SummaryRow label="Current Size" value={formatPts(details.currentNotionalPts)} />
           <SummaryRow label="Order Delta" value={formatPts(details.deltaNotionalPts)} />
           <SummaryRow label="Resulting Size" value={formatPts(details.resultingNotionalPts)} />
-          <SummaryRow label="Est. Price" value={formatPrice(details.entryPrice)} />
+          <SummaryRow label="Est. Price" value={formatPts(details.entryPrice)} />
           {details.liquidationPrice !== undefined ? (
             <SummaryRow
               label="Est. Liquidation"
-              value={formatPrice(details.liquidationPrice)}
+              value={formatPts(details.liquidationPrice)}
               tone={details.liquidationDistancePct !== undefined && details.liquidationDistancePct < 10 ? "warn" : undefined}
             />
           ) : null}
