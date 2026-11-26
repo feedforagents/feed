@@ -21,6 +21,7 @@ import {
   ceilDivProduct,
   creditActorBalance,
   debitActorBalance,
+  findIdempotentTradeReceipt,
   insertLedgerEntry,
   insertMarketNotification,
   insertPriceHistory,
@@ -31,7 +32,6 @@ import {
   normalizeViaClient,
   optionalInt,
   optionalText,
-  parseJsonBody,
   requiredText,
   type MarketActorKind
 } from "./shared.vibe"
@@ -712,38 +712,6 @@ const StoredTradeReceiptSchema = Schema.Struct({
   createdAt: Schema.Number
 })
 
-effect function findIdempotentPredictionReceipt(
-  tx: Tx,
-  actorId: string,
-  idempotencyKey: string,
-  requestFingerprint: string
-): (TradeReceipt | null)!(MarketFailure | StoreFailure) {
-  try tx.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [actorId, idempotencyKey])
-  const existingRows = try tx.query(
-    `SELECT request_fingerprint, receipt_json
-     FROM feed_trades
-     WHERE trader_id = $1 AND idempotency_key = $2
-     LIMIT 1`,
-    [actorId, idempotencyKey]
-  )
-  if (existingRows.length === 0) return null
-  const existing = existingRows[0]!
-  const storedFingerprint = optionalText(existing.request_fingerprint)
-  if (storedFingerprint !== requestFingerprint) {
-    throw marketFail("IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used with different trade parameters")
-  }
-  const receiptRaw = optionalText(existing.receipt_json)
-  if (receiptRaw === null) {
-    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt is unavailable for Idempotency-Key replay")
-  }
-  const parsed = try parseJsonBody(receiptRaw, "IDEMPOTENCY_CONFLICT", "Stored trade receipt is invalid JSON")
-  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(StoredTradeReceiptSchema)(parsed))
-  if (decoded === undefined) {
-    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt does not match TradeReceipt shape")
-  }
-  return decoded
-}
-
 effect function withLockedPredictionMarket(
   input: Pick<BuyPredictionInput, "marketId" | "viaClientName" | "actorId" | "idempotencyKey" | "nowMs">,
   requestFingerprint: string,
@@ -755,7 +723,14 @@ effect function withLockedPredictionMarket(
   const now = input.nowMs !== undefined && Number.isFinite(input.nowMs) ? Math.trunc(input.nowMs) : try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     if (idempotencyKey !== null) {
-      const replayed = try findIdempotentPredictionReceipt(tx, input.actorId, idempotencyKey, requestFingerprint)
+      const replayed = try findIdempotentTradeReceipt(
+        tx,
+        input.actorId,
+        idempotencyKey,
+        requestFingerprint,
+        StoredTradeReceiptSchema,
+        "TradeReceipt"
+      )
       if (replayed !== null) return replayed
     }
     const market = try lockOpenPredictionMarket(tx, input.marketId, now)

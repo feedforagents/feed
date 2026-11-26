@@ -1,5 +1,6 @@
 import { type ComponentProps, useId } from "react";
 import { ArrowRight, CheckCircle2, Clock, XCircle } from "lucide-react";
+import { buildSvgAreaPaths, canUseCanvas2d } from "../lib/canvas.ts";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
@@ -47,16 +48,6 @@ export type FeedMarketCardProps = Omit<ComponentProps<"div">, "children"> & {
   disabled?: boolean;
 };
 
-function canRenderCanvasChart(): boolean {
-  if (typeof window === "undefined" || typeof document === "undefined") return false;
-  try {
-    const probe = document.createElement("canvas");
-    return Boolean(probe.getContext?.("2d"));
-  } catch {
-    return false;
-  }
-}
-
 function clampPct(value: number): number {
   if (!Number.isFinite(value)) return 50;
   return Math.min(100, Math.max(0, value));
@@ -94,10 +85,8 @@ function SparklineFallback({
     return { x, y };
   });
 
-  const linePath = coords.map((pt, index) => `${index === 0 ? "M" : "L"}${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
+  const { linePath, areaPath } = buildSvgAreaPaths(coords, height);
   const last = coords[coords.length - 1];
-  const first = coords[0];
-  const areaPath = `${linePath} L${last.x.toFixed(1)},${height} L${first.x.toFixed(1)},${height} Z`;
   const toneClass = tone === "ok" ? "text-ok" : tone === "destructive" ? "text-destructive" : "text-muted-foreground";
 
   return (
@@ -162,7 +151,7 @@ export function FeedMarketCard({
     time: pt.time,
     yesPrice: pt.yesProbability <= 1 ? pt.yesProbability : pt.yesProbability / 100,
   }));
-  const useInteractiveChart = chartPoints.length >= 2 && canRenderCanvasChart();
+  const useInteractiveChart = chartPoints.length >= 2 && canUseCanvas2d();
   const sparklineTone = isResolved && resolvedOutcome === "yes" ? "ok" : isResolved && resolvedOutcome === "no" ? "destructive" : "neutral";
   const isEmbedded = variant === "embedded";
 
