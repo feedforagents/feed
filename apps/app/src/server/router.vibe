@@ -2131,6 +2131,7 @@ effect function handleMarketRoute(
     const session = try requireSession(request, config)
     const ticker = decodeSegment(perpOpenMatch[1] ?? "")
     const { data } = try readParsedBody(request)
+    const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const order = try parsePerpOrderParams(data)
     const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
@@ -2139,7 +2140,8 @@ effect function handleMarketRoute(
       ownerKind: "user",
       ticker,
       ...order,
-      ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) })
+      ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) }),
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey })
     })
     try publishFeedEvent({
       type: "market.perp",
@@ -2158,6 +2160,7 @@ effect function handleMarketRoute(
   if (method === "POST" && perpCloseMatch !== null) {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
+    const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSizePts = numField(data, "sizePts", "size_pts")
     const sizeCents = numField(data, "sizeCents", "size_cents") ?? (rawSizePts !== undefined ? Math.round(rawSizePts * 100) : undefined)
     const closePct = numField(data, "closePct", "close_pct")
@@ -2168,7 +2171,8 @@ effect function handleMarketRoute(
       positionId: decodeSegment(perpCloseMatch[1] ?? ""),
       ...(sizeCents === undefined ? {} : { sizeCents: Math.round(sizeCents) }),
       ...(closePct === undefined ? {} : { closePct }),
-      ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) })
+      ...(maxSlippageBps === undefined ? {} : { maxSlippageBps: Math.round(maxSlippageBps) }),
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey })
     })
     const store = try Store
     const levRows = try store.transaction((tx: Tx) =>

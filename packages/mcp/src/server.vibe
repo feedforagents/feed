@@ -1526,6 +1526,7 @@ effect function executeProtectedTradeTool(
     case "open_perp": {
       const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
       const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
+      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try openPerpPosition({
         ownerId: caller.accountId,
         ownerKind: "user",
@@ -1534,7 +1535,8 @@ effect function executeProtectedTradeTool(
         collateralCents,
         leverage,
         ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
-        viaClientName: caller.clientName
+        viaClientName: caller.clientName,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
       try maybePublishFeedEvent({
         type: "market.perp",
@@ -1571,6 +1573,7 @@ effect function executeProtectedTradeTool(
       const sizeCents = try resolveCloseSizeCents(args)
       const closePct = typeof args.closePct === "number" && Number.isFinite(args.closePct) ? args.closePct : undefined
       const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
+      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const openPositions = try listPerpPositions(caller.accountId)
       const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({
@@ -1579,7 +1582,8 @@ effect function executeProtectedTradeTool(
         ...(sizeCents === undefined ? {} : { sizeCents }),
         ...(closePct === undefined ? {} : { closePct }),
         ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
-        viaClientName: caller.clientName
+        viaClientName: caller.clientName,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
       })
       try maybePublishFeedEvent({
         type: "market.perp",

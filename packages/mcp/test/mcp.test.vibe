@@ -1327,3 +1327,86 @@ it.effect(
     })
   })
 )
+
+it.effect('MCP perp idempotencyKey replay/conflict for open_perp and close_perp (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution")', () => withSeededWorld(effect (authConfig) => {
+  const alice = try onboardPhoneUser("+14155550211", "alice_perp_idem", "Alice Perp Idem", authConfig)
+  const aliceToken = (try connectOAuthGrant({
+    accountId: alice.account.accountId,
+    clientName: "Perp Idem Agent",
+    redirectUri: "http://127.0.0.1:4103/callback",
+    scope: "read social:write messages trade",
+    state: "state_perp_idem",
+    verifier: "pkce_verifier_perp_idem_0123456789abcdef0123456789",
+    authConfig
+  })).access_token
+
+  const marketsPayload = unwrapToolPayload(try callMcpTool(201, "list_markets", { kind: "perp", limit: 5 }, authConfig))
+  const firstPerp = ((marketsPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>)[0]
+  const ticker = firstPerp?.ticker ?? ""
+
+  const openFirst = unwrapToolPayload(try callMcpTool(
+    202,
+    "open_perp",
+    { ticker, side: "long", collateralPts: 5, leverage: 3, idempotencyKey: "mcp-perp-open-1" },
+    authConfig,
+    aliceToken
+  ))
+  const openReplay = unwrapToolPayload(try callMcpTool(
+    203,
+    "open_perp",
+    { ticker, side: "long", collateralPts: 5, leverage: 3, idempotencyKey: "mcp-perp-open-1" },
+    authConfig,
+    aliceToken
+  ))
+  const openConflictErr = unwrapToolError(try callMcpTool(
+    204,
+    "open_perp",
+    { ticker, side: "long", collateralPts: 6, leverage: 3, idempotencyKey: "mcp-perp-open-1" },
+    authConfig,
+    aliceToken
+  ))
+  const positionId = String(openFirst.positionId ?? "")
+  const closeFirst = unwrapToolPayload(try callMcpTool(
+    205,
+    "close_perp",
+    { positionId, idempotencyKey: "mcp-perp-close-1" },
+    authConfig,
+    aliceToken
+  ))
+  const closeReplay = unwrapToolPayload(try callMcpTool(
+    206,
+    "close_perp",
+    { positionId, idempotencyKey: "mcp-perp-close-1" },
+    authConfig,
+    aliceToken
+  ))
+  const openSecond = unwrapToolPayload(try callMcpTool(
+    207,
+    "open_perp",
+    { ticker, side: "long", collateralPts: 5, leverage: 3, idempotencyKey: "mcp-perp-open-2" },
+    authConfig,
+    aliceToken
+  ))
+  const positionId2 = String(openSecond.positionId ?? "")
+  const closeConflictErr = unwrapToolError(try callMcpTool(
+    208,
+    "close_perp",
+    { positionId: positionId2, idempotencyKey: "mcp-perp-close-1" },
+    authConfig,
+    aliceToken
+  ))
+
+  try check(() => {
+    assert.notStrictEqual(ticker, "")
+    assert.strictEqual(openReplay.tradeId, openFirst.tradeId)
+    assert.strictEqual(openReplay.positionId, openFirst.positionId)
+    assert.strictEqual(openReplay.balanceAfterPts, openFirst.balanceAfterPts)
+    assert.strictEqual(openConflictErr.error, "idempotency_conflict")
+    assert.strictEqual(openConflictErr.code, "IDEMPOTENCY_CONFLICT")
+    assert.strictEqual(closeFirst.positionId, positionId)
+    assert.strictEqual(closeReplay.tradeId, closeFirst.tradeId)
+    assert.strictEqual(closeReplay.balanceAfterPts, closeFirst.balanceAfterPts)
+    assert.strictEqual(closeConflictErr.error, "idempotency_conflict")
+    assert.strictEqual(closeConflictErr.code, "IDEMPOTENCY_CONFLICT")
+  })
+}))

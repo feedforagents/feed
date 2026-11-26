@@ -28,8 +28,11 @@ import {
   marketFail,
   maybePublishMarketPerpEvent,
   newMarketId,
+  normalizeIdempotencyKey,
   normalizeViaClient,
   optionalInt,
+  optionalText,
+  parseJsonBody,
   requiredText,
   toSpecPerpPosition,
   type MarketActorKind
@@ -124,6 +127,7 @@ export interface OpenPerpInput {
   readonly mode?: PerpOrderMode
   readonly maxSlippageBps?: number
   readonly viaClientName?: string
+  readonly idempotencyKey?: string
 }
 
 export interface OpenPerpReceipt {
@@ -149,6 +153,7 @@ export interface ClosePerpInput {
   readonly closePct?: number
   readonly maxSlippageBps?: number
   readonly viaClientName?: string
+  readonly idempotencyKey?: string
 }
 
 export interface ClosePerpReceipt {
@@ -1308,13 +1313,137 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
   })
 }
 
+const StoredPerpPositionViewSchema = Schema.Struct({
+  id: Schema.String,
+  ticker: Schema.String,
+  holderId: Schema.String,
+  holderKind: Schema.Union([Schema.Literal("user"), Schema.Literal("npc")]),
+  side: Schema.Union([Schema.Literal("long"), Schema.Literal("short")]),
+  marginCents: Schema.Number,
+  sizeCents: Schema.Number,
+  leverage: Schema.Number,
+  entryPriceCents: Schema.Number,
+  markPriceCents: Schema.Number,
+  indexPriceCents: Schema.Number,
+  accruedFundingCents: Schema.Number,
+  lastFundingPeriod: Schema.Number,
+  unrealizedPnlCents: Schema.Number,
+  equityCents: Schema.Number,
+  liquidationPriceCents: Schema.Number,
+  status: Schema.Union([Schema.Literal("open"), Schema.Literal("closed"), Schema.Literal("liquidated")]),
+  realizedPnlCents: Schema.Number,
+  closedAt: Schema.NullOr(Schema.Number),
+  createdAt: Schema.Number
+})
+
+const StoredOpenPerpReceiptSchema = Schema.Struct({
+  tradeId: Schema.String,
+  positionId: Schema.String,
+  action: Schema.Union([
+    Schema.Literal("open"),
+    Schema.Literal("add"),
+    Schema.Literal("reduce"),
+    Schema.Literal("close"),
+    Schema.Literal("flip")
+  ]),
+  position: StoredPerpPositionViewSchema,
+  collateralCents: Schema.Number,
+  sizeCents: Schema.Number,
+  leverage: Schema.Number,
+  feeCents: Schema.Number,
+  executionPriceCents: Schema.Number,
+  realizedPnlCents: Schema.Number,
+  closedPositionId: Schema.NullOr(Schema.String),
+  balanceAfterCents: Schema.Number,
+  createdAt: Schema.Number
+})
+
+const StoredClosePerpReceiptSchema = Schema.Struct({
+  tradeId: Schema.String,
+  positionId: Schema.String,
+  ticker: Schema.String,
+  side: Schema.Union([Schema.Literal("long"), Schema.Literal("short")]),
+  sizeCents: Schema.Number,
+  remainingSizeCents: Schema.Number,
+  isFullClose: Schema.Boolean,
+  exitPriceCents: Schema.Number,
+  netCreditCents: Schema.Number,
+  feeCents: Schema.Number,
+  realizedPnlCents: Schema.Number,
+  balanceAfterCents: Schema.Number,
+  closedAt: Schema.Number
+})
+
+effect function findIdempotentPerpReceipt<A>(
+  tx: Tx,
+  actorId: string,
+  idempotencyKey: string,
+  requestFingerprint: string,
+  schema: Schema.Schema<A>,
+  shapeLabel: string
+): (A | null)!(MarketFailure | StoreFailure) {
+  try tx.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [actorId, idempotencyKey])
+  const existingRows = try tx.query(
+    `SELECT request_fingerprint, receipt_json
+     FROM feed_trades
+     WHERE trader_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [actorId, idempotencyKey]
+  )
+  if (existingRows.length === 0) return null
+  const existing = existingRows[0]!
+  const storedFingerprint = optionalText(existing.request_fingerprint)
+  if (storedFingerprint !== requestFingerprint) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used with different trade parameters")
+  }
+  const receiptRaw = optionalText(existing.receipt_json)
+  if (receiptRaw === null) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt is unavailable for Idempotency-Key replay")
+  }
+  const parsed = try parseJsonBody(receiptRaw, "IDEMPOTENCY_CONFLICT", "Stored trade receipt is invalid JSON")
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(schema)(parsed))
+  if (decoded === undefined) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", `Stored trade receipt does not match ${shapeLabel} shape`)
+  }
+  return decoded
+}
+
+effect function saveIdempotentPerpReceipt(
+  tx: Tx,
+  tradeId: string,
+  idempotencyKey: string | null,
+  requestFingerprint: string,
+  receipt: unknown
+): void!StoreFailure {
+  if (idempotencyKey === null) return
+  try tx.query(
+    `UPDATE feed_trades
+     SET idempotency_key = $2, request_fingerprint = $3, receipt_json = $4
+     WHERE id = $1`,
+    [tradeId, idempotencyKey, requestFingerprint, JSON.stringify(receipt)]
+  )
+}
+
 export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(MarketFailure | StoreFailure)!Store {
   const sizeCents = try validatePerpOrderInput(input)
   const viaClientName = normalizeViaClient(input.viaClientName)
+  const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
+  const fingerprint = `open:${input.ticker}:${input.side}:${input.collateralCents}:${input.leverage}:${input.mode ?? ""}`
   const store = try Store
   const now = try Clock.currentTimeMillis
   const currentPeriod = fundingPeriodFromSeconds(Math.floor(now / 1000))
   return try store.transaction(effect (tx: Tx) => {
+    if (idempotencyKey !== null) {
+      const replayed = try findIdempotentPerpReceipt(
+        tx,
+        input.ownerId,
+        idempotencyKey,
+        fingerprint,
+        StoredOpenPerpReceiptSchema,
+        "OpenPerpReceipt"
+      )
+      if (replayed !== null) return replayed
+    }
     const market = try lockPerpMarket(tx, input.ticker)
     if (input.leverage > market.maxLeverage) {
       throw marketFail("INVALID_LEVERAGE", `Market leverage cap is ${market.maxLeverage}x`)
@@ -1327,9 +1456,10 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       "SELECT * FROM feed_perp_positions WHERE holder_id = $1 AND ticker = $2 AND status = 'open' FOR UPDATE",
       [input.ownerId, input.ticker]
     )
+    let receipt: OpenPerpReceipt
     if (existingRows.length === 0) {
       try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, true)
-      return try insertFreshPerpPositionTx(tx, {
+      receipt = try insertFreshPerpPositionTx(tx, {
         ownerId: input.ownerId,
         ownerKind: input.ownerKind,
         market,
@@ -1345,148 +1475,163 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
         closedPositionId: null,
         now
       })
-    }
-    const existingRow = existingRows[0]!
-    const existing = toSpecPerpPosition(existingRow)
-    const existingSide: PerpSide = existing.perpSide === "Short" ? "short" : "long"
-    if (existingSide === input.side) {
-      try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, false)
-      return try addToPerpPositionTx(tx, {
-        existingRow,
-        market,
-        side: input.side,
-        addCollateralCents: input.collateralCents,
-        addSizeCents: sizeCents,
-        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
-        viaClientName,
-        now
-      })
-    }
-    if (input.mode === "flip") {
-      const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
-        market.indexPriceCents,
-        market.longOiCents,
-        market.shortOiCents,
-        existingSide,
-        existing.sizeCents,
-        input.side,
-        sizeCents
-      )
-      try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
-      const closedOld = try settlePerpCloseSliceTx(tx, {
-        posRow: existingRow,
-        market,
-        closeSizeCents: existing.sizeCents,
-        viaClientName,
-        now
-      })
-      try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, true)
-      const postCloseMarket: PerpMarketSnapshot = {
-        ...market,
-        longOiCents: closedOld.nextLongOi,
-        shortOiCents: closedOld.nextShortOi,
-        markPriceCents: closedOld.postCloseMark
+    } else {
+      const existingRow = existingRows[0]!
+      const existing = toSpecPerpPosition(existingRow)
+      const existingSide: PerpSide = existing.perpSide === "Short" ? "short" : "long"
+      if (existingSide === input.side) {
+        try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, false)
+        receipt = try addToPerpPositionTx(tx, {
+          existingRow,
+          market,
+          side: input.side,
+          addCollateralCents: input.collateralCents,
+          addSizeCents: sizeCents,
+          ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+          viaClientName,
+          now
+        })
+      } else if (input.mode === "flip") {
+        const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
+          market.indexPriceCents,
+          market.longOiCents,
+          market.shortOiCents,
+          existingSide,
+          existing.sizeCents,
+          input.side,
+          sizeCents
+        )
+        try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
+        const closedOld = try settlePerpCloseSliceTx(tx, {
+          posRow: existingRow,
+          market,
+          closeSizeCents: existing.sizeCents,
+          viaClientName,
+          now
+        })
+        try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, true)
+        const postCloseMarket: PerpMarketSnapshot = {
+          ...market,
+          longOiCents: closedOld.nextLongOi,
+          shortOiCents: closedOld.nextShortOi,
+          markPriceCents: closedOld.postCloseMark
+        }
+        receipt = try insertFreshPerpPositionTx(tx, {
+          ownerId: input.ownerId,
+          ownerKind: input.ownerKind,
+          market: postCloseMarket,
+          side: input.side,
+          collateralCents: input.collateralCents,
+          sizeCents,
+          leverage: input.leverage,
+          viaClientName,
+          currentPeriod,
+          action: "flip",
+          realizedPnlCents: closedOld.receipt.realizedPnlCents,
+          closedPositionId: closedOld.receipt.positionId,
+          priorFeeCents: closedOld.receipt.feeCents,
+          now
+        })
+      } else if (sizeCents <= existing.sizeCents) {
+        const settled = try settlePerpCloseSliceTx(tx, {
+          posRow: existingRow,
+          market,
+          closeSizeCents: sizeCents,
+          ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
+          viaClientName,
+          now
+        })
+        const posRow = {
+          ...settled.updatedPositionRow,
+          mark_price_cents: settled.postCloseMark,
+          index_price_cents: market.indexPriceCents
+        }
+        receipt = {
+          tradeId: settled.receipt.tradeId,
+          positionId: settled.receipt.positionId,
+          action: settled.receipt.isFullClose ? "close" : "reduce",
+          position: toPerpPositionView(posRow),
+          collateralCents: 0,
+          sizeCents,
+          leverage: existing.leverage,
+          feeCents: settled.receipt.feeCents,
+          executionPriceCents: settled.receipt.exitPriceCents,
+          realizedPnlCents: settled.receipt.realizedPnlCents,
+          closedPositionId: settled.receipt.isFullClose ? settled.receipt.positionId : null,
+          balanceAfterCents: settled.receipt.balanceAfterCents,
+          createdAt: now
+        }
+      } else {
+        const flipSizeCents = sizeCents - existing.sizeCents
+        if (flipSizeCents < MIN_ORDER_SIZE_CENTS) {
+          throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
+        }
+        const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
+          market.indexPriceCents,
+          market.longOiCents,
+          market.shortOiCents,
+          existingSide,
+          existing.sizeCents,
+          input.side,
+          flipSizeCents
+        )
+        try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
+        const flipCollateralCents = ceilDiv(flipSizeCents, input.leverage)
+        const closedOld = try settlePerpCloseSliceTx(tx, {
+          posRow: existingRow,
+          market,
+          closeSizeCents: existing.sizeCents,
+          viaClientName,
+          now
+        })
+        try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, flipSizeCents, true)
+        const postCloseMarket: PerpMarketSnapshot = {
+          ...market,
+          longOiCents: closedOld.nextLongOi,
+          shortOiCents: closedOld.nextShortOi,
+          markPriceCents: closedOld.postCloseMark
+        }
+        receipt = try insertFreshPerpPositionTx(tx, {
+          ownerId: input.ownerId,
+          ownerKind: input.ownerKind,
+          market: postCloseMarket,
+          side: input.side,
+          collateralCents: flipCollateralCents,
+          sizeCents: flipSizeCents,
+          leverage: input.leverage,
+          viaClientName,
+          currentPeriod,
+          action: "flip",
+          realizedPnlCents: closedOld.receipt.realizedPnlCents,
+          closedPositionId: closedOld.receipt.positionId,
+          priorFeeCents: closedOld.receipt.feeCents,
+          now
+        })
       }
-      return try insertFreshPerpPositionTx(tx, {
-        ownerId: input.ownerId,
-        ownerKind: input.ownerKind,
-        market: postCloseMarket,
-        side: input.side,
-        collateralCents: input.collateralCents,
-        sizeCents,
-        leverage: input.leverage,
-        viaClientName,
-        currentPeriod,
-        action: "flip",
-        realizedPnlCents: closedOld.receipt.realizedPnlCents,
-        closedPositionId: closedOld.receipt.positionId,
-        priorFeeCents: closedOld.receipt.feeCents,
-        now
-      })
     }
-    if (sizeCents <= existing.sizeCents) {
-      const settled = try settlePerpCloseSliceTx(tx, {
-        posRow: existingRow,
-        market,
-        closeSizeCents: sizeCents,
-        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
-        viaClientName,
-        now
-      })
-      const posRow = {
-        ...settled.updatedPositionRow,
-        mark_price_cents: settled.postCloseMark,
-        index_price_cents: market.indexPriceCents
-      }
-      return {
-        tradeId: settled.receipt.tradeId,
-        positionId: settled.receipt.positionId,
-        action: settled.receipt.isFullClose ? "close" : "reduce",
-        position: toPerpPositionView(posRow),
-        collateralCents: 0,
-        sizeCents,
-        leverage: existing.leverage,
-        feeCents: settled.receipt.feeCents,
-        executionPriceCents: settled.receipt.exitPriceCents,
-        realizedPnlCents: settled.receipt.realizedPnlCents,
-        closedPositionId: settled.receipt.isFullClose ? settled.receipt.positionId : null,
-        balanceAfterCents: settled.receipt.balanceAfterCents,
-        createdAt: now
-      }
-    }
-    const flipSizeCents = sizeCents - existing.sizeCents
-    if (flipSizeCents < MIN_ORDER_SIZE_CENTS) {
-      throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
-    }
-    const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
-      market.indexPriceCents,
-      market.longOiCents,
-      market.shortOiCents,
-      existingSide,
-      existing.sizeCents,
-      input.side,
-      flipSizeCents
-    )
-    try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
-    const flipCollateralCents = ceilDiv(flipSizeCents, input.leverage)
-    const closedOld = try settlePerpCloseSliceTx(tx, {
-      posRow: existingRow,
-      market,
-      closeSizeCents: existing.sizeCents,
-      viaClientName,
-      now
-    })
-    try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, flipSizeCents, true)
-    const postCloseMarket: PerpMarketSnapshot = {
-      ...market,
-      longOiCents: closedOld.nextLongOi,
-      shortOiCents: closedOld.nextShortOi,
-      markPriceCents: closedOld.postCloseMark
-    }
-    return try insertFreshPerpPositionTx(tx, {
-      ownerId: input.ownerId,
-      ownerKind: input.ownerKind,
-      market: postCloseMarket,
-      side: input.side,
-      collateralCents: flipCollateralCents,
-      sizeCents: flipSizeCents,
-      leverage: input.leverage,
-      viaClientName,
-      currentPeriod,
-      action: "flip",
-      realizedPnlCents: closedOld.receipt.realizedPnlCents,
-      closedPositionId: closedOld.receipt.positionId,
-      priorFeeCents: closedOld.receipt.feeCents,
-      now
-    })
+    try saveIdempotentPerpReceipt(tx, receipt.tradeId, idempotencyKey, fingerprint, receipt)
+    return receipt
   })
 }
 
 export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceipt!(MarketFailure | StoreFailure)!Store {
   const viaClientName = normalizeViaClient(input.viaClientName)
+  const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
+  const fingerprint = `close:${input.positionId}:${input.sizeCents ?? ""}:${input.closePct ?? ""}`
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
+    if (idempotencyKey !== null) {
+      const replayed = try findIdempotentPerpReceipt(
+        tx,
+        input.ownerId,
+        idempotencyKey,
+        fingerprint,
+        StoredClosePerpReceiptSchema,
+        "ClosePerpReceipt"
+      )
+      if (replayed !== null) return replayed
+    }
     const posRows = try tx.query("SELECT * FROM feed_perp_positions WHERE id = $1 FOR UPDATE", [input.positionId])
     if (posRows.length === 0) {
       throw marketFail("POSITION_NOT_FOUND", `Position not found: ${input.positionId}`)
@@ -1524,6 +1669,7 @@ export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceip
       viaClientName,
       now
     })
+    try saveIdempotentPerpReceipt(tx, settled.receipt.tradeId, idempotencyKey, fingerprint, settled.receipt)
     return settled.receipt
   })
 }

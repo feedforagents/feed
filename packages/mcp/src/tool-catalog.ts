@@ -1441,6 +1441,12 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minimum: 0,
         maximum: 5000,
         description: "Optional maximum allowed mark price impact in basis points (0-5000)."
+      },
+      idempotencyKey: {
+        kind: "string",
+        minLength: 1,
+        maxLength: 255,
+        description: "Optional idempotency key (1-255 characters) to safely deduplicate retried perp orders."
       }
     }
   }),
@@ -1484,6 +1490,12 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minimum: 0,
         maximum: 5000,
         description: "Optional maximum allowed mark price impact in basis points (0-5000)."
+      },
+      idempotencyKey: {
+        kind: "string",
+        minLength: 1,
+        maxLength: 255,
+        description: "Optional idempotency key (1-255 characters) to safely deduplicate retried perp closes."
       }
     }
   })
