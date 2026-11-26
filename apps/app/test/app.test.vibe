@@ -959,7 +959,12 @@ it.effect('Session cookie slides with the server session (spec/app/index.md, "St
     const meFresh = try callApp("/api/auth/me", { cookie: player.cookie })
     const meFreshBody = try readJson(meFresh)
     try check(() => assert.strictEqual(meFreshBody.authenticated, true))
-    try check(() => assert.strictEqual(meFresh.headers.get("set-cookie"), null))
+    const meFreshMaxAge = sessionCookieMaxAge(meFresh.headers.get("set-cookie"))
+    const meFreshPair = extractSessionCookie(meFresh)
+    try check(() => assert.deepStrictEqual(
+         { meFreshMaxAge, sameToken: meFreshPair === player.cookie },
+     { meFreshMaxAge: 30 * 86_400, sameToken: true }
+    ))
 
     try TestClock.adjust("25 days")
     const marketsLater = try callApp("/api/markets", { cookie: player.cookie })
@@ -973,19 +978,24 @@ it.effect('Session cookie slides with the server session (spec/app/index.md, "St
     const meLater = try callApp("/api/auth/me", { cookie: player.cookie })
     const meLaterBody = try readJson(meLater)
     try check(() => assert.strictEqual(meLaterBody.authenticated, true))
-    try check(() => assert.strictEqual(meLater.headers.get("set-cookie"), null))
-    try TestClock.adjust("25 days")
-    const meStill = try callApp("/api/auth/me", { cookie: player.cookie })
-    const meStillBody = try readJson(meStill)
-    try check(() => assert.strictEqual(meStillBody.authenticated, true))
-  try TestClock.adjust("20 days")
-  const marketsDay70 = try callApp("/api/markets", { cookie: player.cookie })
-  try check(() => assert.strictEqual(marketsDay70.status, 200))
-  const cappedMaxAge = sessionCookieMaxAge(marketsDay70.headers.get("set-cookie"))
-  const cappedPair = extractSessionCookie(marketsDay70)
-  try check(() => assert.deepStrictEqual(
-   { cappedMaxAge, sameToken: cappedPair === player.cookie },
-   { cappedMaxAge: 20 * 86_400, sameToken: true }
+        const meLaterMaxAge = sessionCookieMaxAge(meLater.headers.get("set-cookie"))
+      const meLaterPair = extractSessionCookie(meLater)
+      try check(() => assert.deepStrictEqual(
+       { meLaterMaxAge, sameToken: meLaterPair === player.cookie },
+       { meLaterMaxAge: 30 * 86_400, sameToken: true }
+      ))
+      try TestClock.adjust("25 days")
+      const meStill = try callApp("/api/auth/me", { cookie: player.cookie })
+      const meStillBody = try readJson(meStill)
+      try check(() => assert.strictEqual(meStillBody.authenticated, true))
+    try TestClock.adjust("20 days")
+    const marketsDay70 = try callApp("/api/markets", { cookie: player.cookie })
+    try check(() => assert.strictEqual(marketsDay70.status, 200))
+    const cappedMaxAge = sessionCookieMaxAge(marketsDay70.headers.get("set-cookie"))
+    const cappedPair = extractSessionCookie(marketsDay70)
+    try check(() => assert.deepStrictEqual(
+     { cappedMaxAge, sameToken: cappedPair === player.cookie },
+     { cappedMaxAge: 20 * 86_400, sameToken: true }
   ))
   }
 }, 180_000)
