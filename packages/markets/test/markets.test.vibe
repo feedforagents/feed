@@ -31,6 +31,7 @@ import {
   listUserClosedPositions,
   markToMarketPredictionCents,
   openPerpPosition,
+  parseClosedOutcomeFilter,
   previewPerpOrder,
   previewPredictionBuy,
   previewPredictionSell,
@@ -1256,6 +1257,57 @@ it.effect('Closed prediction positions report the average entry price in listClo
         itemEntryPriceCents: expectedEntryPriceCents,
         expectedEntryPriceCents,
         itemExitPriceCents: 100
+      }
+    ))
+  })
+)
+
+it.effect('Cancelled prediction positions read cancelled in listClosedPositions (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () =>
+  runWithSeededMarketDay(effect (_now) => {
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+    try buyPredictionShares({
+      actorId: "user-bob",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 4_000
+    })
+    try cancelPredictionMarket("seed-market-1")
+    const all = try listClosedPositions({ accountId: "user-bob" })
+    const cancelled = try listClosedPositions({ accountId: "user-bob", outcome: "cancelled" })
+    const lost = try listClosedPositions({ accountId: "user-bob", outcome: "lost" })
+    const canonical = try listUserClosedPositions("user-bob")
+    const payoutEqualsCostBasis = all.items[0]?.payoutCents === all.items[0]?.costBasisCents
+    try check(() => assert.deepStrictEqual(
+      {
+        parseCancelled: parseClosedOutcomeFilter("cancelled"),
+        parseBogus: parseClosedOutcomeFilter("bogus"),
+        allTotalCount: all.totalCount,
+        itemKind: all.items[0]?.kind,
+        itemMarketId: all.items[0]?.marketId,
+        itemSide: all.items[0]?.side,
+        itemOutcome: all.items[0]?.outcome,
+        itemStatus: all.items[0]?.status,
+        itemRealizedPnlCents: all.items[0]?.realizedPnlCents,
+        payoutEqualsCostBasis: payoutEqualsCostBasis,
+        cancelledTotalCount: cancelled.totalCount,
+        lostTotalCount: lost.totalCount,
+        canonicalOutcome: canonical.predictionPositions[0]?.outcome
+      },
+      {
+        parseCancelled: "cancelled",
+        parseBogus: "all",
+        allTotalCount: 1,
+        itemKind: "prediction",
+        itemMarketId: "seed-market-1",
+        itemSide: "yes",
+        itemOutcome: "cancelled",
+        itemStatus: "cancelled",
+        itemRealizedPnlCents: 0,
+        payoutEqualsCostBasis: true,
+        cancelledTotalCount: 1,
+        lostTotalCount: 0,
+        canonicalOutcome: "cancelled"
       }
     ))
   })
