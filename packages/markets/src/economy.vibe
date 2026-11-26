@@ -204,12 +204,14 @@ export effect function getAccountEconomyIn(tx: Tx, accountId: string): AccountEc
     throw marketFail("ACCOUNT_NOT_FOUND", `Account not found: ${accountId}`)
   }
   const acct = accountRows[0]!
+  const now = try Clock.currentTimeMillis
   const predRows = try tx.query(
     `SELECT p.side, p.shares, m.yes_shares, m.no_shares
      FROM feed_prediction_positions p
      JOIN feed_prediction_markets m ON m.id = p.market_id
-     WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0`,
-    [accountId]
+     WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NULL AND p.shares > 0
+       AND m.status = 'open' AND m.expires_at > $2`,
+    [accountId, now]
   )
   let predValueCents = 0
   for (const row of predRows) {
@@ -321,12 +323,14 @@ effect function loadTradingAggregatesTx(
   readonly volumeMap: ReadonlyMap<string, { readonly volumeCents: number; readonly tradeCount: number }>
   readonly statsMap: ReadonlyMap<string, { readonly wins: number; readonly settledCount: number; readonly realizedPnlCents: number }>
 }!StoreFailure {
+  const now = try Clock.currentTimeMillis
   const predRows = try tx.query(
     `SELECT p.holder_id, p.side, p.shares, p.cost_basis_cents, m.yes_shares, m.no_shares
      FROM feed_prediction_positions p
      JOIN feed_prediction_markets m ON m.id = p.market_id
-     WHERE p.holder_kind = $1 AND p.settled_at IS NULL AND p.shares > 0`,
-    [holderKind]
+     WHERE p.holder_kind = $1 AND p.settled_at IS NULL AND p.shares > 0
+       AND m.status = 'open' AND m.expires_at > $2`,
+    [holderKind, now]
   )
   const predValueMap = new Map<string, number>()
   const openUnrealizedMap = new Map<string, number>()

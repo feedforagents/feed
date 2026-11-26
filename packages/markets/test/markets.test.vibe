@@ -942,9 +942,15 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
     const expectedMtm = markToMarketPredictionCents("yes", buy.shares, buy.market.yesShares, buy.market.noShares)
     const beforeExpiry = try getUserPositions("user-alice")
     const beforeItem = beforeExpiry.predictionPositions[0]
+    const econBefore = try getAccountEconomy("user-alice")
+    const boardBefore = try getLeaderboard()
+    const boardBeforeAlice = boardBefore.entries.find((e) => e.accountId === "user-alice")
     try TestClock.adjust(Duration.seconds(4 * 86_400))
     const afterExpiry = try getUserPositions("user-alice")
     const afterItem = afterExpiry.predictionPositions[0]
+    const econAfter = try getAccountEconomy("user-alice")
+    const boardAfter = try getLeaderboard()
+    const boardAfterAlice = boardAfter.entries.find((e) => e.accountId === "user-alice")
     try check(() => assert.deepStrictEqual(
       {
         listedBeforeExpiry: beforeExpiry.predictionPositions.length,
@@ -955,7 +961,11 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
         stillListedAfterExpiry: afterExpiry.predictionPositions.length,
         sharesAfterExpiry: afterItem?.shares,
         marketStatusAfterExpiry: afterItem?.marketStatus,
-        estimatedAfterExpiry: afterItem?.estimatedValueCents
+        estimatedAfterExpiry: afterItem?.estimatedValueCents,
+        econBeforeExpiry: econBefore.positionValueCents,
+        boardBeforeExpiry: boardBeforeAlice?.positionValueCents,
+        econAfterExpiry: econAfter.positionValueCents,
+        boardAfterExpiry: boardAfterAlice?.positionValueCents
       },
       {
         listedBeforeExpiry: 1,
@@ -966,7 +976,11 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
         stillListedAfterExpiry: 1,
         sharesAfterExpiry: buy.shares,
         marketStatusAfterExpiry: "open",
-        estimatedAfterExpiry: 0
+        estimatedAfterExpiry: 0,
+        econBeforeExpiry: expectedMtm,
+        boardBeforeExpiry: expectedMtm,
+        econAfterExpiry: 0,
+        boardAfterExpiry: 0
       }
     ))
   })
