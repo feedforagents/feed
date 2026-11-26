@@ -13,6 +13,7 @@ import {
   confirmLlmSpend,
   ensureRollingMarketSlots,
   executeNpcDecision,
+  extractRssHeadlinesFromXml,
   fastForwardSimulatedHours,
   findEligibleAlphaTarget,
   formatActorToneAndFinanceGuardrails,
@@ -668,6 +669,12 @@ it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pause
     })
   })
 }))
+
+it.effect('RSS headlines decode decimal and hexadecimal character references before prompt rendering (spec/engine/worldClock.md, "Story: Refresh RSS headlines into grounded NPC prompts")', () => effect {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item><title>OpenAGI &amp; MetAI &#8217; the &#x2014; deal</title></item></channel></rss>`
+  const headlines = extractRssHeadlinesFromXml(xml, "https://example.test/feed.xml")
+  assert.deepStrictEqual(headlines, [{ title: "OpenAGI & MetAI ’ the — deal", sourceUrl: "https://example.test/feed.xml" }])
+})
 
 it.effect('NPCs execute full trading and social actions, alpha invites honor blocks and cooldowns, and atomic settlement publishes clean proof articles and NEW MARKET posts (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', () => scoped(effect {
   const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
