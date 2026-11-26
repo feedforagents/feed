@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -191,7 +192,9 @@ const SAMPLE_TRADES = [
   },
 ];
 
-function installMockNetwork() {
+function installMockNetwork(options: { holdPnlRange?: string } = {}) {
+  const heldPnl = new Map<string, Array<() => void>>();
+  const requestedPnlRanges = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -349,14 +352,25 @@ function installMockNetwork() {
     }
     if (path === "/api/markets/positions/closed") return json({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
     if (path === "/api/economy/me/pnl-history") {
-      return json({
-        range: "ALL",
+      const range = url.searchParams.get("range") ?? "ALL";
+      const finalPnlCents = range === "1D" ? 11_100 : range === "1W" ? 22_200 : 1528;
+      const body = {
+        range,
         points: [
           { timestamp: Date.now() - 3_600_000, pnlCents: 0, cumulativePnlCents: 0, deltaCents: 0, kind: "baseline" },
-          { timestamp: Date.now(), pnlCents: 1528, cumulativePnlCents: 1528, deltaCents: 1528, kind: "mark_to_market" },
+          { timestamp: Date.now(), pnlCents: finalPnlCents, cumulativePnlCents: finalPnlCents, deltaCents: finalPnlCents, kind: "mark_to_market" },
         ],
-        currentNetProfitCents: 1528,
-      });
+        currentNetProfitCents: finalPnlCents,
+      };
+      if (options.holdPnlRange === range) {
+        requestedPnlRanges.add(range);
+        return new Promise<Response>((resolve) => {
+          const pending = heldPnl.get(range) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldPnl.set(range, pending);
+        });
+      }
+      return json(body);
     }
     if (path === "/api/economy/me") {
       return json({
@@ -402,6 +416,13 @@ function installMockNetwork() {
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
+
+  return {
+    pnlRequested: (range: string) => requestedPnlRanges.has(range),
+    releasePnl: (range: string) => {
+      for (const release of heldPnl.get(range)?.splice(0) ?? []) release();
+    },
+  };
 }
 
 beforeAll(() => {
@@ -533,4 +554,37 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
   await act(() => storeActions.navigate("/settings?tab=account"));
   await expect.element(page.getByText("e***@example.com")).toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Change email" })).toBeInTheDocument();
+});
+
+it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = installMockNetwork({ holdPnlRange: "1D" });
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
+  await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
+  await act(() => userEvent.fill(page.getByLabelText(/Password/i), "secret-pass"));
+  await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
+  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+
+  await act(() => {
+    void storeActions.loadPnlHistory("1D");
+  });
+  await act(() => Promise.resolve());
+  expect(network.pnlRequested("1D")).toBe(true);
+
+  await act(() => storeActions.loadPnlHistory("1W"));
+  expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
+  expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
+
+  network.releasePnl("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
+  expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
+  expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
 });

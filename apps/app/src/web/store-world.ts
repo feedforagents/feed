@@ -70,6 +70,7 @@ const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
+let pnlHistoryRequestSeq = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -700,10 +701,12 @@ export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<v
   const s = getStoreSnapshot();
   if (!s.viewer) return;
   const range = rangeOverride ?? s.pnlTimeRange;
+  const reqSeq = ++pnlHistoryRequestSeq;
   setStoreState({ pnlHistoryLoading: true, pnlTimeRange: range });
   const res = await requestJson(`/api/economy/me/pnl-history?range=${encodeURIComponent(range)}`, {
     parse: decodePnlHistory,
   });
+  if (reqSeq !== pnlHistoryRequestSeq) return;
   if (res.ok) {
     setStoreState({ pnlHistory: res.data, pnlHistoryLoading: false });
     return;
