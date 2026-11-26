@@ -1714,7 +1714,7 @@ export effect function accruePerpFunding(nowMs?: number): FundingAccrualSummary!
       try tx.query(
         `UPDATE feed_perp_markets
          SET funding_rate_bps = $2, last_funding_period = $3, updated_at = $4
-         WHERE ticker = $1`,
+         WHERE ticker = $1 AND last_funding_period < $3`,
         [ticker, premBps, period, now]
       )
     }

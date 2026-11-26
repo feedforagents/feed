@@ -529,11 +529,16 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
 
     // spec/markets/spotPerp.md, "UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods"
     try TestClock.adjust(Duration.seconds(2 * 3_600))
+    const samePeriodTime = try Clock.currentTimeMillis
     const samePeriodFunding = try accruePerpFunding()
     try TestClock.adjust(Duration.seconds(6 * 3_600))
     const nextPeriodFunding = try accruePerpFunding()
+    const marketAfterFunding = try getPerpMarket("XTRPC")
     try TestClock.adjust(Duration.seconds(3_600))
     const duplicatePeriodFunding = try accruePerpFunding()
+    const marketAfterDuplicateFunding = try getPerpMarket("XTRPC")
+    try accruePerpFunding(samePeriodTime)
+    const marketAfterStaleFunding = try getPerpMarket("XTRPC")
     const aliceHeldAfterFunding = try listPerpPositions("user-alice")
 
     const bobLong = try openPerpPosition({
@@ -640,7 +645,9 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
           samePeriodFunding.accruedCount,
           nextPeriodFunding.accruedCount,
           duplicatePeriodFunding.accruedCount,
-          aliceHeldAfterFunding.length
+          aliceHeldAfterFunding.length,
+          [marketAfterFunding.lastFundingPeriod, marketAfterDuplicateFunding.lastFundingPeriod, marketAfterStaleFunding.lastFundingPeriod],
+          [marketAfterFunding.updatedAt, marketAfterDuplicateFunding.updatedAt, marketAfterStaleFunding.updatedAt]
         ],
         liquidation: [
           liqSummary.liquidatedCount,
@@ -662,7 +669,14 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
         modeFlipPreview: ["flip", 1_140, 952, 14],
         modeFlipBlocked: ["SLIPPAGE_EXCEEDED", 1, "long", 4_000],
         modeFlipBack: ["flip", 525, 1_053, "flip", "long", 10_000, 16, true],
-        funding: [0, 1, 0, 1],
+        funding: [
+          0,
+          1,
+          0,
+          1,
+          [nextPeriodFunding.period, nextPeriodFunding.period, nextPeriodFunding.period],
+          [marketAfterFunding.updatedAt, marketAfterFunding.updatedAt, marketAfterFunding.updatedAt]
+        ],
         liquidation: [1, true, 1, "liquidate", true, 1, "liquidated"]
       }
     ))
