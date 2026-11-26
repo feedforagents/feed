@@ -100,7 +100,15 @@ const countryAllowlist = [
   { code: "IE", label: "Ireland (+353)" },
   { code: "AU", label: "Australia (+61)" },
   { code: "NZ", label: "New Zealand (+64)" },
-  { code: "EU", label: "EU / EEA" },
+  { code: "FR", label: "France (+33)" },
+  { code: "DE", label: "Germany (+49)" },
+  { code: "NL", label: "Netherlands (+31)" },
+  { code: "ES", label: "Spain (+34)" },
+  { code: "IT", label: "Italy (+39)" },
+  { code: "SE", label: "Sweden (+46)" },
+  { code: "DK", label: "Denmark (+45)" },
+  { code: "NO", label: "Norway (+47)" },
+  { code: "FI", label: "Finland (+358)" },
 ];
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {

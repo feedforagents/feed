@@ -11,6 +11,7 @@ import type { ViewerSession } from "../src/web/types.ts";
 
 const opened: Root[] = [];
 const predictionBuyBodies: string[] = [];
+const phoneStartRequests: Array<Record<string, unknown>> = [];
 const createdEventSources: Array<EventTarget> = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
@@ -308,6 +309,14 @@ function installMockNetwork(
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
     fetchPaths.push(path);
+    if (path === "/api/auth/phone/start") {
+      try {
+        phoneStartRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      } catch {
+        phoneStartRequests.push({});
+      }
+      return json({});
+    }
     if (path === "/api/auth/logout") {
       return json({ ok: true });
     }
@@ -1983,4 +1992,35 @@ it('Stale profile page is dropped after a profile refresh (spec/app/navigation.m
   expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new", "bob-1"]);
   expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-2");
   expect(getStoreSnapshot().profileLoadingMore).toBe(false);
+});
+
+it('Phone SMS door sends national numbers as E.164 (spec/app/onboarding.md, "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link")', async () => {
+  phoneStartRequests.length = 0;
+  await mountApp();
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  const join = page.getByRole("dialog", { name: "Join Feed" });
+  await expect.element(join).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Phone" })));
+
+  await act(() => userEvent.click(page.getByRole("combobox", { name: "Country" })));
+  await act(() => userEvent.click(page.getByRole("option", { name: "United Kingdom (+44)" })));
+  await act(() => userEvent.fill(page.getByLabelText("Mobile number (non-VoIP)"), "07700900123"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Send 6-digit SMS code" })));
+  await expect.element(page.getByLabelText("6-digit SMS code")).toBeInTheDocument();
+  expect(phoneStartRequests).toHaveLength(1);
+  expect(phoneStartRequests[0]?.phoneE164).toBe("+447700900123");
+
+  await act(() => userEvent.click(join.getByRole("button", { name: "Close" })));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await expect.element(page.getByRole("dialog", { name: "Join Feed" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Phone" })));
+  await act(() => userEvent.click(page.getByRole("combobox", { name: "Country" })));
+  await act(() => userEvent.click(page.getByRole("option", { name: "France (+33)" })));
+  await act(() => userEvent.fill(page.getByLabelText("Mobile number (non-VoIP)"), "06 12 34 56 78"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Send 6-digit SMS code" })));
+  await expect.element(page.getByLabelText("6-digit SMS code")).toBeInTheDocument();
+  expect(phoneStartRequests).toHaveLength(2);
+  expect(phoneStartRequests[1]?.phoneE164).toBe("+33612345678");
 });
