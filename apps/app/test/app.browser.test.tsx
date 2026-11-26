@@ -211,7 +211,9 @@ function profilePayload(id: string, handle: string, displayName: string) {
   };
 }
 
-function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?: string; holdLikesFor?: string; holdArticleId?: string } = {}) {
+function installMockNetwork(
+  options: { holdHistoryRange?: string; holdTradesFor?: string; holdLikesFor?: string; holdArticleId?: string; holdLeaderboardScope?: string } = {},
+) {
   const heldHistory = new Map<string, Array<() => void>>();
   const requestedHistoryRanges = new Set<string>();
   const heldMarkets: Array<() => void> = [];
@@ -223,6 +225,8 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
   const requestedLikes = new Set<string>();
   const heldArticles = new Map<string, Array<() => void>>();
   const requestedArticleIds = new Set<string>();
+  const heldLeaderboard = new Map<string, Array<() => void>>();
+  const requestedLeaderboardScopes = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -471,7 +475,17 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
     if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
     if (path === "/api/leaderboard") {
       const isChars = url.searchParams.get("scope") === "characters" || url.searchParams.get("filter") === "npcs";
-      return json(isChars ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
+      const scope = isChars ? "characters" : "players";
+      const body = isChars ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS;
+      if (options.holdLeaderboardScope === scope) {
+        requestedLeaderboardScopes.add(scope);
+        return new Promise<Response>((resolve) => {
+          const pending = heldLeaderboard.get(scope) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldLeaderboard.set(scope, pending);
+        });
+      }
+      return json(body);
     }
     if (path === "/api/leaderboard/me") {
       return json({ position: { rank: 1, page: 1, totalCount: 1, totalPages: 1, entry: SAMPLE_LEADERBOARD_PLAYERS.currentUser } });
@@ -527,6 +541,10 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
     articleRequested: (id: string) => requestedArticleIds.has(id),
     releaseArticle: (id: string) => {
       for (const release of heldArticles.get(id)?.splice(0) ?? []) release();
+    },
+    leaderboardRequested: (scope: string) => requestedLeaderboardScopes.has(scope),
+    releaseLeaderboard: (scope: string) => {
+      for (const release of heldLeaderboard.get(scope)?.splice(0) ?? []) release();
     },
   };
 }
@@ -849,4 +867,25 @@ it('Stale article is dropped after opening another article (spec/app/navigation.
   expect(getStoreSnapshot().activeArticleId).toBe("article-b");
   expect(getStoreSnapshot().activeArticle?.id).toBe("article-b");
   expect(getStoreSnapshot().articleLoading).toBe(false);
+});
+
+it('Stale leaderboard is dropped after switching filters (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountApp({ holdLeaderboardScope: "players" });
+
+  act(() => {
+    void storeActions.loadLeaderboard({ scope: "players" });
+  });
+  await act(() => Promise.resolve());
+  expect(network.leaderboardRequested("players")).toBe(true);
+
+  await act(() => storeActions.loadLeaderboard({ scope: "characters" }));
+  expect(getStoreSnapshot().leaderboardScope).toBe("characters");
+  expect(getStoreSnapshot().leaderboard[0]?.handle).toBe("ailonmusk");
+
+  network.releaseLeaderboard("players");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().leaderboardScope).toBe("characters");
+  expect(getStoreSnapshot().leaderboard[0]?.handle).toBe("ailonmusk");
+  expect(getStoreSnapshot().leaderboardLoading).toBe(false);
 });

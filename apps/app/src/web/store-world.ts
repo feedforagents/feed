@@ -71,6 +71,7 @@ let feedRequestSeq = 0;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
+let leaderboardRequestSeq = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -615,6 +616,7 @@ export async function loadLeaderboard(options?: {
   const metric = options?.metric ?? s.leaderboardMetric;
   const page = Math.max(1, options?.page ?? s.leaderboardPage);
   const pageSize = options?.pageSize ?? 25;
+  const reqSeq = ++leaderboardRequestSeq;
   setStoreState({
     leaderboardLoading: true,
     leaderboardAudience: audience,
@@ -636,6 +638,7 @@ export async function loadLeaderboard(options?: {
   const res = await requestJson(`/api/leaderboard?${params.toString()}`, {
     parse: (raw) => decodeLeaderboardPage(raw, scope, metric),
   });
+  if (reqSeq !== leaderboardRequestSeq) return;
   if (res.ok) {
     setStoreState({
       leaderboard: res.data.entries,
