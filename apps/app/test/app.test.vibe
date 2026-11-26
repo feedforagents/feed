@@ -259,6 +259,27 @@ it.effect('Full HTTP + MCP + Single-Agent Replacement gameplay journey (spec/app
     })
     try check(() => assert.strictEqual(unauthMcp.status, 401))
 
+    // spec/auth/oauth.md, "Authorization requires PKCE S256, code flow, normalized resource, and preserves 400+ character state across one 4-scope consent screen"
+    const noScopeRedirect = "http://127.0.0.1:49101/callback"
+    const noScopeReg = try readJson(try callApp("/oauth/register", {
+      json: { client_name: "JourneyAgentNoScopes", redirect_uris: [noScopeRedirect], token_endpoint_auth_method: "none" }
+    }))
+    const noScopeConsent = try callApp("/api/oauth/authorize", {
+      cookie: player.cookie,
+      json: {
+        clientId: String(noScopeReg.client_id ?? ""),
+        redirectUri: noScopeRedirect,
+        codeChallenge: pkceChallenge("pkce-verifier-no-scopes-0123456789abcdef"),
+        codeChallengeMethod: "S256",
+        responseType: "code",
+        state: "no-scopes",
+        resource: `${APP_ORIGIN}/mcp/`,
+        scopes: []
+      }
+    })
+    const noScopeConsentBody = try readJson(noScopeConsent)
+    try check(() => assert.deepStrictEqual([noScopeConsent.status, noScopeConsentBody.code], [400, "invalid_scope"]))
+
     const mcpPostA = try callApp("/mcp", {
       bearer: accessA,
       json: {
@@ -286,6 +307,13 @@ it.effect('Full HTTP + MCP + Single-Agent Replacement gameplay journey (spec/app
     })
     try check(() => assert.strictEqual(deviceStart.status, 200))
     const deviceBody = try readJson(deviceStart)
+    // spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent"
+    const noScopeApprove = try callApp("/api/oauth/device/approve", {
+      cookie: player.cookie,
+      json: { userCode: String(deviceBody.user_code ?? ""), scopes: [] }
+    })
+    const noScopeApproveBody = try readJson(noScopeApprove)
+    try check(() => assert.deepStrictEqual([noScopeApprove.status, noScopeApproveBody.code], [400, "invalid_scope"]))
     const approveRes = try callApp("/api/oauth/device/approve", {
       cookie: player.cookie,
       json: { userCode: String(deviceBody.user_code ?? "") }
