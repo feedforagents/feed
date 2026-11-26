@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
-import { getStoreSnapshot } from "../src/web/store-core.ts";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const predictionBuyBodies: string[] = [];
@@ -248,6 +248,7 @@ function installMockNetwork(
     holdLeaderboardScope?: string;
     holdPnlRange?: string;
     holdProfileReplies?: boolean;
+    readonly perps?: ReadonlyArray<Record<string, unknown>>;
   } = {},
 ) {
   const heldHistory = new Map<string, Array<() => void>>();
@@ -400,7 +401,7 @@ function installMockNetwork(
     }
     if (path === "/api/markets") {
       marketsRequestedCount += 1;
-      const body = signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] };
+      const body = signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: options.perps ?? [] };
       if (marketsHeld) {
         return new Promise<Response>((resolve) => {
           heldMarkets.push(() => resolve(Response.json(body)));
@@ -660,6 +661,13 @@ function installMockNetwork(
   };
 }
 
+async function renderApp() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+}
+
 beforeAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -679,10 +687,7 @@ afterAll(() => {
 
 async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
   const network = installMockNetwork(options ?? {});
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await renderApp();
   return network;
 }
 
@@ -1204,4 +1209,37 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
   await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
   profileShould404 = false;
+});
+
+it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork({ perps: [{ ticker: "PRED", name: "Prediction" }] });
+  setStoreState({
+    viewer: null,
+    localUiMode: "game",
+    route: "Home",
+    exploreQuery: "",
+    activeTrendingTag: null,
+    activeArticleId: null,
+    perps: [],
+    predictions: [],
+  });
+  await renderApp();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore" }).first()));
+  const search = page.getByPlaceholder("Search posts, @people, #tags, or $tickers");
+  await expect.element(search).toBeInTheDocument();
+  await act(() => userEvent.fill(search, "$PRED"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await expect.element(page.getByText("No matching organizations")).not.toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByText("Prediction")).toBeInTheDocument();
+  await expect.element(page.getByText("Organization")).toBeInTheDocument();
+
+  await act(() => userEvent.fill(search, "$"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await expect.element(page.getByText("No matching organizations")).toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByText("Prediction")).not.toBeInTheDocument();
 });
