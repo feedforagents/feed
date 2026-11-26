@@ -248,13 +248,26 @@ function clampCount(value: number | undefined, fallback: number, max: number): n
   return value > max ? max : value
 }
 
+const CLIENT_IP_HEADERS = ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"] as const
+
 function mcpClientIp(request: Request): string | undefined {
-  const cfIp = request.headers.get("cf-connecting-ip")?.trim()
-  if (cfIp !== undefined && cfIp !== "") return cfIp
-  const realIp = request.headers.get("x-real-ip")?.trim()
-  if (realIp !== undefined && realIp !== "") return realIp
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-  return forwarded !== undefined && forwarded !== "" ? forwarded : undefined
+  for (const header of CLIENT_IP_HEADERS) {
+    const raw = request.headers.get(header)
+    if (raw === null) continue
+    const candidate = (header === "x-forwarded-for" ? raw.split(",")[0] : raw)?.trim()
+    if (candidate !== undefined && candidate !== "") return candidate
+  }
+  return undefined
+}
+
+function perpTradeMeta(args: Record<string, unknown>, clientName: string) {
+  const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
+  const idempotencyKey = asOptionalString(args.idempotencyKey)
+  return {
+    ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
+    viaClientName: clientName,
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+  }
 }
 
 function toJsonRpcId(raw: unknown): JsonRpcId {
@@ -1525,8 +1538,6 @@ effect function executeProtectedTradeTool(
     }
     case "open_perp": {
       const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
-      const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
-      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const receipt = try openPerpPosition({
         ownerId: caller.accountId,
         ownerKind: "user",
@@ -1534,9 +1545,7 @@ effect function executeProtectedTradeTool(
         side,
         collateralCents,
         leverage,
-        ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
-        viaClientName: caller.clientName,
-        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+        ...perpTradeMeta(args, caller.clientName)
       })
       try maybePublishFeedEvent({
         type: "market.perp",
@@ -1572,8 +1581,6 @@ effect function executeProtectedTradeTool(
       const positionId = asOptionalString(args.positionId) ?? ""
       const sizeCents = try resolveCloseSizeCents(args)
       const closePct = typeof args.closePct === "number" && Number.isFinite(args.closePct) ? args.closePct : undefined
-      const maxSlippageBps = asOptionalInt(args.maxSlippageBps)
-      const idempotencyKey = asOptionalString(args.idempotencyKey)
       const openPositions = try listPerpPositions(caller.accountId)
       const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({
@@ -1581,9 +1588,7 @@ effect function executeProtectedTradeTool(
         positionId,
         ...(sizeCents === undefined ? {} : { sizeCents }),
         ...(closePct === undefined ? {} : { closePct }),
-        ...(maxSlippageBps === undefined ? {} : { maxSlippageBps }),
-        viaClientName: caller.clientName,
-        ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+        ...perpTradeMeta(args, caller.clientName)
       })
       try maybePublishFeedEvent({
         type: "market.perp",

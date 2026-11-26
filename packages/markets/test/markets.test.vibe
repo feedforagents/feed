@@ -62,6 +62,62 @@ effect function runWithSeededMarketDay<A, E>(body: (now: number) => A!E!Store) {
   })
 }
 
+effect function seedHundredCorpMarket(now: number): void!StoreFailure!Store {
+  const store = try Store
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
+       VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
+       ON CONFLICT (id) DO NOTHING`,
+      [now]
+    )
+    try tx.query(
+      `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
+       VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
+       ON CONFLICT (ticker) DO NOTHING`,
+      [now]
+    )
+    try tx.query(
+      `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
+       VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
+       ON CONFLICT (ticker) DO NOTHING`,
+      [now]
+    )
+  })
+}
+
+effect function openAndCloseUserPerp(input: {
+  readonly ownerId: string
+  readonly ticker: string
+  readonly side: "long" | "short"
+  readonly collateralCents: number
+  readonly leverage: number
+}) {
+  const open = try openPerpPosition({
+    ownerId: input.ownerId,
+    ownerKind: "user",
+    ticker: input.ticker,
+    side: input.side,
+    collateralCents: input.collateralCents,
+    leverage: input.leverage
+  })
+  const close = try closePerpPosition({
+    ownerId: input.ownerId,
+    positionId: open.positionId
+  })
+  return { open, close }
+}
+
+function closedPositionSummary(result: Awaited<ReturnType<typeof listClosedPositions>> extends Effect.Effect<infer A, unknown, unknown> ? A : never) {
+  const item = result.items[0]
+  return {
+    itemKind: item?.kind,
+    itemMarketId: item?.marketId,
+    itemSide: item?.side,
+    itemOutcome: item?.outcome
+  }
+}
+
 const FEED_ACCOUNT_COLUMNS = `account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
   phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
   total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
@@ -286,27 +342,7 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
     const store = try Store
     try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
     try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
-
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
-         VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
-         ON CONFLICT (id) DO NOTHING`,
-        [now]
-      )
-      try tx.query(
-        `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
-         VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
-         ON CONFLICT (ticker) DO NOTHING`,
-        [now]
-      )
-      try tx.query(
-        `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
-         VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
-         ON CONFLICT (ticker) DO NOTHING`,
-        [now]
-      )
-    })
+    try seedHundredCorpMarket(now)
 
     // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
     const nonNpcCode = try marketErrorCode(executeNpcSpotTrade({
@@ -345,17 +381,12 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
       collateralCents: 500,
       leverage: 20
     })
-    const longOpen = try openPerpPosition({
+    const { open: longOpen, close: longClose } = try openAndCloseUserPerp({
       ownerId: "user-alice",
-      ownerKind: "user",
       ticker: "HUND",
       side: "long",
       collateralCents: 500,
       leverage: 20
-    })
-    const longClose = try closePerpPosition({
-      ownerId: "user-alice",
-      positionId: longOpen.positionId
     })
 
     const shortOpen = try openPerpPosition({
@@ -1164,41 +1195,15 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
 
 it.effect('Closed perp positions report payout equal to cash credited with open fees in cost basis (spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
   runWithSeededMarketDay(effect (now) => {
-    const store = try Store
     try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+    try seedHundredCorpMarket(now)
 
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
-         VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
-         ON CONFLICT (id) DO NOTHING`,
-        [now]
-      )
-      try tx.query(
-        `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
-         VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
-         ON CONFLICT (ticker) DO NOTHING`,
-        [now]
-      )
-      try tx.query(
-        `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
-         VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
-         ON CONFLICT (ticker) DO NOTHING`,
-        [now]
-      )
-    })
-
-    const longOpen = try openPerpPosition({
+    const { close: longClose } = try openAndCloseUserPerp({
       ownerId: "user-alice",
-      ownerKind: "user",
       ticker: "HUND",
       side: "long",
       collateralCents: 500,
       leverage: 20
-    })
-    const longClose = try closePerpPosition({
-      ownerId: "user-alice",
-      positionId: longOpen.positionId
     })
     const closed = try listClosedPositions({ accountId: "user-alice" })
     const ledger = try getPointLedger("user-alice", 10)
@@ -1252,10 +1257,7 @@ it.effect('Closed prediction positions report the average entry price in listClo
     try check(() => assert.deepStrictEqual(
       {
         totalCount: all.totalCount,
-        itemKind: all.items[0]?.kind,
-        itemMarketId: all.items[0]?.marketId,
-        itemSide: all.items[0]?.side,
-        itemOutcome: all.items[0]?.outcome,
+        ...closedPositionSummary(all),
         itemShares: all.items[0]?.sharesOrSize,
         itemEntryPriceCents: all.items[0]?.entryPriceCents,
         expectedEntryPriceCents,
@@ -1297,10 +1299,7 @@ it.effect('Cancelled prediction positions read cancelled in listClosedPositions 
         parseCancelled: parseClosedOutcomeFilter("cancelled"),
         parseBogus: parseClosedOutcomeFilter("bogus"),
         allTotalCount: all.totalCount,
-        itemKind: all.items[0]?.kind,
-        itemMarketId: all.items[0]?.marketId,
-        itemSide: all.items[0]?.side,
-        itemOutcome: all.items[0]?.outcome,
+        ...closedPositionSummary(all),
         itemStatus: all.items[0]?.status,
         itemRealizedPnlCents: all.items[0]?.realizedPnlCents,
         payoutEqualsCostBasis: payoutEqualsCostBasis,
@@ -1432,7 +1431,7 @@ it.effect('Perp open/close idempotency: same key replays the receipt, different 
     try createVerifiedAccount("user-alice", "alice", 500_000)
     try createVerifiedAccount("user-bob", "bob", 500_000)
 
-    const open1 = try openPerpPosition({
+    const openParams = {
       ownerId: "user-alice",
       ownerKind: "user",
       ticker: "XTRPC",
@@ -1440,24 +1439,12 @@ it.effect('Perp open/close idempotency: same key replays the receipt, different 
       collateralCents: 2_000,
       leverage: 10,
       idempotencyKey: "perp-open-1"
-    })
-    const openReplay = try openPerpPosition({
-      ownerId: "user-alice",
-      ownerKind: "user",
-      ticker: "XTRPC",
-      side: "long",
-      collateralCents: 2_000,
-      leverage: 10,
-      idempotencyKey: "perp-open-1"
-    })
+    } as const
+    const open1 = try openPerpPosition(openParams)
+    const openReplay = try openPerpPosition(openParams)
     const openConflictCode = try marketErrorCode(openPerpPosition({
-      ownerId: "user-alice",
-      ownerKind: "user",
-      ticker: "XTRPC",
-      side: "long",
-      collateralCents: 3_000,
-      leverage: 10,
-      idempotencyKey: "perp-open-1"
+      ...openParams,
+      collateralCents: 3_000
     }))
     const openOtherUser = try openPerpPosition({
       ownerId: "user-bob",

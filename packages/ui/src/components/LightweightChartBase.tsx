@@ -13,6 +13,7 @@ import {
   createChart,
   type ChartOptions,
 } from "lightweight-charts";
+import { canUseCanvas2d } from "../lib/canvas.ts";
 import { cn, focusRing } from "../lib/cn.ts";
 
 export type MarketTimeRange = "1H" | "4H" | "1D" | "1W" | "ALL";
@@ -129,16 +130,6 @@ interface ResolvedPalette {
   labelBg: string;
   surface: string;
   tones: Record<LightweightChartTone, { solid: string; top: string; bottom: string }>;
-}
-
-function canUseCanvas2d(): boolean {
-  if (typeof window === "undefined" || typeof document === "undefined") return false;
-  try {
-    const probe = document.createElement("canvas");
-    return Boolean(probe.getContext?.("2d"));
-  } catch {
-    return false;
-  }
 }
 
 function formatCanvasColor(r: number, g: number, b: number, alpha: number): string {

@@ -661,15 +661,20 @@ effect function computeFilteredRankedLeaderboardTx(
   return rankScoredEntries([...players, ...characters], metric)
 }
 
-export effect function getFilteredLeaderboardPage(
-  options: LeaderboardQueryOptions = {}
-): FilteredLeaderboardPage!StoreFailure!Store {
+function normalizeLeaderboardQuery(options: Omit<LeaderboardQueryOptions, "page">) {
   const filter = options.filter ?? "all"
   const timeframe = options.timeframe ?? "all"
   const metric: LeaderboardMetric = options.metric === "return_pct" || options.metric === "win_rate" || options.metric === "volume"
     ? options.metric
     : "net_profit"
   const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
+  return { filter, timeframe, metric, safePageSize }
+}
+
+export effect function getFilteredLeaderboardPage(
+  options: LeaderboardQueryOptions = {}
+): FilteredLeaderboardPage!StoreFailure!Store {
+  const { filter, timeframe, metric, safePageSize } = normalizeLeaderboardQuery(options)
   const requestedPage = Math.max(1, Math.floor(options.page ?? 1))
   const store = try Store
   const now = try Clock.currentTimeMillis
@@ -702,12 +707,7 @@ export effect function getFilteredLeaderboardViewerRank(
   accountId: string,
   options: Omit<LeaderboardQueryOptions, "page"> = {}
 ): LeaderboardViewerRank!StoreFailure!Store {
-  const filter = options.filter ?? "all"
-  const timeframe = options.timeframe ?? "all"
-  const metric: LeaderboardMetric = options.metric === "return_pct" || options.metric === "win_rate" || options.metric === "volume"
-    ? options.metric
-    : "net_profit"
-  const safePageSize = Math.max(1, Math.min(200, Math.floor(options.pageSize ?? 50)))
+  const { filter, timeframe, metric, safePageSize } = normalizeLeaderboardQuery(options)
   const store = try Store
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {

@@ -1,6 +1,7 @@
 import { type ComponentProps, type FormEvent, useId, useState } from "react";
 import { cn } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
+import { bigIntSqrt } from "../lib/math.ts";
 import { Alert } from "./Alert.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
@@ -152,17 +153,6 @@ function PerpLeverageControl({
       </div>
     </div>
   );
-}
-
-function bigIntSqrt(n: bigint): bigint {
-  if (n <= 0n) return 0n;
-  let x = n;
-  let y = (x + 1n) >> 1n;
-  while (y < x) {
-    x = y;
-    y = (x + n / x) >> 1n;
-  }
-  return x;
 }
 
 function estimatePredictionBuyCentShares(

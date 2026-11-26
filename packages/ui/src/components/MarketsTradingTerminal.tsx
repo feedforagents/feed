@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn, focusRing } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
+import { bigIntSqrt } from "../lib/math.ts";
 import { Alert } from "./Alert.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Badge } from "./Badge.tsx";
@@ -359,6 +360,32 @@ function floorCents(value: number): number {
   return Math.floor(Math.max(0, value) * 100) / 100;
 }
 
+function PercentPresetRow({
+  disabled,
+  onSelect,
+}: {
+  readonly disabled: boolean;
+  readonly onSelect: (ratio: number) => void;
+}) {
+  return (
+    <div className="grid grid-cols-4 gap-1.5">
+      {PERCENT_PRESETS.map((preset) => (
+        <Button
+          key={preset.label}
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          onClick={() => onSelect(preset.ratio)}
+          className="font-mono text-xs tabular-nums"
+        >
+          {preset.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 function calcLiquidationPrice(entryPrice: number, side: "long" | "short", leverage: number): number {
   if (entryPrice <= 0 || leverage <= 0) return 0;
   const maintenanceBuffer = Math.max(0, 1 / leverage - 0.025);
@@ -369,17 +396,6 @@ function calcLiquidationDistancePct(markPrice: number, liquidationPrice: number,
   if (markPrice <= 0) return 100;
   const diff = side === "long" ? markPrice - liquidationPrice : liquidationPrice - markPrice;
   return Math.max(0, (diff / markPrice) * 100);
-}
-
-function bigIntSqrt(n: bigint): bigint {
-  if (n <= 0n) return 0n;
-  let x = n;
-  let y = (x + 1n) >> 1n;
-  while (y < x) {
-    x = y;
-    y = (x + n / x) >> 1n;
-  }
-  return x;
 }
 
 function estimateCpmmBuy(
@@ -885,21 +901,7 @@ function RebalancePerpForm({
             onChange={(event) => setInputValue(event.target.value)}
             className="font-mono tabular-nums"
           />
-          <div className="grid grid-cols-4 gap-1.5">
-            {PERCENT_PRESETS.map((preset) => (
-              <Button
-                key={preset.label}
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={submitting}
-                onClick={() => applyPreset(preset.ratio)}
-                className="font-mono text-xs tabular-nums"
-              >
-                {preset.label}
-              </Button>
-            ))}
-          </div>
+          <PercentPresetRow disabled={submitting} onSelect={applyPreset} />
         </div>
       ) : null}
 
@@ -1188,21 +1190,7 @@ export function PerpOrderPanel({
             onChange={(event) => handleMarginChange(event.target.value)}
             className="font-mono tabular-nums"
           />
-          <div className="grid grid-cols-4 gap-1.5">
-            {PERCENT_PRESETS.map((preset) => (
-              <Button
-                key={preset.label}
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={submitting}
-                onClick={() => applyMarginPreset(preset.ratio)}
-                className="font-mono text-xs tabular-nums"
-              >
-                {preset.label}
-              </Button>
-            ))}
-          </div>
+          <PercentPresetRow disabled={submitting} onSelect={applyMarginPreset} />
         </div>
 
         <div className="flex flex-col gap-2">

@@ -107,6 +107,40 @@ export effect function parseJsonBody(text: string, code: string, message: string
   })
 }
 
+export effect function findIdempotentTradeReceipt<A>(
+  tx: Tx,
+  actorId: string,
+  idempotencyKey: string,
+  requestFingerprint: string,
+  schema: Schema.Codec<A, unknown, never, never>,
+  shapeLabel: string
+): (A | null)!(MarketFailure | StoreFailure) {
+  try tx.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [actorId, idempotencyKey])
+  const existingRows = try tx.query(
+    `SELECT request_fingerprint, receipt_json
+     FROM feed_trades
+     WHERE trader_id = $1 AND idempotency_key = $2
+     LIMIT 1`,
+    [actorId, idempotencyKey]
+  )
+  if (existingRows.length === 0) return null
+  const existing = existingRows[0]!
+  const storedFingerprint = optionalText(existing.request_fingerprint)
+  if (storedFingerprint !== requestFingerprint) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used with different trade parameters")
+  }
+  const receiptRaw = optionalText(existing.receipt_json)
+  if (receiptRaw === null) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", "Stored trade receipt is unavailable for Idempotency-Key replay")
+  }
+  const parsed = try parseJsonBody(receiptRaw, "IDEMPOTENCY_CONFLICT", "Stored trade receipt is invalid JSON")
+  const decoded = Option.getOrUndefined(Schema.decodeUnknownOption(schema)(parsed))
+  if (decoded === undefined) {
+    throw marketFail("IDEMPOTENCY_CONFLICT", `Stored trade receipt does not match ${shapeLabel} shape`)
+  }
+  return decoded
+}
+
 export function toSpecPerpPosition(row: Row): PerpPosition {
   const createdAt = toInt(row.created_at)
   return {

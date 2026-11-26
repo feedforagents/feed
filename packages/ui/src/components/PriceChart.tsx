@@ -1,4 +1,5 @@
 import { type ComponentProps, useId } from "react";
+import { buildSvgAreaPaths } from "../lib/canvas.ts";
 import { cn } from "../lib/cn.ts";
 
 export interface PriceChartPoint {
@@ -67,8 +68,7 @@ export function PriceChart({
     return { x, y };
   });
 
-  const linePath = coords.map((pt, index) => `${index === 0 ? "M" : "L"}${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(" ");
-  const areaPath = `${linePath} L${coords[coords.length - 1].x.toFixed(1)},${height} L${coords[0].x.toFixed(1)},${height} Z`;
+  const { linePath, areaPath } = buildSvgAreaPaths(coords, height);
 
   return (
     <figure aria-label={ariaLabel} className={cn("flex flex-col gap-3 rounded-lg border border-border bg-background p-4 text-foreground", className)} {...props}>

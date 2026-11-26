@@ -234,6 +234,41 @@ function JoinProfileForm({
   );
 }
 
+function useTurnstileGate(turnstileSiteKey?: string) {
+  const [token, setToken] = useState<string | null>(null);
+  const [resetKey, setResetKey] = useState(0);
+  const siteKey = turnstileSiteKey?.trim() || undefined;
+  const containerRef = useTurnstileContainerRef(siteKey, setToken);
+  const needsToken = Boolean(siteKey) && !token;
+  const consumeToken = (): string | undefined => {
+    const current = token ?? undefined;
+    setToken(null);
+    setResetKey((n) => n + 1);
+    return current;
+  };
+  return { siteKey, resetKey, containerRef, needsToken, consumeToken };
+}
+
+function TurnstileWidgetSlot({
+  siteKey,
+  resetKey,
+  containerRef,
+}: {
+  readonly siteKey?: string;
+  readonly resetKey: number;
+  readonly containerRef: ReturnType<typeof useTurnstileContainerRef>;
+}) {
+  if (!siteKey) return null;
+  return (
+    <div
+      key={`${siteKey}:${resetKey}`}
+      ref={containerRef}
+      aria-label="Security verification"
+      className="min-h-16"
+    />
+  );
+}
+
 function JoinEmailDoor({
   step,
   isStepControlled,
@@ -267,21 +302,15 @@ function JoinEmailDoor({
 }) {
   const emailId = useId();
   const [email, setEmail] = useState(pendingEmail ?? "");
-  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
-  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
-  const activeTurnstileKey = turnstileSiteKey?.trim() || undefined;
-  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
+  const turnstile = useTurnstileGate(turnstileSiteKey);
 
   const trimmedEmail = email.trim();
   const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(trimmedEmail);
 
   const handleRequestLink = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (blocked || !validEmail) return;
-    if (activeTurnstileKey && !turnstileToken) return;
-    const token = turnstileToken ?? undefined;
-    setTurnstileToken(null);
-    setTurnstileResetKey((n) => n + 1);
+    if (blocked || !validEmail || turnstile.needsToken) return;
+    const token = turnstile.consumeToken();
     runAndAdvanceOnSuccess(
       () => onRequestEmailMagicLink?.({ email: trimmedEmail, ...(token ? { turnstileToken: token } : {}) }),
       () => {
@@ -305,15 +334,8 @@ function JoinEmailDoor({
             onChange={(event) => setEmail(event.target.value)}
           />
         </div>
-        {activeTurnstileKey ? (
-          <div
-            key={`${activeTurnstileKey}:${turnstileResetKey}`}
-            ref={turnstileRef}
-            aria-label="Security verification"
-            className="min-h-16"
-          />
-        ) : null}
-        <Button type="submit" loading={loading} disabled={blocked || !validEmail || (Boolean(activeTurnstileKey) && !turnstileToken)}>
+        <TurnstileWidgetSlot siteKey={turnstile.siteKey} resetKey={turnstile.resetKey} containerRef={turnstile.containerRef} />
+        <Button type="submit" loading={loading} disabled={blocked || !validEmail || turnstile.needsToken}>
           Send magic link
         </Button>
       </form>
@@ -419,18 +441,12 @@ function JoinPhoneDoor({
   const [country, setCountry] = useState("US");
   const [phone, setPhone] = useState("");
   const [smsCode, setSmsCode] = useState("");
-  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
-  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
-  const activeTurnstileKey = turnstileSiteKey?.trim() || undefined;
-  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
+  const turnstile = useTurnstileGate(turnstileSiteKey);
 
   const handleRequestCode = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (blocked || !phone.trim()) return;
-    if (activeTurnstileKey && !turnstileToken) return;
-    const token = turnstileToken ?? undefined;
-    setTurnstileToken(null);
-    setTurnstileResetKey((n) => n + 1);
+    if (blocked || !phone.trim() || turnstile.needsToken) return;
+    const token = turnstile.consumeToken();
     runAndAdvanceOnSuccess(
       () => onRequestSmsCode?.({ country, phone: phone.trim(), ...(token ? { turnstileToken: token } : {}) }),
       () => {
@@ -495,15 +511,8 @@ function JoinPhoneDoor({
             onChange={(event) => setPhone(event.target.value)}
           />
         </div>
-        {activeTurnstileKey ? (
-          <div
-            key={`${activeTurnstileKey}:${turnstileResetKey}`}
-            ref={turnstileRef}
-            aria-label="Security verification"
-            className="min-h-16"
-          />
-        ) : null}
-        <Button type="submit" loading={loading} disabled={blocked || !phone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
+        <TurnstileWidgetSlot siteKey={turnstile.siteKey} resetKey={turnstile.resetKey} containerRef={turnstile.containerRef} />
+        <Button type="submit" loading={loading} disabled={blocked || !phone.trim() || turnstile.needsToken}>
           Send 6-digit SMS code
         </Button>
       </form>
