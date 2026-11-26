@@ -994,7 +994,19 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       }
     ))
 
-    try TestClock.adjust("11 minutes")
+    // spec/auth/phone.md, "Changing phone requires verifying the old phone or support recovery and an unused new number"
+    try TestClock.adjust("9 minutes")
+    const recentPhoneChangeRes = try callApp("/api/auth/phone/change/start", {
+      cookie: alice.cookie,
+      json: { newPhoneE164: "+14155550187" }
+    })
+    const recentPhoneChangeBody = try readJson(recentPhoneChangeRes)
+    try check(() => assert.deepStrictEqual(
+      [recentPhoneChangeRes.status, recentPhoneChangeBody.last2],
+      [200, "87"]
+    ))
+
+    try TestClock.adjust("2 minutes")
     const stalePhoneChangeRes = try callApp("/api/auth/phone/change/start", {
       cookie: alice.cookie,
       json: { newPhoneE164: "+14155550188" }
