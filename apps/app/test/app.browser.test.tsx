@@ -212,7 +212,14 @@ function profilePayload(id: string, handle: string, displayName: string) {
 }
 
 function installMockNetwork(
-  options: { holdHistoryRange?: string; holdTradesFor?: string; holdLikesFor?: string; holdArticleId?: string; holdLeaderboardScope?: string } = {},
+  options: {
+    holdHistoryRange?: string;
+    holdTradesFor?: string;
+    holdLikesFor?: string;
+    holdArticleId?: string;
+    holdLeaderboardScope?: string;
+    holdPnlRange?: string;
+  } = {},
 ) {
   const heldHistory = new Map<string, Array<() => void>>();
   const requestedHistoryRanges = new Set<string>();
@@ -227,6 +234,8 @@ function installMockNetwork(
   const requestedArticleIds = new Set<string>();
   const heldLeaderboard = new Map<string, Array<() => void>>();
   const requestedLeaderboardScopes = new Set<string>();
+  const heldPnl = new Map<string, Array<() => void>>();
+  const requestedPnlRanges = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -440,14 +449,25 @@ function installMockNetwork(
     }
     if (path === "/api/markets/positions/closed") return json({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
     if (path === "/api/economy/me/pnl-history") {
-      return json({
-        range: "ALL",
+      const range = url.searchParams.get("range") ?? "ALL";
+      const finalPnlCents = range === "1D" ? 11_100 : range === "1W" ? 22_200 : 1528;
+      const body = {
+        range,
         points: [
           { timestamp: Date.now() - 3_600_000, pnlCents: 0, cumulativePnlCents: 0, deltaCents: 0, kind: "baseline" },
-          { timestamp: Date.now(), pnlCents: 1528, cumulativePnlCents: 1528, deltaCents: 1528, kind: "mark_to_market" },
+          { timestamp: Date.now(), pnlCents: finalPnlCents, cumulativePnlCents: finalPnlCents, deltaCents: finalPnlCents, kind: "mark_to_market" },
         ],
-        currentNetProfitCents: 1528,
-      });
+        currentNetProfitCents: finalPnlCents,
+      };
+      if (options.holdPnlRange === range) {
+        requestedPnlRanges.add(range);
+        return new Promise<Response>((resolve) => {
+          const pending = heldPnl.get(range) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldPnl.set(range, pending);
+        });
+      }
+      return json(body);
     }
     if (path === "/api/economy/me") {
       return json({
@@ -545,6 +565,10 @@ function installMockNetwork(
     leaderboardRequested: (scope: string) => requestedLeaderboardScopes.has(scope),
     releaseLeaderboard: (scope: string) => {
       for (const release of heldLeaderboard.get(scope)?.splice(0) ?? []) release();
+    },
+    pnlRequested: (range: string) => requestedPnlRanges.has(range),
+    releasePnl: (range: string) => {
+      for (const release of heldPnl.get(range)?.splice(0) ?? []) release();
     },
   };
 }
@@ -888,4 +912,29 @@ it('Stale leaderboard is dropped after switching filters (spec/markets/economy.m
   expect(getStoreSnapshot().leaderboardScope).toBe("characters");
   expect(getStoreSnapshot().leaderboard[0]?.handle).toBe("ailonmusk");
   expect(getStoreSnapshot().leaderboardLoading).toBe(false);
+});
+
+it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountApp({ holdPnlRange: "1D" });
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await signInAsReviewer();
+
+  act(() => {
+    void storeActions.loadPnlHistory("1D");
+  });
+  await act(() => Promise.resolve());
+  expect(network.pnlRequested("1D")).toBe(true);
+
+  await act(() => storeActions.loadPnlHistory("1W"));
+  expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
+  expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
+
+  network.releasePnl("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
+  expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
+  expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
 });
