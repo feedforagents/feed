@@ -105,7 +105,25 @@ const SAMPLE_MARKETS = {
   },
 };
 
-const liveEventSources: EventTarget[] = []; let explorePosts: typeof SAMPLE_POSTS = []; let profilePosts: typeof SAMPLE_POSTS = []; const fetchPaths: string[] = []; const VIEWER: ViewerSession = { accountId: "ailon-musk", handle: "ailonmusk", displayName: "AIlon Musk", bio: "", avatarUrl: null, phoneLast2: null, uiMode: "game", balanceCents: 0, startingGrantCents: 0, purchasedCents: 0, isAdmin: false, isReviewer: false, agentGrant: null }; const SAMPLE_LEADERBOARD_PLAYER_ENTRY = {
+const liveEventSources: EventTarget[] = [];
+let explorePosts: typeof SAMPLE_POSTS = [];
+let profilePosts: typeof SAMPLE_POSTS = [];
+const fetchPaths: string[] = [];
+const VIEWER: ViewerSession = {
+    accountId: "ailon-musk",
+      handle: "ailonmusk",
+      displayName: "AIlon Musk",
+      bio: "",
+      avatarUrl: null,
+      phoneLast2: null,
+      uiMode: "game",
+      balanceCents: 0,
+      startingGrantCents: 0,
+      isAdmin: false,
+      isReviewer: false,
+      agentGrant: null,
+    };
+    const SAMPLE_LEADERBOARD_PLAYER_ENTRY = {
   rank: 1,
   accountId: "acct-player-1",
   handle: "alice",
@@ -208,7 +226,7 @@ function installMockNetwork() {
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
-    const path = url.pathname;  
+    const path = url.pathname;
     fetchPaths.push(path);
     if (path === "/api/auth/logout") {
       signedIn = false;
