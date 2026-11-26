@@ -9,7 +9,7 @@ One electric-blue (`#0066FF`-inspired) accent on crisp X-style light and dark ne
   outlined button): it and the focus `ring` stand at least 3:1 off `background` and `card` in both
   themes (WCAG 1.4.11).
 - **Meaning.** `primary` is the text/link accent and focus `ring`; `feed-brand` (`#0066FF`) with `feed-brand-foreground`
-  fills primary CTAs and active indicators. `destructive`, `danger-solid`, `ok`, `warn` and `info` are
+  fills primary CTAs and active indicators. `destructive`, `danger-solid`, `ok`, `ok-solid`, `warn` and `info` are
   states, never decoration.
 - **Shape.** One `radius`; `rounded-sm`, `-md`, `-lg` and `-xl` derive from it. Three shadows, by elevation.
 - **Motion.** `fast` for hover and press, `base` for most changes, `slow` for entering and leaving.
@@ -63,6 +63,8 @@ this prose into tokens. To change the design, describe it, and have the change w
 | `scrim` | oklch(0 0 0) | oklch(0 0 0) |
 | `danger-solid` | oklch(0.57 0.23 26) | oklch(0.57 0.23 26) |
 | `danger-solid-foreground` | oklch(1 0 0) | oklch(1 0 0) |
+| `ok-solid` | oklch(0.54 0.16 152) | oklch(0.54 0.16 152) |
+| `ok-solid-foreground` | oklch(1 0 0) | oklch(1 0 0) |
 
 | Token | Value |
 | --- | --- |

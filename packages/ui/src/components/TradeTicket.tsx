@@ -1,9 +1,9 @@
 import { type ComponentProps, type FormEvent, useId, useState } from "react";
+import { cn } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
 import { Alert } from "./Alert.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "./Card.tsx";
 import { Input } from "./Input.tsx";
 import { Label } from "./Label.tsx";
 import { SegmentedControl } from "./SegmentedControl.tsx";
@@ -88,6 +88,8 @@ export type TradeTicketProps = Omit<ComponentProps<"form">, "onSubmit" | "childr
   defaultLeverage?: number;
   /** Called when perp direction, margin, or leverage changes so the caller can refresh `perpPreview`. */
   onPerpParamsChange?: (params: { side: "Long" | "Short"; marginPts: number; leverage: number }) => void;
+  /** Called when prediction action, side, or amount changes so the caller can refresh `sellPreview`. */
+  onPredictionParamsChange?: (params: { action: "Buy" | "Sell"; side: "YES" | "NO"; amountPts: number; shareUnits: number }) => void;
   /** Called when a valid order is submitted. */
   onSubmit: (order: TradeTicketOrder) => void;
   /** Disables submission and shows a spinner while executing. */
@@ -296,49 +298,94 @@ function TradeTicketSummary({
   );
 }
 
-/** Order ticket for prediction YES/NO shares and 1x-20x perpetuals with cent-share precision and perp previews. */
-export function TradeTicket({
+function TradeTicketDirectionControls({
   marketKind,
-  marketTitle,
-  balancePts,
-  yesOddsPct = 50,
+  action,
+  predSide,
+  perpSide,
+  yesOddsPct,
+  blocked,
+  onActionChange,
+  onPredSideChange,
+  onPerpSideChange,
+}: {
+  readonly marketKind: "prediction" | "perp";
+  readonly action: "Buy" | "Sell";
+  readonly predSide: "YES" | "NO";
+  readonly perpSide: "Long" | "Short";
+  readonly yesOddsPct: number;
+  readonly blocked: boolean;
+  readonly onActionChange: (next: "Buy" | "Sell") => void;
+  readonly onPredSideChange: (next: "YES" | "NO") => void;
+  readonly onPerpSideChange: (next: "Long" | "Short") => void;
+}) {
+  if (marketKind === "prediction") {
+    return (
+      <>
+        <SegmentedControl
+          aria-label="Order action"
+          value={action}
+          disabled={blocked}
+          onValueChange={(next) => onActionChange(next === "Sell" ? "Sell" : "Buy")}
+          options={[
+            { value: "Buy", label: "Buy" },
+            { value: "Sell", label: "Sell" },
+          ]}
+        />
+        <SegmentedControl
+          aria-label="Prediction side"
+          value={predSide}
+          disabled={blocked}
+          onValueChange={(next) => onPredSideChange(next === "NO" ? "NO" : "YES")}
+          options={[
+            { value: "YES", label: `YES ${yesOddsPct}%` },
+            { value: "NO", label: `NO ${100 - yesOddsPct}%` },
+          ]}
+        />
+      </>
+    );
+  }
+  return (
+    <SegmentedControl
+      aria-label="Perp direction"
+      value={perpSide}
+      disabled={blocked}
+      onValueChange={(next) => onPerpSideChange(next === "Short" ? "Short" : "Long")}
+      options={[
+        { value: "Long", label: "Long" },
+        { value: "Short", label: "Short" },
+      ]}
+    />
+  );
+}
+
+function computeTradeTicketQuotes({
+  marketKind,
+  action,
+  predSide,
+  numericAmount,
+  validAmount,
+  leverage,
+  yesOddsPct,
   yesShares,
   noShares,
-  heldYesShares,
-  heldNoShares,
+  feeBps,
   sellPreview,
-  ticker,
-  markPricePts,
-  indexPricePts,
   perpPreview,
-  existingPerpSide = null,
-  maxLeverage = 20,
-  feeBps = 10,
-  defaultAction = "Buy",
-  defaultSide,
-  defaultAmount = "10",
-  defaultLeverage = 5,
-  onPerpParamsChange,
-  onSubmit,
-  loading = false,
-  disabled = false,
-  error,
-  className,
-  ...props
-}: TradeTicketProps) {
-  const amountId = useId();
-  const leverageId = useId();
-  const cappedMaxLev = Math.min(20, Math.max(1, maxLeverage));
-
-  const [action, setAction] = useState<"Buy" | "Sell">(defaultAction);
-  const [predSide, setPredSide] = useState<"YES" | "NO">(defaultSide === "NO" ? "NO" : "YES");
-  const [perpSide, setPerpSide] = useState<"Long" | "Short">(defaultSide === "Short" ? "Short" : "Long");
-  const [amount, setAmount] = useState(defaultAmount);
-  const [leverage, setLeverage] = useState(Math.min(cappedMaxLev, Math.max(1, defaultLeverage)));
-
-  const blocked = disabled || loading;
-  const numericAmount = Number(amount);
-  const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
+}: {
+  readonly marketKind: "prediction" | "perp";
+  readonly action: "Buy" | "Sell";
+  readonly predSide: "YES" | "NO";
+  readonly numericAmount: number;
+  readonly validAmount: boolean;
+  readonly leverage: number;
+  readonly yesOddsPct: number;
+  readonly yesShares?: number;
+  readonly noShares?: number;
+  readonly feeBps: number;
+  readonly sellPreview?: TradeTicketSellPreview;
+  readonly perpPreview?: TradeTicketPerpPreview;
+}) {
   const activePricePct = predSide === "YES" ? yesOddsPct : 100 - yesOddsPct;
   const amountCents = validAmount ? Math.round(numericAmount * CENT_SHARES_PER_SHARE) : 0;
   const notionalPts = marketKind === "perp" && validAmount ? (amountCents * leverage) / 100 : numericAmount;
@@ -354,7 +401,8 @@ export function TradeTicket({
     Number.isSafeInteger(yesShares) &&
     Number.isSafeInteger(noShares);
 
-  const buyFeePts = validAmount ? Math.max(0.01, (notionalPts * feeBps) / 10000) : 0;
+  const notionalCents = marketKind === "perp" && validAmount ? Math.round(amountCents * leverage) : amountCents;
+  const buyFeePts = validAmount && feeBps > 0 ? Math.ceil((notionalCents * feeBps) / 10000) / 100 : 0;
   const estimatedBuyWholeShares =
     validAmount && activePricePct > 0
       ? hasExactCpmmInputs
@@ -392,6 +440,84 @@ export function TradeTicket({
         ? sellFeeCents / 100
         : buyFeePts;
 
+  return {
+    activePricePct,
+    amountCents,
+    notionalPts,
+    perpBelowMinimum,
+    estimatedBuyWholeShares,
+    sellNetCents,
+    estimatedFeePts,
+  };
+}
+
+/** Order ticket for prediction YES/NO shares and 1x-20x perpetuals with cent-share precision and perp previews. */
+export function TradeTicket({
+  marketKind,
+  marketTitle,
+  balancePts,
+  yesOddsPct = 50,
+  yesShares,
+  noShares,
+  heldYesShares,
+  heldNoShares,
+  sellPreview,
+  ticker,
+  markPricePts,
+  indexPricePts,
+  perpPreview,
+  existingPerpSide = null,
+  maxLeverage = 20,
+  feeBps = 10,
+  defaultAction = "Buy",
+  defaultSide,
+  defaultAmount = "10",
+  defaultLeverage = 5,
+  onPerpParamsChange,
+  onPredictionParamsChange,
+  onSubmit,
+  loading = false,
+  disabled = false,
+  error,
+  className,
+  ...props
+}: TradeTicketProps) {
+  const amountId = useId();
+  const leverageId = useId();
+  const cappedMaxLev = Math.min(20, Math.max(1, maxLeverage));
+
+  const [action, setAction] = useState<"Buy" | "Sell">(defaultAction);
+  const [predSide, setPredSide] = useState<"YES" | "NO">(defaultSide === "NO" ? "NO" : "YES");
+  const [perpSide, setPerpSide] = useState<"Long" | "Short">(defaultSide === "Short" ? "Short" : "Long");
+  const [amount, setAmount] = useState(defaultAmount);
+  const [leverage, setLeverage] = useState(Math.min(cappedMaxLev, Math.max(1, defaultLeverage)));
+
+  const blocked = disabled || loading;
+  const numericAmount = Number(amount);
+  const validAmount = Number.isFinite(numericAmount) && numericAmount > 0;
+  const {
+    activePricePct,
+    amountCents,
+    notionalPts,
+    perpBelowMinimum,
+    estimatedBuyWholeShares,
+    sellNetCents,
+    estimatedFeePts,
+  } = computeTradeTicketQuotes({
+    marketKind,
+    action,
+    predSide,
+    numericAmount,
+    validAmount,
+    leverage,
+    yesOddsPct,
+    yesShares,
+    noShares,
+    feeBps,
+    sellPreview,
+    perpPreview,
+  });
+
   const activeHeldCentShares = predSide === "YES" ? heldYesShares : heldNoShares;
   const activeHeldWholeShares =
     activeHeldCentShares !== undefined && activeHeldCentShares > 0 ? activeHeldCentShares / CENT_SHARES_PER_SHARE : 0;
@@ -401,6 +527,18 @@ export function TradeTicket({
     const parsed = Number(nextAmountText);
     if (!Number.isFinite(parsed) || parsed <= 0) return;
     onPerpParamsChange({ side: nextSide, marginPts: parsed, leverage: nextLeverage });
+  };
+
+  const notifyPredictionChange = (nextAction: "Buy" | "Sell", nextSide: "YES" | "NO", nextAmountText: string) => {
+    if (marketKind !== "prediction" || !onPredictionParamsChange) return;
+    const parsed = Number(nextAmountText);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    onPredictionParamsChange({
+      action: nextAction,
+      side: nextSide,
+      amountPts: parsed,
+      shareUnits: Math.round(parsed * CENT_SHARES_PER_SHARE),
+    });
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -423,57 +561,43 @@ export function TradeTicket({
       : `Rebalance ${perpSide} ${leverage}x`
     : `Open ${perpSide} ${leverage}x`;
 
+  const isBearishAction =
+    marketKind === "perp"
+      ? perpSide === "Short"
+      : action === "Sell" || predSide === "NO";
+
   return (
     <form onSubmit={handleSubmit} className={className} {...props}>
-      <Card className="gap-4 p-5">
-        <CardHeader className="gap-1.5">
+      <div className="flex flex-col gap-4 rounded-lg border border-border bg-background p-4 text-foreground">
+        <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between gap-2">
-            <CardTitle className="text-sm">{marketKind === "perp" && ticker ? `$${ticker} Perp` : "Trade Market"}</CardTitle>
+            <h3 className="text-sm leading-none font-semibold">{marketKind === "perp" && ticker ? `$${ticker} Perp` : "Trade Market"}</h3>
             <span className="font-mono text-xs text-muted-foreground tabular-nums">Avail {balancePts}</span>
           </div>
           <p className="text-xs text-muted-foreground">{marketTitle}</p>
-        </CardHeader>
+        </div>
 
-        <CardContent className="gap-3">
-          {marketKind === "prediction" ? (
-            <>
-              <SegmentedControl
-                aria-label="Order action"
-                value={action}
-                disabled={blocked}
-                onValueChange={(next) => setAction(next === "Sell" ? "Sell" : "Buy")}
-                options={[
-                  { value: "Buy", label: "Buy" },
-                  { value: "Sell", label: "Sell" },
-                ]}
-              />
-              <SegmentedControl
-                aria-label="Prediction side"
-                value={predSide}
-                disabled={blocked}
-                onValueChange={(next) => setPredSide(next === "NO" ? "NO" : "YES")}
-                options={[
-                  { value: "YES", label: `YES ${yesOddsPct}%` },
-                  { value: "NO", label: `NO ${100 - yesOddsPct}%` },
-                ]}
-              />
-            </>
-          ) : (
-            <SegmentedControl
-              aria-label="Perp direction"
-              value={perpSide}
-              disabled={blocked}
-              onValueChange={(next) => {
-                const resolved = next === "Short" ? "Short" : "Long";
-                setPerpSide(resolved);
-                notifyPerpChange(resolved, amount, leverage);
-              }}
-              options={[
-                { value: "Long", label: "Long" },
-                { value: "Short", label: "Short" },
-              ]}
-            />
-          )}
+        <div className="flex flex-col gap-3">
+          <TradeTicketDirectionControls
+            marketKind={marketKind}
+            action={action}
+            predSide={predSide}
+            perpSide={perpSide}
+            yesOddsPct={yesOddsPct}
+            blocked={blocked}
+            onActionChange={(resolved) => {
+              setAction(resolved);
+              notifyPredictionChange(resolved, predSide, amount);
+            }}
+            onPredSideChange={(resolved) => {
+              setPredSide(resolved);
+              notifyPredictionChange(action, resolved, amount);
+            }}
+            onPerpSideChange={(resolved) => {
+              setPerpSide(resolved);
+              notifyPerpChange(resolved, amount, leverage);
+            }}
+          />
 
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
@@ -488,7 +612,11 @@ export function TradeTicket({
                     variant="ghost"
                     size="sm"
                     disabled={blocked}
-                    onClick={() => setAmount(activeHeldWholeShares.toFixed(2))}
+                    onClick={() => {
+                      const maxText = activeHeldWholeShares.toFixed(2);
+                      setAmount(maxText);
+                      notifyPredictionChange(action, predSide, maxText);
+                    }}
                     className="h-6 px-1.5 font-mono text-xs"
                   >
                     Max
@@ -499,7 +627,7 @@ export function TradeTicket({
             <Input
               id={amountId}
               type="number"
-              min="1"
+              min={marketKind === "perp" ? "0.01" : "1"}
               step="any"
               value={amount}
               disabled={blocked}
@@ -507,6 +635,7 @@ export function TradeTicket({
               onChange={(event) => {
                 setAmount(event.target.value);
                 notifyPerpChange(perpSide, event.target.value, leverage);
+                notifyPredictionChange(action, predSide, event.target.value);
               }}
               className="font-mono tabular-nums"
             />
@@ -544,21 +673,23 @@ export function TradeTicket({
             <Alert variant="destructive">Notional size must be at least 10 pts (margin × leverage).</Alert>
           ) : null}
           {error ? <Alert variant="destructive">{error}</Alert> : null}
-        </CardContent>
+        </div>
 
-        <CardFooter className="flex-col items-stretch gap-2">
+        <div className="flex flex-col items-stretch gap-2">
           <Button
             type="submit"
-            shape="pill"
-            variant={marketKind === "perp" && perpSide === "Short" ? "destructive" : "primary"}
+            variant={isBearishAction ? "destructive" : "primary"}
             loading={loading}
             disabled={blocked || !validAmount || perpBelowMinimum}
-            className="w-full"
+            className={cn(
+              "w-full",
+              !isBearishAction && "bg-ok-solid text-ok-solid-foreground hover:bg-ok-solid/90",
+            )}
           >
             {marketKind === "prediction" ? `${action} ${predSide}` : perpSubmitLabel}
           </Button>
-        </CardFooter>
-      </Card>
+        </div>
+      </div>
     </form>
   );
 }

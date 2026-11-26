@@ -30,7 +30,7 @@ export function SegmentedControl({ options, value, onValueChange, disabled = fal
       onValueChange={(next) => {
         if (!disabled && next) onValueChange(next);
       }}
-      className={cn("inline-flex gap-1 rounded-md border border-input bg-muted p-1", className)}
+      className={cn("inline-flex gap-1 rounded-md border border-border bg-muted p-1", className)}
       {...props}
       {...controlState(disabled)}
     >
@@ -42,7 +42,7 @@ export function SegmentedControl({ options, value, onValueChange, disabled = fal
           className={cn(
             focusRing,
             inactive,
-            "h-8 rounded-sm px-3 text-sm font-medium text-muted-foreground transition-colors duration-fast hover:text-foreground data-[state=on]:bg-card data-[state=on]:text-foreground data-[state=on]:shadow-sm",
+            "h-8 rounded-sm px-3 text-sm font-medium text-muted-foreground transition-colors duration-fast hover:text-foreground data-[state=on]:bg-background data-[state=on]:text-foreground data-[state=on]:shadow-sm data-[state=on]:ring-1 data-[state=on]:ring-border",
           )}
         >
           {option.label}

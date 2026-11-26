@@ -16,6 +16,8 @@ export interface ParsedLocation {
   readonly marketKind: "prediction" | "perp" | null;
   readonly walletView: boolean;
   readonly settingsTab: SettingsTabId | null;
+  readonly chatId: string | null;
+  readonly emailMagicToken: string | null;
   readonly canonicalPath: string;
   readonly replaceCanonical: boolean;
 }
@@ -59,12 +61,17 @@ export function routeToPath(route: AppRoute, options?: {
       return "/link";
     case "OAuthConsent":
       return "/oauth/authorize";
+    case "AuthEmail":
+      return "/auth/email";
     case "Admin":
       return "/admin";
   }
 }
 
-export function toAppNavRoute(route: AppRoute): AppNavRoute {
+export function toAppNavRoute(route: AppRoute, options?: { readonly walletView?: boolean }): AppNavRoute {
+  if (route === "Markets" && options?.walletView) {
+    return "Wallet";
+  }
   switch (route) {
     case "Home":
     case "Explore":
@@ -77,12 +84,12 @@ export function toAppNavRoute(route: AppRoute): AppNavRoute {
     case "HowToPlay":
       return route;
     case "PostDetail":
+    case "AuthEmail":
+    case "Admin":
       return "Home";
     case "Link":
     case "OAuthConsent":
       return "Settings";
-    case "Admin":
-      return "Home";
   }
 }
 
@@ -105,6 +112,7 @@ export function toPublicTarget(route: AppRoute): PublicTarget | null {
     case "Settings":
     case "Link":
     case "OAuthConsent":
+    case "AuthEmail":
     case "Admin":
       return null;
   }
@@ -121,7 +129,6 @@ function parseSettingsTab(raw: string | null): SettingsTabId | null {
 export function parseLocation(pathname: string, search: string): ParsedLocation {
   const cleanPath = pathname.replace(/\/+$/u, "") || "/";
   const params = new URLSearchParams(search);
-  const queryTicker = params.get("ticker");
   const exploreQuery = params.get("q");
   const settingsTab = parseSettingsTab(params.get("tab"));
 
@@ -132,11 +139,13 @@ export function parseLocation(pathname: string, search: string): ParsedLocation 
     articleId: null,
     trendingTag: null,
     exploreQuery: null,
-    queryTicker,
+    queryTicker: null,
     marketId: null,
-    marketKind: queryTicker ? "perp" : null,
+    marketKind: null,
     walletView: false,
     settingsTab: null,
+    chatId: null,
+    emailMagicToken: null,
     canonicalPath: `${cleanPath}${search}`,
     replaceCanonical: false,
   };
@@ -225,11 +234,20 @@ export function parseLocation(pathname: string, search: string): ParsedLocation 
   }
 
   if (cleanPath === "/markets") {
-    return { ...base, route: "Markets" };
+    const rawTicker = params.get("ticker")?.trim() || null;
+    const queryTicker = rawTicker ? rawTicker.toUpperCase() : null;
+    return {
+      ...base,
+      route: "Markets",
+      queryTicker,
+      marketKind: queryTicker ? "perp" : null,
+      marketId: queryTicker,
+    };
   }
 
   if (cleanPath === "/chats") {
-    return { ...base, route: "Chats" };
+    const chatId = params.get("chat")?.trim() || null;
+    return { ...base, route: "Chats", chatId };
   }
 
   if (cleanPath === "/notifications") {
@@ -262,6 +280,17 @@ export function parseLocation(pathname: string, search: string): ParsedLocation 
     return { ...base, route: "OAuthConsent" };
   }
 
+  if (cleanPath === "/auth/email") {
+    const emailMagicToken = params.get("token")?.trim() || null;
+    return {
+      ...base,
+      route: "AuthEmail",
+      emailMagicToken,
+      canonicalPath: "/auth/email",
+      replaceCanonical: Boolean(emailMagicToken),
+    };
+  }
+
   if (cleanPath === "/admin") {
     return { ...base, route: "Admin" };
   }
@@ -280,5 +309,5 @@ export function parseLocation(pathname: string, search: string): ParsedLocation 
     };
   }
 
-  return { ...base, route: "Home", canonicalPath: "/" };
+  return { ...base, route: "Home", canonicalPath: "/", replaceCanonical: true };
 }

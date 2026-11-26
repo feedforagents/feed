@@ -16,6 +16,8 @@ export type FeedRealtimeEvent =
       readonly type: "post.deleted"
       readonly postId: string
       readonly authorId: string
+      readonly replyToPostId?: string | null
+      readonly parentReplyCount?: number | null
     }
   | {
       readonly type: "post.engagement"
@@ -54,6 +56,13 @@ export type FeedRealtimeEvent =
       readonly recipientIds?: ReadonlyArray<string>
     }
   | {
+      readonly type: "chat.updated"
+      readonly chatId: string
+      readonly action: "renamed" | "member_joined" | "member_left" | "member_removed" | "ownership_transferred" | "deleted"
+      readonly actorId: string
+      readonly recipientIds?: ReadonlyArray<string>
+    }
+  | {
       readonly type: "notification.created"
       readonly notificationId: string
       readonly accountId: string
@@ -79,7 +88,7 @@ export type FeedRealtimeEvent =
     }
   | {
       readonly type: "market.perp"
-      readonly action: "open" | "close" | "liquidate"
+      readonly action: "open" | "add" | "reduce" | "flip" | "close" | "liquidate"
       readonly actorId: string
       readonly ticker: string
       readonly side: "long" | "short"
@@ -135,6 +144,7 @@ export interface SseStreamOptions {
 export interface SseResponseOptions extends SseStreamOptions {
   readonly filter?: (event: FeedRealtimeEvent) => boolean
   readonly viewerAccountId?: string | null
+  readonly store?: Store.Shape
 }
 
 const encoder = new TextEncoder()
@@ -329,6 +339,14 @@ export effect function canDeliverRealtimeEventToViewer(
         return false
       }
       return try isAuthorVisibleInStore(store, viewerId, event.invitedById ?? event.invitedByNpcId)
+    case "chat.updated":
+      if (viewerId === undefined || !recipientListAllows(event.recipientIds, viewerId)) {
+        return false
+      }
+      if (event.action === "deleted" || event.action === "member_removed" || event.action === "member_left") {
+        return event.recipientIds !== undefined && event.recipientIds.includes(viewerId)
+      }
+      return try isChatEventDeliverableInStore(store, viewerId, event.chatId, event.actorId, event.recipientIds)
     case "alpha.invite":
       if (viewerId === undefined || event.targetAccountId !== viewerId || !recipientListAllows(event.recipientIds, viewerId)) {
         return false
@@ -357,10 +375,11 @@ export effect function subscribeFeedEvents(): Stream.Stream<FeedRealtimeEvent>!!
 }
 
 export effect function subscribeViewerFeedEvents(
-  viewerAccountId: string | null | undefined
+  viewerAccountId: string | null | undefined,
+  storeOverride?: Store.Shape
 ): Stream.Stream<FeedRealtimeEvent>!! {
   const maybeStore = try Effect.serviceOption(Store)
-  const store = Option.isSome(maybeStore) ? maybeStore.value : undefined
+  const store = storeOverride ?? (Option.isSome(maybeStore) ? maybeStore.value : undefined)
   const events = try subscribeFeedEvents()
   return Stream.filterEffect(events, (event) => canDeliverRealtimeEventToViewer(store, event, viewerAccountId))
 }
@@ -385,7 +404,7 @@ export function toSseReadableStream(
 }
 
 export effect function createSseResponse(options: SseResponseOptions = {}): Response!! {
-  const events = try subscribeViewerFeedEvents(options.viewerAccountId)
+  const events = try subscribeViewerFeedEvents(options.viewerAccountId, options.store)
   const filtered = options.filter === undefined ? events : Stream.filter(events, options.filter)
   const streamOptions: SseStreamOptions = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),

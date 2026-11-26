@@ -290,14 +290,21 @@ export effect function getPredictionPriceHistory(
 ): PriceHistoryResult {
   return try withPriceHistoryTx(input, effect (tx, { range, safeLimit, now }) => {
     const [market] = try tx.query(
-      "SELECT id, yes_shares, no_shares, status, resolved_at FROM feed_prediction_markets WHERE id = $1 LIMIT 1",
+      "SELECT id, yes_shares, no_shares, status, resolved_outcome, resolved_at FROM feed_prediction_markets WHERE id = $1 LIMIT 1",
       [input.marketId]
     )
     if (market === undefined) {
       throw marketFail("MARKET_NOT_FOUND", `Prediction market not found: ${input.marketId}`)
     }
-    const liveYesBps = yesOddsBps(toInt(market.yes_shares), toInt(market.no_shares))
-    const livePriceCents = Math.max(1, Math.min(99, Math.round(liveYesBps / 100)))
+    const status = requiredText(market.status, "open")
+    const resolvedOutcome = optionalText(market.resolved_outcome)?.toUpperCase() ?? null
+    const isResolvedOutcome = status === "resolved" && (resolvedOutcome === "YES" || resolvedOutcome === "NO")
+    const liveYesBps = isResolvedOutcome
+      ? (resolvedOutcome === "YES" ? 10_000 : 0)
+      : yesOddsBps(toInt(market.yes_shares), toInt(market.no_shares))
+    const livePriceCents = isResolvedOutcome
+      ? (resolvedOutcome === "YES" ? 100 : 0)
+      : Math.max(1, Math.min(99, Math.round(liveYesBps / 100)))
     const durationMs = rangeDurationMs(range)
     const cutoffMs = durationMs === null ? null : now - durationMs
     let rows = cutoffMs === null
@@ -558,6 +565,7 @@ export effect function listClosedPositions(input: {
          p.entry_price_cents,
          p.realized_pnl_cents,
          p.status,
+         p.created_at,
          p.closed_at,
          COALESCE(o.name, p.ticker) AS org_name
        FROM feed_perp_positions p
@@ -566,6 +574,18 @@ export effect function listClosedPositions(input: {
        WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.status IN ('closed', 'liquidated')`,
       [input.accountId]
     )
+    const perpEntryRows = perpRows.length > 0
+      ? try tx.query(
+          `SELECT t.market_ref AS ticker, t.notional_cents, t.fee_cents, t.created_at, l.delta_cents
+           FROM feed_trades t
+           LEFT JOIN feed_point_ledger l ON l.ref_id = t.id AND l.account_id = $1
+           WHERE t.trader_id = $1
+             AND t.trader_kind = 'user'
+             AND t.market_kind = 'perp'
+             AND t.side IN ('open_long', 'open_short', 'add_long', 'add_short')`,
+          [input.accountId]
+        )
+      : []
     const combined: Array<ClosedPositionView> = []
     for (const row of predRows) {
       const marketId = requiredText(row.market_id)
@@ -598,9 +618,28 @@ export effect function listClosedPositions(input: {
     }
     for (const row of perpRows) {
       const ticker = requiredText(row.ticker)
-      const marginCents = toInt(row.margin_cents)
+      const remainingMarginCents = toInt(row.margin_cents)
+      const remainingSizeCents = toInt(row.size_cents)
+      const createdAt = toInt(row.created_at)
+      const closedAt = toInt(row.closed_at)
+      let deployedMarginCents = 0
+      let deployedSizeCents = 0
+      for (const entry of perpEntryRows) {
+        if (requiredText(entry.ticker) !== ticker) continue
+        const entryTs = toInt(entry.created_at)
+        if (entryTs < createdAt || (closedAt > 0 && entryTs > closedAt)) continue
+        const fee = toInt(entry.fee_cents)
+        const ledgerDelta = optionalInt(entry.delta_cents)
+        const entryMargin = ledgerDelta !== null && ledgerDelta < 0
+          ? Math.max(0, 0 - ledgerDelta - fee)
+          : 0
+        deployedMarginCents += entryMargin
+        deployedSizeCents += toInt(entry.notional_cents)
+      }
+      const costBasisCents = Math.max(remainingMarginCents, deployedMarginCents)
+      const totalSizeCents = Math.max(remainingSizeCents, deployedSizeCents)
       const realizedPnlCents = toInt(row.realized_pnl_cents)
-      const payoutCents = Math.max(0, marginCents + realizedPnlCents)
+      const payoutCents = Math.max(0, costBasisCents + realizedPnlCents)
       const outcome: "won" | "lost" = realizedPnlCents > 0 ? "won" : "lost"
       combined.push({
         id: requiredText(row.id),
@@ -609,15 +648,15 @@ export effect function listClosedPositions(input: {
         ticker,
         title: requiredText(row.org_name, ticker),
         side: requiredText(row.side).toLowerCase(),
-        sharesOrSize: toInt(row.size_cents),
+        sharesOrSize: totalSizeCents,
         entryPriceCents: toInt(row.entry_price_cents),
         exitPriceCents: null,
-        costBasisCents: marginCents,
+        costBasisCents,
         payoutCents,
         realizedPnlCents,
         outcome,
         status: requiredText(row.status, "closed"),
-        closedAt: toInt(row.closed_at)
+        closedAt
       })
     }
     const filtered = outcomeFilter === "all"
@@ -651,28 +690,50 @@ export effect function getAccountPnlHistory(input: {
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const economy = try getAccountEconomyIn(tx, input.accountId)
-    const rows = try tx.query(
-      `SELECT kind, delta_cents, created_at
-       FROM feed_point_ledger
-       WHERE account_id = $1 AND kind <> 'starting_grant'
+    const realizedTradeRows = try tx.query(
+      `SELECT market_kind, side, realized_pnl_cents, created_at
+       FROM feed_trades
+       WHERE trader_id = $1 AND trader_kind = 'user' AND realized_pnl_cents IS NOT NULL
        ORDER BY created_at ASC, id ASC`,
       [input.accountId]
     )
+    const settledPredRows = try tx.query(
+      `SELECT p.payout_cents, p.cost_basis_cents, p.settled_at, m.status
+       FROM feed_prediction_positions p
+       INNER JOIN feed_prediction_markets m ON m.id = p.market_id
+       WHERE p.holder_id = $1 AND p.holder_kind = 'user' AND p.settled_at IS NOT NULL AND p.shares > 0
+       ORDER BY p.settled_at ASC`,
+      [input.accountId]
+    )
+    const pnlEvents: Array<{ readonly ts: number; readonly deltaCents: number; readonly kind: string }> = []
+    for (const row of realizedTradeRows) {
+      pnlEvents.push({
+        ts: toInt(row.created_at),
+        deltaCents: toInt(row.realized_pnl_cents),
+        kind: `${requiredText(row.market_kind)}_${requiredText(row.side)}`
+      })
+    }
+    for (const row of settledPredRows) {
+      const deltaCents = toInt(row.payout_cents) - toInt(row.cost_basis_cents)
+      pnlEvents.push({
+        ts: toInt(row.settled_at),
+        deltaCents,
+        kind: requiredText(row.status) === "cancelled" ? "prediction_refund" : "prediction_settle"
+      })
+    }
+    pnlEvents.sort((a, b) => a.ts - b.ts)
     const durationMs = rangeDurationMs(range)
     const cutoffMs = durationMs === null ? null : now - durationMs
     let cumulative = 0
     const points: Array<PnlHistoryPoint> = []
     let baselineEmitted = false
-    for (const row of rows) {
-      const ts = toInt(row.created_at)
-      const deltaCents = toInt(row.delta_cents)
-      const kind = requiredText(row.kind)
-      if (cutoffMs !== null && ts < cutoffMs) {
-        cumulative += deltaCents
+    for (const ev of pnlEvents) {
+      if (cutoffMs !== null && ev.ts < cutoffMs) {
+        cumulative += ev.deltaCents
         continue
       }
       if (!baselineEmitted) {
-        const startTs = cutoffMs ?? Math.max(0, ts - 1_000)
+        const startTs = cutoffMs ?? Math.max(0, ev.ts - 1_000)
         points.push({
           timestamp: startTs,
           pnlCents: cumulative,
@@ -682,13 +743,13 @@ export effect function getAccountPnlHistory(input: {
         })
         baselineEmitted = true
       }
-      cumulative += deltaCents
+      cumulative += ev.deltaCents
       points.push({
-        timestamp: ts,
+        timestamp: ev.ts,
         pnlCents: cumulative,
         cumulativePnlCents: cumulative,
-        deltaCents,
-        kind
+        deltaCents: ev.deltaCents,
+        kind: ev.kind
       })
     }
     if (!baselineEmitted) {

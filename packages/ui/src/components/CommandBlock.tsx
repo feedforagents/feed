@@ -36,7 +36,7 @@ export function CommandBlock({
 }: CommandBlockProps) {
   if (layout === "inline") {
     return (
-      <div className={cn("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 rounded-xl border border-border bg-card p-4", className)} {...props}>
+      <div className={cn("grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 rounded-lg border border-border bg-muted/40 p-4", className)} {...props}>
         <code role="group" aria-label={label} className="min-w-0 font-mono text-sm font-medium break-normal whitespace-normal text-foreground wrap-anywhere">
           {splitTextSegments(command, breaks).map((segment) => (
             <span key={segment.key}>

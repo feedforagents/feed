@@ -15,7 +15,7 @@ import {
   type SecretOutcome,
 } from "../gen/engine__narrativeArc.effect.vibe"
 import { generateCompletion, hasLiveLlmProvider } from "./llm-client.vibe"
-import { buildWorldContext, prioritizePerpMarkets, renderPrompt, type WorldContextMarketItem } from "./prompts.vibe"
+import { buildWorldContext, formatActorVoiceContext, prioritizePerpMarkets, renderPrompt, type WorldContextMarketItem } from "./prompts.vibe"
 import {
   EngineFailure,
   displayNameForEntity,
@@ -26,8 +26,10 @@ import {
   parseLlmJsonRecord,
   replaceActorSlugsWithNames,
   resolveClockNow,
+  safeNonNegInt,
   sanitizeNarrativeText,
   sanitizeText,
+  scrubRealWorldNames,
   stripLeadingSelfPrefix,
 } from "./shared.vibe"
 
@@ -160,14 +162,19 @@ function selectClueActor(
   clueKey: string,
   actorRows: ReadonlyArray<Readonly<Record<string, unknown>>>,
 ): { readonly row: Readonly<Record<string, unknown>>; readonly packActor: PackActor | undefined; readonly isAffiliatedInsider: boolean } {
+  const eligibleRows = actorRows.filter((row) =>
+    isRuntimeNpcActor(toText(row.id) ?? "", toText(row.name), toText(row.username)),
+  )
+  const poolRows = eligibleRows.length > 0 ? eligibleRows : actorRows
   const combinedText = `${question} ${description}`
   const lowerCombined = combinedText.toLowerCase()
   const matchedOrgIds = findMatchedOrgIds(combinedText)
   const affiliated: Array<{ readonly row: Readonly<Record<string, unknown>>; readonly packActor: PackActor | undefined }> = []
   const categoryMatched: Array<{ readonly row: Readonly<Record<string, unknown>>; readonly packActor: PackActor | undefined }> = []
   const lowerCategory = category.toLowerCase()
-  for (const row of actorRows) {
+  for (const row of poolRows) {
     const actorId = toText(row.id) ?? ""
+    if (!isRuntimeNpcActor(actorId)) continue
     const packActor = packActorById.get(actorId)
     const actorName = (toText(row.name) ?? "").toLowerCase()
     const actorUsername = (toText(row.username) ?? "").toLowerCase()
@@ -193,7 +200,7 @@ function selectClueActor(
     const picked = categoryMatched[hashString(clueKey) % categoryMatched.length]!
     return { row: picked.row, packActor: picked.packActor, isAffiliatedInsider: false }
   }
-  const fallbackRow = actorRows[hashString(clueKey) % actorRows.length]!
+  const fallbackRow = poolRows[hashString(clueKey) % poolRows.length]!
   return { row: fallbackRow, packActor: packActorById.get(toText(fallbackRow.id) ?? ""), isAffiliatedInsider: false }
 }
 
@@ -276,8 +283,8 @@ export effect function loadPublicWorldSnapshot(tx: Tx, nowMs: number): {
 }!StoreFailure {
   const stateRows = try tx.query("SELECT current_day, current_hour, phase FROM feed_world_state WHERE singleton = true")
   const stateRow = stateRows[0] ?? {}
-  const currentDay = Math.max(1, toInt(stateRow.current_day) || 1)
-  const currentHour = Math.max(0, toInt(stateRow.current_hour))
+  const currentDay = Math.max(1, safeNonNegInt(stateRow.current_day, 1))
+  const currentHour = safeNonNegInt(stateRow.current_hour, 0)
   const phase = toText(stateRow.phase) ?? "active"
   const factsRows = try tx.query("SELECT fact_text FROM feed_world_facts ORDER BY created_at DESC LIMIT 6")
   const rssRows = try tx.query("SELECT COALESCE(parody_headline, title) AS headline FROM feed_rss_headlines ORDER BY published_at DESC LIMIT 5")
@@ -367,7 +374,7 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
        LIMIT 10`,
       [resolvedNow],
     )
-    const actorsRows = (try tx.query("SELECT id, name, username, system_prompt FROM feed_actors ORDER BY id ASC")).filter((r) =>
+    const actorsRows = (try tx.query("SELECT id, name, username, system_prompt FROM feed_actors WHERE id NOT LIKE 'test-%' AND id NOT LIKE 'org-%' ORDER BY id ASC")).filter((r) =>
       isRuntimeNpcActor(toText(r.id) ?? "", toText(r.name), toText(r.username)),
     )
     const clueRows = try tx.query("SELECT clue_key, market_id, actor_id FROM feed_npc_market_clues")
@@ -405,7 +412,11 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
     const rendered = renderPrompt("cluePost", {
       actorName,
       actorHandle,
-      actorVoice: sanitizeText(toText(actor.system_prompt) ?? "Skeptical market operator", 160),
+      actorVoice: formatActorVoiceContext(
+        picked.packActor,
+        toText(actor.system_prompt) ?? "Skeptical market operator",
+        hashString(clueKey),
+      ),
       question,
       category,
       phase: clueTarget.slug,
@@ -504,7 +515,7 @@ effect function settleMarketWithProofArticle(input: {
   const authorOrgId = try store.transaction(effect (tx: Tx) => try resolveMediaOrgIdTx(tx, `proof:${input.marketId}`))
   const cleanTitle = sanitizeNarrativeText(input.title, 180)
   const cleanSummary = sanitizeNarrativeText(input.summary, 360)
-  const cleanBody = replaceActorSlugsWithNames(input.body)
+  const cleanBody = scrubRealWorldNames(replaceActorSlugsWithNames(input.body))
   try resolvePredictionMarket({
     marketId: input.marketId,
     outcome: input.outcome,
@@ -651,9 +662,14 @@ export effect function queryPendingRecovery(tx: Tx): { readonly pendingCount: nu
 
 export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!(EngineFailure | StoreFailure)!Store {
   const resolvedNow = try resolveClockNow(nowMs)
-  try advanceNarrativePhases(resolvedNow)
   const store = try Store
   const queueData = try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `UPDATE feed_prediction_markets
+       SET status = 'expired', phase = 'expired'
+       WHERE status = 'open' AND expires_at <= $1`,
+      [resolvedNow],
+    )
     try tx.query(
       `INSERT INTO feed_prediction_resolution_work (market_id, attempts, last_error, next_retry_at, updated_at)
        SELECT id, 0, NULL, $1, $1

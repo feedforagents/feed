@@ -572,13 +572,14 @@ export effect function previewPredictionSell(input: PreviewPredictionSellInput):
         "SELECT shares, settled_at FROM feed_prediction_positions WHERE market_id = $1 AND holder_id = $2 AND side = $3",
         [input.marketId, input.holderId, toDbSide(input.side)]
       )
-      if (posRows.length > 0 && posRows[0]!.settled_at === null) {
-        const held = toInt(posRows[0]!.shares)
-        if (held < input.shares) {
-          throw marketFail("INSUFFICIENT_SHARES", "Insufficient shares to sell")
-        }
-        isFullExit = held === input.shares
+      if (posRows.length === 0 || posRows[0]!.settled_at !== null) {
+        throw marketFail("INSUFFICIENT_SHARES", "No active prediction position to sell")
       }
+      const held = toInt(posRows[0]!.shares)
+      if (held < input.shares) {
+        throw marketFail("INSUFFICIENT_SHARES", "Insufficient shares to sell")
+      }
+      isFullExit = held === input.shares
     }
     const yesShares = toInt(market.yes_shares)
     const noShares = toInt(market.no_shares)

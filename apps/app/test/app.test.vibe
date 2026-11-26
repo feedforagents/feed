@@ -49,8 +49,17 @@ module node {
   export function startReadChunk(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {
     return reader.read()
   }
+
+  /** @throws {never} */
+  export function extractMagicToken(url: string): string {
+    try {
+      return new URL(url, "http://feed.localtest").searchParams.get("token") ?? ""
+    } catch {
+      return ""
+    }
+  }
 }
-import { decodeUtf8, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk } from node
+import { decodeUtf8, extractMagicToken, getBodyReader, makeAbortController, makeHeaders, makeRequest, pkceChallenge, sha256Hex, startReadChunk } from node
 
 const APP_ORIGIN = "http://feed.localtest"
 
@@ -60,6 +69,7 @@ const TEST_CONFIG = parseAppServerConfig(
     PUBLIC_APP_URL: APP_ORIGIN,
     PUBLIC_API_URL: APP_ORIGIN,
     SMS_MODE: "loopback",
+    EMAIL_MODE: "loopback",
     AUTH_DIGEST_KEY: "test-digest-key-00000000000000000000000000000000",
     OAUTH_SIGNING_SECRET: "test-oauth-secret-00000000000000000000000000000",
     CRON_SECRET: "test-cron-secret",
@@ -979,3 +989,79 @@ it.effect('Session cookie slides with the server session (spec/app/index.md, "St
   ))
   }
 }, 180_000)
+
+// spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
+it.effect('Email magic link sign-in, onboarding 100 pts grant, and profile likes REST journey (spec/auth/email.md, "Story: Request and consume a single-use email magic link safely")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+
+    const startRes = try callApp("/api/auth/email/start", {
+      json: { email: "magic_journey@example.com", redirectTo: "/" }
+    })
+    const startBody = try readJson(startRes)
+    const devMagicLinkUrl = String(startBody.devMagicLinkUrl ?? "")
+    const token = extractMagicToken(devMagicLinkUrl)
+    try check(() => assert.deepStrictEqual(
+      [startRes.status, String(startBody.emailMasked ?? ""), token.length > 0],
+      [200, "m***@example.com", true]
+    ))
+
+    const verifyRes = try callApp("/api/auth/email/verify", {
+      json: { token }
+    })
+    const verifyBody = try readJson(verifyRes)
+    const onboardingToken = String(verifyBody.onboardingToken ?? verifyBody.pendingToken ?? "")
+    try check(() => assert.deepStrictEqual(
+      [verifyRes.status, String(verifyBody.status ?? ""), onboardingToken.length > 0],
+      [200, "needs_onboarding", true]
+    ))
+
+    const onboardRes = try callApp("/api/auth/email/onboard", {
+      json: {
+        onboardingToken,
+        pendingToken: onboardingToken,
+        username: "magic_alice",
+        displayName: "Magic Alice",
+        ageConfirmed: true,
+        accepted18Plus: true,
+        tosAccepted: true,
+        acceptedTerms: true
+      }
+    })
+    const onboardCookie = extractSessionCookie(onboardRes)
+    const meRes = try callApp("/api/auth/me", { cookie: onboardCookie })
+    const meBody = try readJson(meRes)
+    const viewer = (meBody.viewer ?? meBody.account) as Record<string, unknown>
+    try check(() => assert.deepStrictEqual(
+      [
+        onboardRes.status === 200 || onboardRes.status === 201,
+        meRes.status,
+        Boolean(meBody.authenticated),
+        Boolean(meBody.emailAuthEnabled),
+        String(viewer.handle ?? ""),
+        String(viewer.emailMasked ?? ""),
+        Number(viewer.balanceCents ?? 0)
+      ],
+      [true, 200, true, true, "magic_alice", "m***@example.com", 10000]
+    ))
+
+    const feedBody = try readJson(try callApp("/api/feed?tab=latest", { cookie: onboardCookie }))
+    const firstPost = ((feedBody.items ?? []) as ReadonlyArray<Record<string, unknown>>)[0]
+    const firstPostId = String(firstPost?.id ?? "")
+    if (firstPostId !== "") {
+      const likeRes = try callApp(`/api/posts/${encodeURIComponent(firstPostId)}/like`, {
+        method: "POST",
+        cookie: onboardCookie,
+        json: {}
+      })
+      const likesRes = try callApp("/api/users/magic_alice/likes", { cookie: onboardCookie })
+      const likesBody = try readJson(likesRes)
+      const likedItems = (likesBody.posts ?? likesBody.items ?? []) as ReadonlyArray<Record<string, unknown>>
+      try check(() => assert.deepStrictEqual(
+        [likeRes.status, likesRes.status, likedItems.some((p) => String(p.id ?? "") === firstPostId)],
+        [200, 200, true]
+      ))
+    }
+  }
+}, 120_000)

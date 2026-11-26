@@ -1,7 +1,8 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+import { type CloudflareEmailSender } from "@repo/auth"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, workerDbStore, type StoreFailure, type Tx } from "@repo/db/worker"
 import { RealtimeBus, realtimeBusLayer } from "@repo/social"
-import { parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
+import { assertAppServerConfig, parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
 import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
 
 module web {
@@ -34,11 +35,15 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
   readonly HYPERDRIVE?: WorkerHyperdrive | undefined
   readonly DATABASE_URL?: string | undefined
   readonly ASSETS?: WorkerAssets | undefined
+  readonly EMAIL?: CloudflareEmailSender | undefined
   readonly DEPLOYMENT_ENV?: string | undefined
   readonly PUBLIC_APP_URL?: string | undefined
   readonly PUBLIC_API_URL?: string | undefined
   readonly SMS_MODE?: string | undefined
   readonly SMS_ALLOWED_COUNTRIES?: string | undefined
+  readonly EMAIL_MODE?: string | undefined
+  readonly EMAIL_FROM?: string | undefined
+  readonly EMAIL_PUBLIC_ORIGIN?: string | undefined
   readonly AUTH_DIGEST_KEY?: string | undefined
   readonly AUTH_SEALING_KEY?: string | undefined
   readonly OAUTH_SIGNING_SECRET?: string | undefined
@@ -73,7 +78,10 @@ effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
          to_regclass('public.feed_market_price_history') AS price_history,
          to_regclass('public.feed_npc_spot_holdings') AS spot_holdings,
          to_regclass('public.feed_alpha_invite_cooldowns') AS alpha_cooldowns,
-         to_regclass('public.feed_world_events') AS world_events`
+         to_regclass('public.feed_world_events') AS world_events,
+         to_regclass('public.feed_email_magic_links') AS email_magic_links,
+         to_regclass('public.feed_email_cooldowns') AS email_cooldowns,
+         to_regclass('public.feed_job_leases') AS job_leases`
     )
     const row = tableRows[0]
     if (
@@ -85,6 +93,9 @@ effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
       || typeof row.spot_holdings !== "string"
       || typeof row.alpha_cooldowns !== "string"
       || typeof row.world_events !== "string"
+      || typeof row.email_magic_links !== "string"
+      || typeof row.email_cooldowns !== "string"
+      || typeof row.job_leases !== "string"
     ) {
       return false
     }
@@ -96,9 +107,15 @@ effect function schemaAndSeedReady(): boolean!StoreFailure!Store {
            (table_name = 'feed_chat_members' AND column_name = 'last_read_at')
            OR (table_name = 'feed_group_invites' AND column_name = 'invited_by_id')
            OR (table_name = 'feed_trades' AND column_name = 'realized_pnl_cents')
+           OR (table_name = 'feed_organizations' AND column_name = 'username')
+           OR (table_name = 'feed_accounts' AND column_name = 'email_hash')
+           OR (table_name = 'feed_accounts' AND column_name = 'email_masked')
+           OR (table_name = 'feed_accounts' AND column_name = 'email_verified_at')
+           OR (table_name = 'feed_notifications' AND column_name = 'chat_id')
+           OR (table_name = 'feed_notifications' AND column_name = 'invite_id')
          )`
     )
-    if (toInt(colRows[0]?.count) < 3) return false
+    if (toInt(colRows[0]?.count) < 9) return false
     const seedRows = try tx.query(
       `SELECT
          (SELECT count(*) FROM feed_actors) AS actors_count,
@@ -133,7 +150,26 @@ async function sharedRealtimeBusLayer(): Promise<Layer.Layer<RealtimeBus>> {
   return Layer.succeed(RealtimeBus, bus)
 }
 
-async function workerRuntimeLayer(env: WorkerEnv): Promise<Layer.Layer<Store | RealtimeBus, StoreFailure>> {
+function perCheckWorkerStore(connectionString: string): Store.Shape {
+  return {
+    location: { kind: "connected-pg" },
+    transaction: <A, E, R>(body: (tx: Tx) => A!E!R) =>
+      Effect.scoped(
+        Effect.provide(
+          effect {
+            const store = try Store
+            return try store.transaction(body)
+          },
+          workerDbStore(connectionString)
+        )
+      )
+  }
+}
+
+async function workerRuntimeLayer(env: WorkerEnv): Promise<{
+  readonly layer: Layer.Layer<Store | RealtimeBus, StoreFailure>
+  readonly connectionString: string
+}> {
   const connectionString = connectionStringForEnv(env)
   if (connectionString === undefined) {
     throw new Error("HYPERDRIVE or DATABASE_URL binding is required.")
@@ -141,7 +177,10 @@ async function workerRuntimeLayer(env: WorkerEnv): Promise<Layer.Layer<Store | R
   const dbLayer = workerDbStore(connectionString)
   await ensureBootstrapped(connectionString, dbLayer)
   const busLayer = await sharedRealtimeBusLayer()
-  return Layer.mergeAll(dbLayer, busLayer)
+  return {
+    layer: Layer.mergeAll(dbLayer, busLayer),
+    connectionString
+  }
 }
 
 function workerJsonError(status: number, code: string, message: string): Response {
@@ -160,17 +199,22 @@ function workerJsonError(status: number, code: string, message: string): Respons
 export default {
   async fetch(request: Request, env: WorkerEnv, _ctx: WorkerExecutionContext): Promise<Response> {
     syncProcessEnv(env)
-    const fallbackOrigin = new URL(request.url).origin
-    const config = parseAppServerConfig(stringEnvRecord(env), fallbackOrigin)
     const url = new URL(request.url)
     const isApiOrMcp = url.pathname.startsWith("/api/") || url.pathname === "/mcp" || url.pathname.startsWith("/oauth/") || url.pathname.startsWith("/.well-known/") || url.pathname === "/SKILL.md" || url.pathname === "/skill.md" || url.pathname === "/llms.txt" || url.pathname === "/how-to-play.md"
     if (!isApiOrMcp && env.ASSETS !== undefined && (request.method === "GET" || request.method === "HEAD")) {
       return env.ASSETS.fetch(request)
     }
     try {
-      const appLayer = await workerRuntimeLayer(env)
+      const config = parseAppServerConfig(stringEnvRecord(env), url.origin, { emailSender: env.EMAIL })
+      await Effect.runPromise(assertAppServerConfig(config))
+      const { layer: appLayer, connectionString } = await workerRuntimeLayer(env)
       const handled = await Effect.runPromise(
-        Effect.provide(resolveOptionalRouteResponse(request, config), appLayer)
+        Effect.provide(
+          resolveOptionalRouteResponse(request, config, {
+            realtimeStore: perCheckWorkerStore(connectionString)
+          }),
+          appLayer
+        )
       )
       if (handled !== undefined) return handled
       if (env.ASSETS !== undefined) {
@@ -190,7 +234,8 @@ export default {
     const cycle = Math.max(1, Math.floor(controller.scheduledTime / 60_000))
     ctx.waitUntil(
       (async () => {
-        const appLayer = await workerRuntimeLayer(env)
+        await Effect.runPromise(assertAppServerConfig(config))
+        const { layer: appLayer } = await workerRuntimeLayer(env)
         await Effect.runPromise(Effect.provide(runScheduledTicks(cycle), appLayer))
       })()
     )

@@ -2,7 +2,7 @@
 import { Store, type StoreFailure, toInt, toText, type Tx } from "@repo/db"
 import { RateLimited } from "./errors.vibe"
 
-export type RateLimitActionKind = "post" | "trade" | "dm" | "sms_send" | "mcp_call"
+export type RateLimitActionKind = "post" | "trade" | "dm" | "sms_send" | "email_send" | "mcp_call"
 export type RateLimitSurface = "web" | "mcp"
 
 export interface CheckRateLimitInput {
@@ -36,6 +36,7 @@ export const ACTION_HOURLY_LIMITS: Readonly<Record<RateLimitActionKind, number>>
   dm: 60,
   trade: 120,
   sms_send: 10,
+  email_send: 15,
   mcp_call: 600
 }
 
@@ -127,7 +128,7 @@ export effect function getRateLimitStatus(accountId: string): RateLimitStatus!St
   const windowHour = Math.floor(now / HOUR_MS)
   const windowStart = windowHour * HOUR_MS
   const resetAt = windowStart + HOUR_MS
-  const actions: ReadonlyArray<RateLimitActionKind> = ["post", "dm", "trade", "sms_send", "mcp_call"]
+  const actions: ReadonlyArray<RateLimitActionKind> = ["post", "dm", "trade", "mcp_call"]
   const keys = actions.map((action) => rateLimitScopeKey(accountId, action))
   const rows = try store.transaction((tx: Tx) =>
     tx.query(
@@ -153,7 +154,6 @@ export effect function getRateLimitStatus(accountId: string): RateLimitStatus!St
     post: quotaFor("post"),
     dm: quotaFor("dm"),
     trade: quotaFor("trade"),
-    sms_send: quotaFor("sms_send"),
     mcp_call: quotaFor("mcp_call")
   }
 }

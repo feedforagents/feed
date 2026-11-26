@@ -2,6 +2,7 @@
 import { useState, type FormEvent } from "react";
 import {
   Alert,
+  AssetTradesFeed,
   Avatar,
   Badge,
   Button,
@@ -245,10 +246,10 @@ function EditProfileDialog({
           />
 
           <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" size="sm" shape="pill" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" size="sm" shape="pill" loading={busy} disabled={!displayName.trim()}>
+            <Button type="submit" size="sm" loading={busy} disabled={!displayName.trim()}>
               Save
             </Button>
           </div>
@@ -264,15 +265,19 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   const [editOpen, setEditOpen] = useState(false);
   const isGame = mode === "GameMode";
   const bundle = s.profileBundle;
+  const requestedHandle = (s.profileHandle ?? s.viewer?.handle ?? "").toLowerCase();
+  const bundleMatchesRequest = Boolean(
+    bundle && (!requestedHandle || bundle.summary.handle.toLowerCase() === requestedHandle),
+  );
 
   if (!s.viewer && !s.profileHandle && !bundle) {
     return (
       <div className="flex flex-col">
-        <header className="sticky top-[53px] z-20 flex h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
+        <header className="sticky top-[53px] z-20 hidden h-[53px] items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0 md:flex">
           <h1 className="text-base font-bold text-foreground">Profile</h1>
         </header>
         <EmptyState title="Sign in to view your profile">
-          <Button shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+          <Button shape="pill" onClick={() => storeActions.openJoinSheet()}>
             Sign in
           </Button>
         </EmptyState>
@@ -280,7 +285,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
     );
   }
 
-  if (s.profileLoading && !bundle) {
+  if (s.profileLoading && !bundleMatchesRequest) {
     return (
       <div className="flex flex-col gap-4 p-4">
         <Skeleton className="h-48" />
@@ -292,7 +297,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   if (!bundle) {
     return (
       <EmptyState title="Profile not found">
-        <Button variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/"); }}>
+        <Button variant="outline" onClick={() => { void storeActions.navigate("/"); }}>
           Back to Feed
         </Button>
       </EmptyState>
@@ -302,9 +307,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
   const activeTab: ProfileTab = !isGame && (tab === "trades" || tab === "positions") ? "posts" : tab;
   const topLevelPosts = bundle.posts.filter((p) => !p.replyToPostId);
   const replyPosts = s.profileReplies.length > 0 ? s.profileReplies : bundle.posts.filter((p) => Boolean(p.replyToPostId));
-  const likedPosts = bundle.posts.filter((p) => Boolean(p.card.liked));
   const openPositions = bundle.positions.filter((p) => !p.isClosed);
-  const closedPositions = bundle.positions.filter((p) => p.isClosed);
   const orgTicker = bundle.orgMeta?.ticker ?? null;
 
   const copyProfileLink = () => {
@@ -331,7 +334,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
         profile={bundle.summary}
         mode={mode}
         onFollowToggle={() => { void storeActions.toggleFollow(bundle.summary.handle, bundle.summary.isFollowing); }}
-        onMessage={() => { void storeActions.startDirectChat(bundle.summary.handle); }}
+        onMessage={bundle.kind === "user" ? () => { void storeActions.startDirectChat(bundle.summary.handle); } : undefined}
         onCopyLink={copyProfileLink}
         onMuteToggle={s.viewer ? () => storeActions.openMuteDialog(bundle.summary.handle, Boolean(bundle.summary.isMuted)) : undefined}
         onBlockToggle={s.viewer ? () => storeActions.openBlockDialog(bundle.summary.handle, Boolean(bundle.summary.isBlocked)) : undefined}
@@ -354,14 +357,13 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
       ) : null}
 
       {isGame && orgTicker ? (
-        <div className="flex items-center justify-between gap-3 border-b border-border bg-card/50 px-4 py-3">
+        <div className="flex items-center justify-between gap-3 border-b border-border bg-background px-4 py-3">
           <div className="flex items-center gap-2">
             <Badge variant="info" className="font-mono">{`$${orgTicker}`}</Badge>
             <span className="text-xs text-muted-foreground">{bundle.orgMeta?.orgType}</span>
           </div>
           <Button
             size="sm"
-            shape="pill"
             onClick={() => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(orgTicker)}`); }}
           >
             {`Trade $${orgTicker}`}
@@ -382,6 +384,10 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
             setTab(next);
             if (next === "replies") {
               void storeActions.loadProfileReplies(bundle.summary.handle);
+            } else if (next === "likes") {
+              void storeActions.loadProfileLikes(bundle.summary.handle);
+            } else if (next === "trades") {
+              void storeActions.loadProfileTrades(bundle.summary.handle);
             }
           }
         }}
@@ -406,7 +412,6 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
                 <Button
                   variant="outline"
                   size="sm"
-                  shape="pill"
                   loading={s.profileLoadingMore}
                   onClick={() => { void storeActions.loadMoreProfilePosts(); }}
                 >
@@ -428,25 +433,28 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
           <FlatPostList posts={replyPosts} mode={mode} />
         )
       ) : activeTab === "likes" ? (
-        likedPosts.length === 0 ? (
-          <EmptyState title="No liked posts visible yet" />
+        s.profileLikesLoading && s.profileLikes.length === 0 ? (
+          <div className="flex flex-col gap-3 p-4">
+            <Skeleton className="h-20" />
+            <Skeleton className="h-20" />
+          </div>
+        ) : s.profileLikes.length === 0 ? (
+          <EmptyState title="No liked posts yet" />
         ) : (
-          <FlatPostList posts={likedPosts} mode={mode} />
+          <FlatPostList posts={s.profileLikes} mode={mode} />
         )
       ) : activeTab === "trades" ? (
-        closedPositions.length === 0 ? (
-          <EmptyState title={bundle.tradeCount ? `${bundle.tradeCount} total trades recorded` : "No settled trades yet"} />
-        ) : (
-          <div className="divide-y divide-border">
-            {closedPositions.map((pos) => (
-              <PositionRow key={pos.row.id} position={pos.row} />
-            ))}
-          </div>
-        )
+        <div className="p-4">
+          <AssetTradesFeed
+            trades={s.profileTrades}
+            loading={s.profileTradesLoading && s.profileTrades.length === 0}
+            emptyMessage="No trades recorded yet."
+          />
+        </div>
       ) : openPositions.length === 0 ? (
         <EmptyState title="No open positions" />
       ) : (
-        <div className="divide-y divide-border">
+        <div className="flex flex-col">
           {openPositions.map((pos) => (
             <PositionRow key={pos.row.id} position={pos.row} />
           ))}

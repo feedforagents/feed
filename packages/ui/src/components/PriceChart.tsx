@@ -43,7 +43,7 @@ export function PriceChart({
   const gradientId = useId();
   if (points.length === 0) {
     return (
-      <figure aria-label={ariaLabel} className={cn("flex flex-col gap-2 rounded-lg border border-border bg-card p-4 text-card-foreground", className)} {...props}>
+      <figure aria-label={ariaLabel} className={cn("flex flex-col gap-2 rounded-lg border border-border bg-background p-4 text-foreground", className)} {...props}>
         {title ? <figcaption className="text-sm font-semibold">{title}</figcaption> : null}
         <p className="py-8 text-center text-sm text-muted-foreground">No price history yet.</p>
       </figure>
@@ -71,7 +71,7 @@ export function PriceChart({
   const areaPath = `${linePath} L${coords[coords.length - 1].x.toFixed(1)},${height} L${coords[0].x.toFixed(1)},${height} Z`;
 
   return (
-    <figure aria-label={ariaLabel} className={cn("flex flex-col gap-3 rounded-lg border border-border bg-card p-4 text-card-foreground", className)} {...props}>
+    <figure aria-label={ariaLabel} className={cn("flex flex-col gap-3 rounded-lg border border-border bg-background p-4 text-foreground", className)} {...props}>
       <div className="flex items-baseline justify-between gap-2">
         {title ? <figcaption className="text-sm font-semibold text-foreground">{title}</figcaption> : <span className="sr-only">{ariaLabel}</span>}
         <span className={cn("font-mono text-sm font-semibold tabular-nums", toneClasses[resolvedTone])}>{formatValue(last)}</span>

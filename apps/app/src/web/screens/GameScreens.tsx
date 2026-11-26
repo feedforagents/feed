@@ -3,12 +3,12 @@ import { useState } from "react";
 import {
   Button,
   EmptyState,
-  LeaderboardTable,
-  Skeleton,
+  LeaderboardPanel,
   TradeConfirmationDialog,
   WalletPanel,
+  type LeaderboardMetric,
+  type LeaderboardSortColumn,
   type LightweightChartPoint,
-  type MarketTimeRange,
   type TradeConfirmationDetails,
   type WalletLedgerEntry,
   type WalletOpenPosition,
@@ -16,14 +16,6 @@ import {
 } from "@repo/ui";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppPosition } from "../types.ts";
-
-const RANGE_MS: Record<MarketTimeRange, number | null> = {
-  "1H": 3_600_000,
-  "4H": 14_400_000,
-  "1D": 86_400_000,
-  "1W": 604_800_000,
-  ALL: null,
-};
 
 function formatLedgerKind(kind: string): string {
   return kind
@@ -39,6 +31,11 @@ function calcLiquidationDistancePct(markCents: number, liqCents: number, side: "
   return Math.max(0, (diff / markCents) * 100);
 }
 
+function calcCeilFeePts(notionalCents: number, feeBps = 10): number {
+  if (notionalCents <= 0 || feeBps <= 0) return 0;
+  return Math.ceil((notionalCents * feeBps) / 10_000) / 100;
+}
+
 function buildCloseConfirmation(pos: AppPosition): TradeConfirmationDetails {
   if (pos.row.kind === "perp") {
     const notionalPts = pos.sizeCents / 100;
@@ -50,13 +47,14 @@ function buildCloseConfirmation(pos: AppPosition): TradeConfirmationDetails {
       leverage: pos.leverage,
       entryPrice: pos.entryPriceCents / 100,
       markPrice: pos.markPriceCents / 100,
-      estimatedFeePts: Math.max(0.01, (notionalPts * 10) / 10_000),
+      estimatedFeePts: calcCeilFeePts(pos.sizeCents, 10),
       unrealizedPnlPts: pos.unrealizedPnlCents / 100,
       unrealizedPnlPct: pos.pnlPct,
     };
   }
-  const grossProceedsPts = (pos.wholeShares * pos.currentPricePct) / 100;
-  const estimatedFeePts = Math.max(0.01, (grossProceedsPts * 10) / 10_000);
+  const grossCents = Math.max(0, pos.sizeCents);
+  const grossProceedsPts = grossCents / 100;
+  const estimatedFeePts = calcCeilFeePts(grossCents, 10);
   return {
     kind: "sell-prediction",
     question: pos.row.marketLabel,
@@ -70,6 +68,32 @@ function buildCloseConfirmation(pos: AppPosition): TradeConfirmationDetails {
   };
 }
 
+function metricToSortColumn(metric: LeaderboardMetric): LeaderboardSortColumn {
+  switch (metric) {
+    case "return_pct":
+      return "returnPct";
+    case "win_rate":
+      return "winRate";
+    case "volume":
+      return "volume";
+    case "net_profit":
+      return "netProfit";
+  }
+}
+
+function sortColumnToMetric(col: LeaderboardSortColumn): LeaderboardMetric {
+  switch (col) {
+    case "returnPct":
+      return "return_pct";
+    case "winRate":
+      return "win_rate";
+    case "volume":
+      return "volume";
+    default:
+      return "net_profit";
+  }
+}
+
 export function LeaderboardScreen() {
   const s = useAppStore();
 
@@ -77,56 +101,51 @@ export function LeaderboardScreen() {
     <div className="flex flex-col">
       <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
         <div className="flex min-w-0 items-center gap-3">
-          <h1 className="hidden text-base font-bold text-foreground md:block">Leaderboard</h1>
           <span className="truncate text-xs text-muted-foreground">
-            {s.leaderboardScope === "characters"
+            {s.leaderboardAudience === "npcs"
               ? "Autonomous NPC traders ranked by net profit"
               : "Starting capital: 100 pts — trade to climb the leaderboard"}
           </span>
         </div>
-        <Button size="sm" variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
+        <Button size="sm" variant="outline" onClick={() => { void storeActions.navigate("/markets"); }}>
           Trade Markets
         </Button>
       </header>
 
-      <div className="flex flex-col gap-4 p-4">
-        {s.leaderboardLoading && s.leaderboard.length === 0 ? (
-          <Skeleton className="h-64" />
-        ) : (
-          <LeaderboardTable
-            rows={[...s.leaderboard]}
-            scope={s.leaderboardScope}
-            onScopeChange={(scope) => {
-              void storeActions.loadLeaderboard({ scope, page: 1 });
-            }}
-            metric={s.leaderboardMetric}
-            onMetricChange={(metric) => {
-              void storeActions.loadLeaderboard({ metric, page: 1 });
-            }}
-            currentUserId={s.viewer?.accountId}
-            viewerAccountId={s.viewer?.accountId}
-            currentUserRow={s.leaderboardCurrentUser}
-            onJumpToCurrentUser={() => {
-              void storeActions.jumpToMyLeaderboardRank();
-            }}
-            page={s.leaderboardPage}
-            totalPages={s.leaderboardTotalPages}
-            totalCount={s.leaderboardTotalCount}
-            onPageChange={(page) => {
-              void storeActions.loadLeaderboard({ page });
-            }}
-            onSelectTrader={(accountId) => {
-              const found = s.leaderboard.find((r) => r.accountId === accountId)
-                ?? (s.leaderboardCurrentUser?.accountId === accountId ? s.leaderboardCurrentUser : undefined);
-              if (found) void storeActions.navigate(`/u/${encodeURIComponent(found.handle)}`);
-            }}
-            onFollow={(accountId) => {
-              const found = s.leaderboard.find((r) => r.accountId === accountId);
-              if (found) void storeActions.toggleFollow(found.handle, found.isFollowing);
-            }}
-          />
-        )}
-      </div>
+      <LeaderboardPanel
+        rows={[...s.leaderboard]}
+        audience={s.leaderboardAudience}
+        onAudienceChange={(audience) => {
+          void storeActions.loadLeaderboard({ audience, page: 1 });
+        }}
+        timeframe={s.leaderboardTimeframe}
+        onTimeframeChange={(timeframe) => {
+          void storeActions.loadLeaderboard({ timeframe, page: 1 });
+        }}
+        page={s.leaderboardPage}
+        totalPages={s.leaderboardTotalPages}
+        onPageChange={(page) => {
+          void storeActions.loadLeaderboard({ page });
+        }}
+        sortBy={metricToSortColumn(s.leaderboardMetric)}
+        sortDir="descending"
+        onSort={(col) => {
+          void storeActions.loadLeaderboard({ metric: sortColumnToMetric(col), page: 1 });
+        }}
+        viewerAccountId={s.viewer?.accountId}
+        viewerPosition={s.leaderboardCurrentUser}
+        onJumpToMyPosition={() => {
+          void storeActions.jumpToMyLeaderboardRank();
+        }}
+        onFollow={(accountId) => {
+          const found = s.leaderboard.find((r) => r.accountId === accountId);
+          if (found) void storeActions.toggleFollow(found.handle, found.isFollowing);
+        }}
+        onViewProfile={(handle) => {
+          void storeActions.navigate(`/u/${encodeURIComponent(handle)}`);
+        }}
+        loading={s.leaderboardLoading && s.leaderboard.length === 0}
+      />
     </div>
   );
 }
@@ -189,45 +208,51 @@ export function WalletScreen() {
     balanceAfterPts: row.balanceAfterCents / 100,
   }));
 
-  const rangeMs = RANGE_MS[s.pnlTimeRange];
-  const latestLedgerMs = s.ledger.reduce((acc, row) => Math.max(acc, row.createdAtMs), 0);
-  const cutoffMs = rangeMs !== null && latestLedgerMs > 0 ? latestLedgerMs - rangeMs : null;
-  const fallbackPnlHistory: LightweightChartPoint[] = [...s.ledger]
-    .filter((row) => row.createdAtMs > 0 && (cutoffMs === null || row.createdAtMs >= cutoffMs))
-    .sort((a, b) => a.createdAtMs - b.createdAtMs)
-    .map((row) => ({
-      time: row.createdAtMs,
-      value: (row.balanceAfterCents - startingGrantCents) / 100,
-    }));
+  const earliestLedgerMs = s.ledger.reduce(
+    (acc, row) => (row.createdAtMs > 0 ? Math.min(acc, row.createdAtMs) : acc),
+    Number.POSITIVE_INFINITY,
+  );
+  const latestLedgerMs = s.ledger.reduce(
+    (acc, row) => (row.createdAtMs > 0 ? Math.max(acc, row.createdAtMs) : acc),
+    0,
+  );
+  const endMs = Math.max(latestLedgerMs, s.worldStatus?.lastTickAt ?? 0);
+  const fallbackPnlHistory: LightweightChartPoint[] =
+    endMs > 0
+      ? [
+          { time: Number.isFinite(earliestLedgerMs) ? Math.min(earliestLedgerMs, endMs - 60_000) : endMs - 3_600_000, value: 0 },
+          { time: endMs, value: netProfitCents / 100 },
+        ]
+      : [];
   const pnlHistory = s.pnlHistory.length > 0 ? s.pnlHistory : fallbackPnlHistory;
 
-  const handleConfirmClose = () => {
-    if (!pendingClose) return;
+  const handleConfirmClose = async () => {
+    if (!pendingClose || s.tradeLoading) return;
     const found = pendingClose.pos;
-    setPendingClose(null);
-    if (found.row.kind === "perp") {
-      void storeActions.closePerpPosition(found.row.id);
-      return;
+    const ok = found.row.kind === "perp"
+      ? await storeActions.closePerpPosition(found.row.id)
+      : await storeActions.submitPredictionOrder(
+          found.marketId,
+          "Sell",
+          found.rawSide === "no" ? "no" : "yes",
+          found.wholeShares,
+          found.shares,
+        );
+    if (ok) {
+      setPendingClose(null);
     }
-    void storeActions.submitPredictionOrder(
-      found.marketId,
-      "Sell",
-      found.rawSide === "no" ? "no" : "yes",
-      found.wholeShares,
-      found.shares,
-    );
   };
 
   return (
     <div className="flex flex-col">
       <header className="sticky top-[53px] z-20 flex h-[53px] items-center justify-between gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:top-0">
         <div className="flex min-w-0 items-center gap-3">
-          <h1 className="text-base font-bold text-foreground">Wallet</h1>
+          <h1 className="hidden text-base font-bold text-foreground md:block">Wallet</h1>
           <span className="hidden truncate text-xs text-muted-foreground sm:inline">
             Starting capital: 100 pts — trade to climb the leaderboard
           </span>
         </div>
-        <Button size="sm" shape="pill" onClick={() => { void storeActions.navigate("/markets"); }}>
+        <Button size="sm" onClick={() => { void storeActions.navigate("/markets"); }}>
           Markets
         </Button>
       </header>
@@ -235,7 +260,7 @@ export function WalletScreen() {
       {!s.viewer ? (
         <div className="p-6">
           <EmptyState title="Sign in to view your wallet">
-            <Button shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+            <Button shape="pill" onClick={() => storeActions.openJoinSheet()}>
               Sign in &amp; claim 100 pts
             </Button>
           </EmptyState>
@@ -273,11 +298,11 @@ export function WalletScreen() {
       <TradeConfirmationDialog
         open={pendingClose !== null}
         onOpenChange={(nextOpen) => {
-          if (!nextOpen) setPendingClose(null);
+          if (!nextOpen && !s.tradeLoading) setPendingClose(null);
         }}
         details={pendingClose?.details ?? null}
         submitting={s.tradeLoading}
-        onConfirm={handleConfirmClose}
+        onConfirm={() => { void handleConfirmClose(); }}
       />
     </div>
   );

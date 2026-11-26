@@ -4,7 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices"
 import { localStoreLayer } from "@repo/db/node"
 import { migrateFeedSchema, parseStoreLocation, seedFeedWorld, type Store, type StoreFailure } from "@repo/db"
 import { realtimeBusLayer, type RealtimeBus } from "@repo/social"
-import { parseAppServerConfig, processEnvRecord } from "./config.vibe"
+import { assertAppServerConfig, parseAppServerConfig, processEnvRecord } from "./config.vibe"
 import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
 
 const SERVER_DIR = import.meta.dirname
@@ -241,10 +241,10 @@ effect function bootstrapWorld(): void!StoreFailure!Store {
 }
 
 effect function tickDaemonLoop(): void!!(Store | RealtimeBus) {
-  let cycle = 0
   try repeat(
     effect {
-      cycle += 1
+      const now = try Clock.currentTimeMillis
+      const cycle = Math.max(1, Math.floor(now / 60_000))
       try runScheduledTicks(cycle)
     },
     Schedule.spaced("60 seconds")
@@ -253,6 +253,7 @@ effect function tickDaemonLoop(): void!!(Store | RealtimeBus) {
 
 effect function startLocalFeedServer() {
   const config = parseAppServerConfig(processEnvRecord())
+  try assertAppServerConfig(config)
   const location = try parseStoreLocation(config.databaseUrl)
   if (location.kind === "pglite" && location.file !== undefined) {
     ensurePgliteParentDir(location.file)

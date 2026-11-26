@@ -1,10 +1,19 @@
 // spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"
 import { parseJsonModelRecord, readEnv } from "@elizaos/core"
-import { actors, organizations } from "@repo/pack-default"
+import { actors, organizations, type PackActor, type PackOrganization } from "@repo/pack-default"
 import { type Store, type StoreFailure } from "@repo/db"
 import { HttpClientRequest } from "effect/http"
 import { type PromptId, PromptCatalog } from "./prompts.vibe"
-import { EngineFailure, executeHttpWithTimeout, hashString, isRuntimeNpcActor, resolveClockNow, sanitizeText } from "./shared.vibe"
+import {
+  EngineFailure,
+  executeHttpWithTimeout,
+  hasFirstPersonSingularLeak,
+  hashString,
+  isRuntimeNpcActor,
+  resolveClockNow,
+  sanitizeNarrativeText,
+  sanitizeText,
+} from "./shared.vibe"
 import { confirmLlmSpend, markLlmSpendUncertain, reserveLlmBudget } from "./spend-budget.vibe"
 import { type ThrottleLevel } from "../gen/engine__spendBudget.effect.vibe"
 
@@ -144,7 +153,91 @@ function parseFirstHeldPrediction(user: string): { readonly marketId: string; re
   return null
 }
 
-function deterministicDecisionFallback(user: string, seed: number): string {
+const packActorById: ReadonlyMap<string, PackActor> = new Map(actors.map((a) => [a.id, a]))
+const packOrgById: ReadonlyMap<string, PackOrganization> = new Map(organizations.map((o) => [o.id, o]))
+const packOrgByName: ReadonlyMap<string, PackOrganization> = new Map(organizations.map((o) => [o.name.toLowerCase(), o]))
+
+function pickActorFallbackPost(actorId: string | undefined, seed: number, ticker: string | undefined): string {
+  const packActor = actorId ? packActorById.get(actorId) : undefined
+  if (packActor && packActor.postExamples.length > 0) {
+    const rich = packActor.postExamples.filter((line) => line.trim().length >= 28 && line.trim().length <= 230)
+    const pool = rich.length > 0 ? rich : packActor.postExamples
+    const picked = pool[seed % pool.length]
+    if (picked) return sanitizeNarrativeText(picked, 240)
+  }
+  const templates = [
+    ticker ? `Watching $${ticker} closely while everyone else chases yesterday's headline.` : "Everyone is looking at the wrong catalyst today.",
+    ticker ? `Still sizing up $${ticker} — the consensus narrative feels one news cycle behind.` : "Half the timeline is mistaking noise for signal again.",
+    ticker ? `Interesting divergence between $${ticker} spot flow and the prediction tape.` : "Keeping dry powder until the next real move hits the tape.",
+  ]
+  return sanitizeNarrativeText(templates[seed % templates.length] ?? templates[0]!, 240)
+}
+
+function pickOrgFallbackPost(promptId: PromptId | undefined, orgId: string | undefined, orgField: string, seed: number): string {
+  const cleanOrgName = orgField.replace(/\s*\([^)]*\)\s*$/, "").trim()
+  const packOrg =
+    (orgId ? packOrgById.get(orgId) : undefined) ??
+    (cleanOrgName ? packOrgByName.get(cleanOrgName.toLowerCase()) : undefined)
+  if (packOrg?.postExample && packOrg.postExample.length > 0) {
+    const clean = packOrg.postExample.filter((line) => line.trim().length >= 20 && !hasFirstPersonSingularLeak(line))
+    if (clean.length > 0) {
+      return sanitizeNarrativeText(clean[seed % clean.length]!, 240)
+    }
+  }
+  const displayName = packOrg?.name ?? (cleanOrgName || "Feed Wire")
+  switch (promptId) {
+    case "orgMediaPost": {
+      const lines = [
+        `BREAKING: ${displayName} sources report accelerating positioning across flagship AI and policy prediction markets.`,
+        `WIRE: Traders reprice short-dated narrative odds as major tech desks brace for the next announcement window.`,
+        `EXCLUSIVE: Industry insiders tell ${displayName} that compute supply timelines are tightening ahead of quarter-end.`,
+      ]
+      return sanitizeNarrativeText(lines[seed % lines.length]!, 240)
+    }
+    case "orgGovernmentPost": {
+      const lines = [
+        `The agency is reviewing recent market disclosures and automated infrastructure filings under standard oversight procedures.`,
+        `Official bulletin: interagency working groups continue evaluating systemic AI compute concentration and compliance standards.`,
+        `Public affairs notice: ${displayName} has opened a formal inquiry window regarding emerging sector practices.`,
+      ]
+      return sanitizeNarrativeText(lines[seed % lines.length]!, 240)
+    }
+    case "orgVcPost": {
+      const lines = [
+        `Our conviction remains unchanged: founders building real infrastructure win every cycle while tourists chase narratives.`,
+        `We back technical teams shipping faster than incumbents can schedule a committee review.`,
+        `New thesis note: distribution plus proprietary data compounds faster than raw model hype.`,
+      ]
+      return sanitizeNarrativeText(lines[seed % lines.length]!, 240)
+    }
+    case "orgFinancialPost": {
+      const lines = [
+        `Institutional allocation flows continue rotating toward liquid compute leaders as cross-asset volatility normalizes.`,
+        `Our macro desk is tracking tighter funding spreads and disciplined institutional positioning across index benchmarks.`,
+        `Capital markets note: liquidity depth remains resilient even as short-term headline risk spikes.`,
+      ]
+      return sanitizeNarrativeText(lines[seed % lines.length]!, 240)
+    }
+    case "orgFoundationPost": {
+      const lines = [
+        `Ecosystem update: core contributors published the latest protocol specification and community roadmap milestone.`,
+        `Our working group continues coordinating open standards and resilient infrastructure upgrades across the network.`,
+        `Community notice: governance discussions for the upcoming release cycle are now open for review.`,
+      ]
+      return sanitizeNarrativeText(lines[seed % lines.length]!, 240)
+    }
+    default: {
+      const lines = [
+        `Our latest platform rollout is scaling ahead of internal benchmarks as enterprise adoption accelerates.`,
+        `We remain focused on shipping next-generation reliability and customer velocity across every product line.`,
+        `Operational update: demand across our core stack continues outpacing legacy competitors.`,
+      ]
+      return sanitizeNarrativeText(lines[seed % lines.length]!, 240)
+    }
+  }
+}
+
+function deterministicDecisionFallback(user: string, seed: number, actorId: string | undefined): string {
   const tickers = extractCsvField(user, "Available Tickers")
   const marketIds = extractCsvField(user, "Available Market IDs")
   const replyIds = extractCsvField(user, "Available Reply Post IDs")
@@ -164,7 +257,8 @@ function deterministicDecisionFallback(user: string, seed: number): string {
   if (openPerpId && seed % 2 === 0) {
     actions.push({ kind: "CLOSE_PERP", positionId: openPerpId, closePct: 100 })
   } else if (ticker && seed % 2 === 0) {
-    actions.push({ kind: "PERP_TRADE", ticker, side: seed % 4 === 0 ? "short" : "long", collateralCents: 2_500, leverage: 2 + (seed % 3) })
+    const leverage = 2 + (seed % 3)
+    actions.push({ kind: "PERP_TRADE", ticker, side: seed % 4 === 0 ? "short" : "long", collateralCents: 2_500, leverage })
   }
   if (heldPred && seed % 3 === 0) {
     actions.push({ kind: "SELL_PREDICTION", marketId: heldPred.marketId, side: heldPred.side, shares: heldPred.shares })
@@ -179,17 +273,12 @@ function deterministicDecisionFallback(user: string, seed: number): string {
     actions.push({
       kind: "CREATE_REPLY",
       replyToPostId,
-      content: sanitizeText(`Watching ${ticker ?? "orderflow"} closely on this setup — liquidity looks coiled.`, 240),
+      content: pickActorFallbackPost(actorId, seed + 17, ticker),
     })
   } else {
     actions.push({
       kind: "CREATE_POST",
-      content: sanitizeText(
-        ticker
-          ? `Orderbook depth on $${ticker} looks mispriced against current prediction odds.`
-          : "Desk positioning feels crowded ahead of the next narrative turn.",
-        240,
-      ),
+      content: pickActorFallbackPost(actorId, seed, ticker),
       ...(ticker ? { ticker } : {}),
       ...(marketId ? { marketId } : {}),
     })
@@ -198,7 +287,7 @@ function deterministicDecisionFallback(user: string, seed: number): string {
     actions.push({
       kind: "SEND_GROUP_MESSAGE",
       chatId,
-      content: sanitizeText(`Desk note: tracking ${ticker ?? "index"} skew ahead of the next window.`, 240),
+      content: pickActorFallbackPost(actorId, seed + 31, ticker),
     })
   } else if (followTarget && seed % 4 === 1) {
     actions.push({ kind: "FOLLOW_USER", targetId: followTarget })
@@ -216,17 +305,25 @@ function buildDeterministicFallback(request: CompletionRequest): string {
       const outcome = extractField(request.user, "Confirmed Resolution Outcome") || "YES"
       const question = extractField(request.user, "Question") || "Prediction market settlement"
       return JSON.stringify({
-        title: `Settlement Wire: ${sanitizeText(question, 90)} resolves ${outcome}`,
-        summary: `Final wire verification confirms ${outcome} for "${sanitizeText(question, 120)}".`,
-        body: `Verified market telemetry and closing orderbook audit confirmed the final resolution outcome of ${outcome} for "${question}". Settlement payouts were distributed according to share holdings at lock.`,
+        title: `Settlement Wire: ${sanitizeNarrativeText(question, 90)} resolves ${outcome}`,
+        summary: `Final wire verification confirms ${outcome} for "${sanitizeNarrativeText(question, 120)}".`,
+        body: `Verified market telemetry and closing orderbook audit confirmed the final resolution outcome of ${outcome} for "${sanitizeNarrativeText(question, 160)}". Settlement payouts were distributed according to share holdings at lock.`,
       })
     }
     case "feedArticle": {
-      const orgName = extractField(request.user, "Media Organization") || "The Feed Wire"
+      const orgField = extractField(request.user, "Media Organization") || "The Feed Wire"
+      const orgName = orgField.replace(/\s*\([^)]*\)\s*$/, "").trim() || "The Feed Wire"
+      const headlines = [
+        `Compute Crunch: Desks Reprice Flagship AI Leaders Across Rolling Contracts`,
+        `Inside the Tape: Volatility Spikes Across Feed Index Names`,
+        `Policy Shockwaves Put Silicon Valley Prediction Odds on Edge`,
+        `Capital Flows Shift as Institutional Traders Test Leveraged Benchmarks`,
+      ]
+      const title = headlines[seed % headlines.length]!
       return JSON.stringify({
-        title: `Inside the Tape: Volatility Spikes Across Feed Index Names`,
-        summary: `${sanitizeText(orgName, 40)} examines surging retail and desk volume across rolling markets.`,
-        body: `${orgName} sources report brisk two-way positioning as traders reprice short-dated narrative contracts and spot-linked perpetuals across major Feed tickers.`,
+        title,
+        summary: `${sanitizeText(orgName, 40)} examines shifting desk positioning and headline catalysts across active Feed markets.`,
+        body: `${orgName} sources report brisk two-way positioning as traders reprice short-dated narrative contracts and spot-linked perpetuals across major Feed organizations.`,
       })
     }
     case "worldFactsConsolidation":
@@ -237,37 +334,52 @@ function buildDeterministicFallback(request: CompletionRequest): string {
         ],
       })
     case "npcTradingDecision":
-      return deterministicDecisionFallback(request.user, seed)
+      return deterministicDecisionFallback(request.user, seed, request.actorId)
     case "rssParodyRewrite": {
-      const headline = extractField(request.user, "Original Headline") || "Tech valuations climb on AI capex"
-      return sanitizeText(`OpenAGI insiders claim "${headline}" is actually a 4D liquidity catalyst`, 155)
+      const rawHeadline = sanitizeNarrativeText(extractField(request.user, "Original Headline") || "Tech valuations climb on AI capex", 110)
+      const orgs = organizations.filter((o) => o.type === "company" || o.type === "media")
+      const orgName = orgs[seed % Math.max(1, orgs.length)]?.name ?? "OpenAGI"
+      const patterns = [
+        `${orgName} insiders spin "${rawHeadline}" as inevitable 10x roadmap milestone`,
+        `Silicon Valley desks react as "${rawHeadline}" triggers fresh prediction-market bets`,
+        `Sources say "${rawHeadline}" has rival executives frantically rewriting Q3 decks`,
+      ]
+      return sanitizeNarrativeText(patterns[seed % patterns.length]!, 155)
     }
     case "cluePost": {
       const question = extractField(request.user, "Market Question") || "the active catalyst"
       const phase = extractField(request.user, "Narrative Phase") || "opening"
       const signalTone = extractField(request.user, "Signal Guidance")
       const toneLine = signalTone.includes("bullish")
-        ? "Channel checks are quietly firming up — upside flow feels underpriced."
+        ? "Quiet channel checks are firming up — upside still feels underpriced."
         : signalTone.includes("skeptical")
           ? "Back-channel checks sound shaky — skepticism is building into the close."
-          : "Spreads are still wide and both sides are fighting for control."
-      return sanitizeText(`${phase} tape check on "${sanitizeText(question, 95)}": ${toneLine}`, 240)
+          : "Both sides are digging in and spreads are still wide."
+      return sanitizeNarrativeText(`${phase} read on "${sanitizeNarrativeText(question, 95)}": ${toneLine}`, 240)
     }
     case "alphaGroupMessage": {
       const chatName = extractField(request.user, "Chat") || "Alpha Desk"
-      return sanitizeText(`[${chatName}] Watching spot-to-perp basis tighten ahead of next market turn.`, 240)
+      return sanitizeNarrativeText(`[${chatName}] ${pickActorFallbackPost(request.actorId, seed, undefined)}`, 240)
     }
-    case "orgPost": {
-      const orgName = extractField(request.user, "Organization") || "Feed Corp"
-      return sanitizeText(`${orgName} update: systems humming at peak theatrical velocity while critics watch the tape.`, 240)
+    case "orgPost":
+    case "orgMediaPost":
+    case "orgCompanyPost":
+    case "orgGovernmentPost":
+    case "orgVcPost":
+    case "orgFinancialPost":
+    case "orgFoundationPost": {
+      const orgField = extractField(request.user, "Organization") || "Feed Corp"
+      return pickOrgFallbackPost(request.promptId, request.actorId, orgField, seed)
     }
     case "replyPost":
-      return sanitizeText("Interesting read — check the spot pool depth before pressing leverage here.", 230)
+    case "ambientPost":
+    case "commentary":
+      return pickActorFallbackPost(request.actorId, seed, undefined)
     default:
       return sanitizeText(
         request.jsonMode
           ? JSON.stringify({ status: "ok", note: "deterministic-local" })
-          : "Keeping dry powder ready while spot and prediction odds diverge.",
+          : pickActorFallbackPost(request.actorId, seed, undefined),
         240,
       )
   }
