@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { deletePost, loadProfile, loadProfileReplies, removePostAcrossStore } from "../src/web/store-world.ts";
-import type { ViewerSession } from "../src/web/types.ts";
+import { makeViewerSession } from "./app-test-helpers.tsx";
 
 const createdAt = Date.now() - 60_000;
 
@@ -59,24 +59,7 @@ function profileRaw(postsCount: number, posts: ReadonlyArray<Record<string, unkn
   };
 }
 
-const aliceViewer: ViewerSession = {
-  accountId: "alice",
-  handle: "alice",
-  displayName: "Alice Player",
-  bio: "",
-  avatarUrl: null,
-  bannerUrl: null,
-  phoneLast2: null,
-  phoneVerifiedAt: null,
-  emailMasked: null,
-  emailVerifiedAt: null,
-  uiMode: "game",
-  balanceCents: 0,
-  startingGrantCents: 0,
-  isAdmin: false,
-  isReviewer: false,
-  agentGrant: null,
-};
+const aliceViewer = makeViewerSession();
 
 function signInAsAlice(): void {
   setStoreState({

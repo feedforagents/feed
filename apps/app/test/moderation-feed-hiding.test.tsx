@@ -2,7 +2,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { toggleBlock } from "../src/web/store-world.ts";
-import { decodePost, type AppPost, type ViewerSession } from "../src/web/types.ts";
+import { decodePost, type AppPost } from "../src/web/types.ts";
+import { makeViewerSession } from "./app-test-helpers.tsx";
 
 function rawPost(overrides: Record<string, unknown>): AppPost {
   const post = decodePost({
@@ -29,24 +30,7 @@ function rawPost(overrides: Record<string, unknown>): AppPost {
   return post;
 }
 
-const aliceViewer: ViewerSession = {
-  accountId: "alice",
-  handle: "alice",
-  displayName: "Alice Player",
-  bio: "",
-  avatarUrl: null,
-  bannerUrl: null,
-  phoneLast2: null,
-  phoneVerifiedAt: null,
-  emailMasked: null,
-  emailVerifiedAt: null,
-  uiMode: "game",
-  balanceCents: 10_000,
-  startingGrantCents: 10_000,
-  isAdmin: false,
-  isReviewer: false,
-  agentGrant: null,
-};
+const aliceViewer = makeViewerSession({ balanceCents: 10_000, startingGrantCents: 10_000 });
 
 function moderationPosts() {
   return {

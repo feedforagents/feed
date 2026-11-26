@@ -295,34 +295,35 @@ effect function connectOAuthGrant(input: {
   })
 }
 
-effect function seedGameNotifications(accountId: string) {
+effect function insertFeedNotifications(valuesSql: string, params: ReadonlyArray<unknown>) {
   const store = try Store
-  const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
     try tx.query(
       `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
-       VALUES
-         ($1, $3, 'market_resolved', NULL, NULL, 'seed-market-1', 'Market resolved', 'Prediction market settled.', true, NULL, $4),
-         ($2, $3, 'pnl_digest', NULL, NULL, NULL, 'Daily P&L', 'Your virtual points summary.', true, NULL, $5)`,
-      [`notif-market-${accountId}`, `notif-pnl-${accountId}`, accountId, now + 1, now + 2]
+       VALUES ${valuesSql}`,
+      params
     )
   })
 }
 
-effect function seedUnreadPageNotifications(accountId: string, actorId: string) {
-  const store = try Store
+effect function seedGameNotifications(accountId: string) {
   const now = try Clock.currentTimeMillis
-  try store.transaction(effect (tx: Tx) => {
-    try tx.query(
-      `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
-       VALUES
-         ($1, $3, 'mention', $4, NULL, NULL, 'Unread mention', 'Someone mentioned you.', false, NULL, $5),
-         ($2, $3, 'mention', $4, NULL, NULL, 'Unread mention', 'Someone else mentioned you.', false, NULL, $6),
-         ($7, $3, 'like', $4, NULL, NULL, 'Read like', 'Someone liked your post.', false, $8, $9),
-         ($10, $3, 'like', $4, NULL, NULL, 'Read like', 'Someone else liked your post.', false, $11, $12)`,
-      [`notif-unread-old-${accountId}`, `notif-unread-new-${accountId}`, accountId, actorId, now + 10000, now + 20000, `notif-read-old-${accountId}`, now + 100000, now + 100000, `notif-read-new-${accountId}`, now + 110000, now + 110000]
-    )
-  })
+  try insertFeedNotifications(
+    `($1, $3, 'market_resolved', NULL, NULL, 'seed-market-1', 'Market resolved', 'Prediction market settled.', true, NULL, $4),
+     ($2, $3, 'pnl_digest', NULL, NULL, NULL, 'Daily P&L', 'Your virtual points summary.', true, NULL, $5)`,
+    [`notif-market-${accountId}`, `notif-pnl-${accountId}`, accountId, now + 1, now + 2]
+  )
+}
+
+effect function seedUnreadPageNotifications(accountId: string, actorId: string) {
+  const now = try Clock.currentTimeMillis
+  try insertFeedNotifications(
+    `($1, $3, 'mention', $4, NULL, NULL, 'Unread mention', 'Someone mentioned you.', false, NULL, $5),
+     ($2, $3, 'mention', $4, NULL, NULL, 'Unread mention', 'Someone else mentioned you.', false, NULL, $6),
+     ($7, $3, 'like', $4, NULL, NULL, 'Read like', 'Someone liked your post.', false, $8, $9),
+     ($10, $3, 'like', $4, NULL, NULL, 'Read like', 'Someone else liked your post.', false, $11, $12)`,
+    [`notif-unread-old-${accountId}`, `notif-unread-new-${accountId}`, accountId, actorId, now + 10000, now + 20000, `notif-read-old-${accountId}`, now + 100000, now + 100000, `notif-read-new-${accountId}`, now + 110000, now + 110000]
+  )
   return {
     unreadIds: [`notif-unread-new-${accountId}`, `notif-unread-old-${accountId}`],
     readIds: [`notif-read-new-${accountId}`, `notif-read-old-${accountId}`],
@@ -1170,24 +1171,88 @@ it.effect('MCP start_sign_in enforces the same 30/hr per-IP device-code budget a
   ))
 }))
 
+effect function seedTestPerp(tx: Tx, ticker: string, now: number) {
+  try tx.query(
+    "INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (ticker) DO NOTHING",
+    [ticker, 100, 100, now]
+  )
+}
+
+effect function seedTestArticle(
+  tx: Tx,
+  article: {
+    readonly id: string
+    readonly title: string
+    readonly summary: string
+    readonly body: string
+    readonly relatedMarketId: string | null
+    readonly isResolutionProof: boolean
+    readonly publishedAt: number
+  }
+) {
+  try tx.query(
+    "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    [
+      article.id,
+      article.title,
+      article.summary,
+      article.body,
+      "the-new-york-taimes",
+      article.relatedMarketId,
+      article.isResolutionProof,
+      article.publishedAt
+    ]
+  )
+}
+
+effect function seedFillerArticles(tx: Tx, count: number, now: number) {
+  for (let i = 1; i <= count; i += 1) {
+    try seedTestArticle(tx, {
+      id: `filler-article-${i}`,
+      title: `Filler article ${i}`,
+      summary: "Filler summary",
+      body: "Filler body",
+      relatedMarketId: null,
+      isResolutionProof: false,
+      publishedAt: now + i
+    })
+  }
+}
+
+effect function getRelatedMarketArticles(
+  reqId: number,
+  args: Record<string, unknown>,
+  authConfig: Parameters<typeof callMcpTool>[3]
+) {
+  const res = try callMcpTool(reqId, "get_market", args, authConfig)
+  const payload = unwrapToolPayload(res)
+  return (payload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+}
+
+effect function runSeededTx<E, R>(run: (tx: Tx, now: number) => Effect.Effect<void, E, R>) {
+  const now = try Clock.currentTimeMillis
+  const store = try Store
+  try store.transaction(effect (tx: Tx) => {
+    try run(tx, now)
+  })
+}
+
 it.effect(
   'get_market returns related articles for a perp ticker (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
   () => withSeededWorld(effect (authConfig) => {
-    const now = try Clock.currentTimeMillis
-    const store = try Store
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        "INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (ticker) DO NOTHING",
-        ["OPENAGI", 100, 100, now]
-      )
-      try tx.query(
-        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        ["perp-related-article", "OpenAGI perp scoop", "OpenAGI perp summary", "OpenAGI perp body", "the-new-york-taimes", "seed-market-1", false, now]
-      )
+    try runSeededTx(effect (tx, now) => {
+      try seedTestPerp(tx, "OPENAGI", now)
+      try seedTestArticle(tx, {
+        id: "perp-related-article",
+        title: "OpenAGI perp scoop",
+        summary: "OpenAGI perp summary",
+        body: "OpenAGI perp body",
+        relatedMarketId: "seed-market-1",
+        isResolutionProof: false,
+        publishedAt: now
+      })
     })
-    const marketRes = try callMcpTool(201, "get_market", { marketId: "OPENAGI", kind: "perp" }, authConfig)
-    const marketPayload = unwrapToolPayload(marketRes)
-    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    const relatedArticles = try getRelatedMarketArticles(201, { marketId: "OPENAGI", kind: "perp" }, authConfig)
     try check(() => {
       assert.strictEqual(relatedArticles.some((a) => a.id === "perp-related-article"), true)
     })
@@ -1197,32 +1262,28 @@ it.effect(
 it.effect(
   'get_market does not return a memecoin-index article for the COIN perp (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
   () => withSeededWorld(effect (authConfig) => {
-    const now = try Clock.currentTimeMillis
-    const store = try Store
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        "INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (ticker) DO NOTHING",
-        ["COIN", 100, 100, now]
-      )
+    try runSeededTx(effect (tx, now) => {
+      try seedTestPerp(tx, "COIN", now)
       try tx.query(
         "INSERT INTO feed_prediction_markets (id, slot_index, question, description, category, timeframe, phase, yes_shares, no_shares, liquidity_cents, secret_outcome, status, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, 'opening', 50000, 50000, 50000, $7, 'open', $8, $9)",
         ["perp-memecoin-market", 99, "Will the memecoin index rise this hour?", "Resolves YES if the memecoin index closes higher at the end of the hour.", "crypto", "1h", "YES", now + 3600000, now]
       )
-      try tx.query(
-        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        ["perp-memecoin-article", "Memecoin index watch", "Memecoin index summary", "Memecoin index body", "the-new-york-taimes", "perp-memecoin-market", false, now]
-      )
+      try seedTestArticle(tx, {
+        id: "perp-memecoin-article",
+        title: "Memecoin index watch",
+        summary: "Memecoin index summary",
+        body: "Memecoin index body",
+        relatedMarketId: "perp-memecoin-market",
+        isResolutionProof: false,
+        publishedAt: now
+      })
     })
-    const marketRes = try callMcpTool(202, "get_market", { marketId: "COIN", kind: "perp" }, authConfig)
-    const marketPayload = unwrapToolPayload(marketRes)
-    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    const relatedArticles = try getRelatedMarketArticles(202, { marketId: "COIN", kind: "perp" }, authConfig)
     try check(() => {
       assert.strictEqual(relatedArticles.some((a) => a.id === "perp-memecoin-article"), false)
       assert.strictEqual(relatedArticles.some((a) => a.id === "seed-article-4"), true)
     })
-    const fallbackRes = try callMcpTool(203, "get_market", { marketId: "COIN", kind: "prediction" }, authConfig)
-    const fallbackPayload = unwrapToolPayload(fallbackRes)
-    const fallbackArticles = (fallbackPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    const fallbackArticles = try getRelatedMarketArticles(203, { marketId: "COIN", kind: "prediction" }, authConfig)
     try check(() => {
       assert.strictEqual(fallbackArticles.some((a) => a.id === "perp-memecoin-article"), false)
       assert.strictEqual(fallbackArticles.some((a) => a.id === "seed-article-4"), true)
@@ -1248,27 +1309,28 @@ it.effect('list_markets with status resolved returns no perp markets', () =>
 it.effect(
   'get_market returns a related article older than the 50 newest articles (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
   () => withSeededWorld(effect (authConfig) => {
-    const now = try Clock.currentTimeMillis
-    const store = try Store
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        ["buried-market-article", "Buried market scoop", "Buried summary", "Buried body", "the-new-york-taimes", "seed-market-1", false, now - 1_000_000]
-      )
-      try tx.query(
-        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        ["buried-proof-article", "Unreleased proof", "Proof summary", "Proof body", "the-new-york-taimes", "seed-market-1", true, now - 2_000_000]
-      )
-      for (let i = 1; i <= 60; i += 1) {
-        try tx.query(
-          "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
-          [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
-        )
-      }
+    try runSeededTx(effect (tx, now) => {
+      try seedTestArticle(tx, {
+        id: "buried-market-article",
+        title: "Buried market scoop",
+        summary: "Buried summary",
+        body: "Buried body",
+        relatedMarketId: "seed-market-1",
+        isResolutionProof: false,
+        publishedAt: now - 1_000_000
+      })
+      try seedTestArticle(tx, {
+        id: "buried-proof-article",
+        title: "Unreleased proof",
+        summary: "Proof summary",
+        body: "Proof body",
+        relatedMarketId: "seed-market-1",
+        isResolutionProof: true,
+        publishedAt: now - 2_000_000
+      })
+      try seedFillerArticles(tx, 60, now)
     })
-    const marketRes = try callMcpTool(201, "get_market", { marketId: "seed-market-1" }, authConfig)
-    const marketPayload = unwrapToolPayload(marketRes)
-    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    const relatedArticles = try getRelatedMarketArticles(201, { marketId: "seed-market-1" }, authConfig)
     try check(() => {
       assert.strictEqual(relatedArticles.some((a) => a.id === "buried-market-article"), true)
       assert.strictEqual(relatedArticles.every((a) => a.relatedMarketId === "seed-market-1"), true)
@@ -1304,19 +1366,17 @@ it.effect(
 it.effect(
   'search returns articles older than the 50 newest (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
   () => withSeededWorld(effect (authConfig) => {
-    const now = try Clock.currentTimeMillis
-    const store = try Store
-    try store.transaction(effect (tx: Tx) => {
-      try tx.query(
-        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
-        ["buried-article-1", "Buried Quibberton scoop", "Quibberton summary", "Quibberton body", "the-new-york-taimes", null, now - 1_000_000]
-      )
-      for (let i = 1; i <= 60; i += 1) {
-        try tx.query(
-          "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
-          [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
-        )
-      }
+    try runSeededTx(effect (tx, now) => {
+      try seedTestArticle(tx, {
+        id: "buried-article-1",
+        title: "Buried Quibberton scoop",
+        summary: "Quibberton summary",
+        body: "Quibberton body",
+        relatedMarketId: null,
+        isResolutionProof: false,
+        publishedAt: now - 1_000_000
+      })
+      try seedFillerArticles(tx, 60, now)
     })
     const searchRes = try callMcpTool(201, "search", { query: "Quibberton", kind: "articles", limit: 10 }, authConfig)
     const searchPayload = unwrapToolPayload(searchRes)
