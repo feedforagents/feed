@@ -1,0 +1,135 @@
+// spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
+import {
+  blockAccount,
+  getProfile,
+  realtimeBusLayer,
+  unblockAccount,
+} from "../src/index.vibe"
+
+effect function execTx(sql: string, params: ReadonlyArray<unknown> = []) {
+  const store = try Store
+  return try store.transaction((tx: Tx) => tx.query(sql, params))
+}
+
+it.effect(
+  'getProfile suppresses tradeCount and openPositionCount across mutual user and NPC blocks while preserving unblocked GameMode and self views (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => effect {
+    try TestClock.setTime(1_760_000_500_000)
+    provide Layer.merge(
+      Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })),
+      Layer.fresh(realtimeBusLayer),
+    ) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const npcRows = try execTx("SELECT id, username FROM feed_actors ORDER BY id ASC LIMIT 1")
+      const npcId = toText(npcRows[0]?.id) ?? ""
+      const npcHandle = toText(npcRows[0]?.username) ?? ""
+
+      try execTx(
+        `INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at)
+         VALUES
+           ('pbc-alice', 'pbc_alice', 'Alice', '', 'game', 10000, $1, $1),
+           ('pbc-bob', 'pbc_bob', 'Bob', '', 'game', 10000, $1, $1)`,
+        [1_760_000_500_000],
+      )
+
+      const perpRows = try execTx("SELECT ticker FROM feed_perp_markets ORDER BY ticker ASC LIMIT 1")
+      const perpTicker = toText(perpRows[0]?.ticker) ?? ""
+
+      try execTx(
+        `INSERT INTO feed_trades (id, trader_id, trader_kind, market_kind, market_ref, side, shares_or_size, price_cents, notional_cents, fee_cents, created_at)
+         VALUES
+           ('pbc-t1', 'pbc-alice', 'user', 'prediction', 'seed-market-1', 'buy_yes', 400, 50, 200, 2, $1),
+           ('pbc-t2', 'pbc-alice', 'user', 'perp', $3, 'open_long', 600, 1000, 600, 3, $1),
+           ('pbc-t3', 'pbc-bob', 'user', 'prediction', 'seed-market-1', 'buy_no', 200, 50, 100, 1, $1),
+           ('pbc-t4', $2, 'npc', 'prediction', 'seed-market-1', 'buy_yes', 500, 50, 250, 0, $1)`,
+        [1_760_000_500_000, npcId, perpTicker],
+      )
+
+      try execTx(
+        `INSERT INTO feed_prediction_positions (market_id, holder_id, holder_kind, side, shares, cost_basis_cents, settled_at, payout_cents)
+         VALUES
+           ('seed-market-1', 'pbc-alice', 'user', 'YES', 400, 200, NULL, 0),
+           ('seed-market-1', 'pbc-bob', 'user', 'NO', 200, 100, NULL, 0),
+           ('seed-market-1', $1, 'npc', 'YES', 500, 250, NULL, 0)`,
+        [npcId],
+      )
+
+      try execTx(
+        `INSERT INTO feed_perp_positions (id, ticker, holder_id, holder_kind, side, margin_cents, size_cents, entry_price_cents, leverage, status, created_at)
+         VALUES ('pbc-perp-1', $1, 'pbc-alice', 'user', 'LONG', 300, 600, 1000, 2, 'open', $2)`,
+        [perpTicker, 1_760_000_500_000],
+      )
+
+      const unblockedBobViewsAlice = try getProfile("pbc_alice", "pbc-bob", "game")
+      const unblockedBobViewsNpc = try getProfile(npcHandle, "pbc-bob", "game")
+      const anonGameViewsAlice = try getProfile("pbc_alice", undefined, "game")
+      const socialModeViewsAlice = try getProfile("pbc_alice", "pbc-bob", "social")
+
+      try blockAccount("pbc-alice", "pbc_bob")
+      const bobViewsAliceWhileBlockedBy = try getProfile("pbc_alice", "pbc-bob", "game")
+      const aliceViewsBobWhileBlocking = try getProfile("pbc_bob", "pbc-alice", "game")
+      const aliceSelfWhileBlocking = try getProfile("pbc_alice", "pbc-alice", "game")
+      const bobSelfWhileBlocked = try getProfile("pbc_bob", "pbc-bob", "game")
+
+      try unblockAccount("pbc-alice", "pbc_bob")
+      const bobViewsAliceAfterUnblock = try getProfile("pbc_alice", "pbc-bob", "game")
+
+      try blockAccount("pbc-bob", npcHandle)
+      const bobViewsNpcWhileBlocking = try getProfile(npcHandle, "pbc-bob", "game")
+
+      try orDie(
+        Effect.try(() => {
+          assert.deepStrictEqual(
+            {
+              unblockedBobViewsAlice: [unblockedBobViewsAlice.tradeCount, unblockedBobViewsAlice.openPositionCount],
+              unblockedBobViewsNpcPositive:
+                (unblockedBobViewsNpc.tradeCount ?? 0) >= 1 && (unblockedBobViewsNpc.openPositionCount ?? 0) >= 1,
+              anonGameViewsAlice: [anonGameViewsAlice.tradeCount, anonGameViewsAlice.openPositionCount],
+              socialModeViewsAlice: [socialModeViewsAlice.tradeCount, socialModeViewsAlice.openPositionCount],
+              bobViewsAliceWhileBlockedBy: [
+                bobViewsAliceWhileBlockedBy.viewerBlockedBy,
+                bobViewsAliceWhileBlockedBy.tradeCount,
+                bobViewsAliceWhileBlockedBy.openPositionCount,
+              ],
+              aliceViewsBobWhileBlocking: [
+                aliceViewsBobWhileBlocking.viewerBlocks,
+                aliceViewsBobWhileBlocking.tradeCount,
+                aliceViewsBobWhileBlocking.openPositionCount,
+              ],
+              aliceSelfWhileBlocking: [aliceSelfWhileBlocking.tradeCount, aliceSelfWhileBlocking.openPositionCount],
+              bobSelfWhileBlocked: [bobSelfWhileBlocked.tradeCount, bobSelfWhileBlocked.openPositionCount],
+              bobViewsAliceAfterUnblock: [
+                bobViewsAliceAfterUnblock.tradeCount,
+                bobViewsAliceAfterUnblock.openPositionCount,
+              ],
+              bobViewsNpcWhileBlocking: [
+                bobViewsNpcWhileBlocking.viewerBlocks,
+                bobViewsNpcWhileBlocking.tradeCount,
+                bobViewsNpcWhileBlocking.openPositionCount,
+              ],
+            },
+            {
+              unblockedBobViewsAlice: [2, 2],
+              unblockedBobViewsNpcPositive: true,
+              anonGameViewsAlice: [2, 2],
+              socialModeViewsAlice: [null, null],
+              bobViewsAliceWhileBlockedBy: [true, null, null],
+              aliceViewsBobWhileBlocking: [true, null, null],
+              aliceSelfWhileBlocking: [2, 2],
+              bobSelfWhileBlocked: [1, 1],
+              bobViewsAliceAfterUnblock: [2, 2],
+              bobViewsNpcWhileBlocking: [true, null, null],
+            },
+          )
+        }),
+      )
+    }
+  },
+  60_000,
+)
