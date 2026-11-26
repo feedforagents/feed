@@ -1695,6 +1695,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       }
     })
     let postRows: ReadonlyArray<Row>
+    let tagCountRows: ReadonlyArray<Row>
     if ((isHashtagQuery || isCashtagQuery) && entityQuery !== "") {
       const escapedTag = escapeRegExp(entityQuery)
       const tagRegex = isHashtagQuery
@@ -1720,6 +1721,10 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         `SELECT p.* FROM feed_posts p WHERE ${tagConditions.join(" AND ")} ORDER BY p.created_at DESC LIMIT $${tagParams.length}`,
         tagParams
       )
+      tagCountRows = try tx.query(
+        `SELECT p.content, p.ticker FROM feed_posts p WHERE ${tagConditions.join(" AND ")}`,
+        tagParams.slice(0, -1)
+      )
     } else {
       const postParams: unknown[] = [rawLikePattern, entityLikePattern]
       const authorMatchClause = matchedAuthorIds.length > 0
@@ -1728,25 +1733,29 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       const postMatch = mode === "social"
         ? `(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\'${authorMatchClause}) AND ${socialModeMarketExclusionSql("p")}`
         : `(p.content ILIKE $1 ESCAPE '\\' OR p.content ILIKE $2 ESCAPE '\\' OR p.ticker ILIKE $2 ESCAPE '\\'${authorMatchClause})`
-      if (viewerId === undefined) {
-        postParams.push(limit)
-        postRows = try tx.query(
-          `SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} ORDER BY p.created_at DESC LIMIT $${postParams.length}`,
-          postParams
-        )
-      } else {
-        postParams.push(viewerId, limit)
-        postRows = try tx.query(
-          `SELECT p.* FROM feed_posts p WHERE p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql(`$${postParams.length - 1}`, "p.author_id")} ORDER BY p.created_at DESC LIMIT $${postParams.length}`,
-          postParams
-        )
+      const plainWhere = viewerId === undefined
+        ? `p.deleted_at IS NULL AND ${postMatch}`
+        : `p.deleted_at IS NULL AND ${postMatch} AND ${viewerAuthorVisibilitySql(`$${postParams.length + 1}`, "p.author_id")}`
+      if (viewerId !== undefined) {
+        postParams.push(viewerId)
       }
+      postParams.push(limit)
+      postRows = try tx.query(
+        `SELECT p.* FROM feed_posts p WHERE ${plainWhere} ORDER BY p.created_at DESC LIMIT $${postParams.length}`,
+        postParams
+      )
+      tagCountRows = try tx.query(
+        `SELECT p.content, p.ticker FROM feed_posts p WHERE ${plainWhere}`,
+        postParams.slice(0, -1)
+      )
     }
     const posts = try hydratePostRowsTx(tx, postRows, viewerId, mode)
     const cleanedTag = entityQuery
     const tagCounts = new Map<string, SearchTagResult>()
-    for (const post of posts) {
-      for (const hashtag of post.hashtags) {
+    for (const tagRow of tagCountRows) {
+      const tagContent = toText(tagRow.content) ?? ""
+      const tagTicker = toText(tagRow.ticker) ?? null
+      for (const hashtag of extractHashtags(tagContent)) {
         if (cleanedTag === "" || hashtag.includes(cleanedTag)) {
           const key = `hashtag:${hashtag}`
           const current = tagCounts.get(key)
@@ -1754,7 +1763,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
         }
       }
       if (mode === "game") {
-        for (const cashtag of post.cashtags) {
+        for (const cashtag of extractCashtags(tagContent, tagTicker)) {
           if (cleanedTag === "" || cashtag.toLowerCase().includes(cleanedTag)) {
             const key = `ticker:${cashtag}`
             const current = tagCounts.get(key)
