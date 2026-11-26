@@ -1,0 +1,250 @@
+// spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"
+import { assert, it } from "@effect/vitest"
+import {
+  completePhoneOnboarding,
+  getLoopbackCode,
+  startPhoneVerification,
+  verifyPhoneCode,
+} from "@repo/auth"
+import { migrateFeedSchema, seedFeedWorld } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { realtimeBusLayer } from "@repo/social"
+import { TestClock } from "effect/testing"
+import { parseAppServerConfig } from "../src/server/config.vibe"
+import { handleFeedRequest } from "../src/server/router.vibe"
+
+module fetchHarness {
+  export interface MockFetchRoute {
+    readonly status: number
+    readonly jsonBody: unknown
+  }
+
+  /** @throws {never} */
+  export function installMockFetch(
+    routes: Readonly<Record<string, MockFetchRoute>>,
+    hits: Array<string>,
+  ): () => void {
+    const original = globalThis.fetch
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const targetUrl = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      hits.push(targetUrl)
+      const matched = routes[targetUrl]
+      if (matched !== undefined) {
+        return new Response(JSON.stringify(matched.jsonBody), {
+          status: matched.status,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (targetUrl.startsWith("http://cimd-device.local")) {
+        return original(input, init)
+      }
+      return new Response(JSON.stringify({ error: "not_found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    return () => {
+      globalThis.fetch = original
+    }
+  }
+
+  /** @throws {never} */
+  export function buildReq(url: string, method: string, body?: unknown, cookie?: string): Request {
+    const headers = new Headers()
+    if (body !== undefined) headers.set("content-type", "application/json")
+    if (cookie !== undefined) headers.set("cookie", cookie)
+    return new Request(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  }
+}
+import { buildReq, installMockFetch } from fetchHarness
+
+const ORIGIN = "http://cimd-device.local"
+const SERVER_CFG = parseAppServerConfig(
+  {
+    DEPLOYMENT_ENV: "localnet",
+    PUBLIC_APP_URL: ORIGIN,
+    PUBLIC_API_URL: ORIGIN,
+    SMS_MODE: "loopback",
+    EMAIL_MODE: "loopback",
+    AUTH_DIGEST_KEY: "cimd-digest-key-11111111111111111111111111111111",
+    OAUTH_SIGNING_SECRET: "cimd-oauth-secret-11111111111111111111111111111",
+    CRON_SECRET: "cimd-cron-secret",
+  },
+  ORIGIN,
+)
+
+error ParseJsonErr { reason: string }
+
+effect function decodeBody(res: Response) {
+  return try tryPromise({
+    try: () => res.json() as Promise<Record<string, unknown>>,
+    catch: () => new ParseJsonErr({ reason: "bad_json" }),
+  })
+}
+
+it.effect('Device authorization enforces CIMD metadata verification on URL client_ids and ignores spoofed client_name values (spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent")', () => scoped(effect {
+  const startNow = Date.now()
+  try TestClock.setTime(startNow)
+  const fetchHits: string[] = []
+  const verifiedCimdUrl = "https://verified-agent.example/oauth/client.json"
+  try acquireRelease(
+    sync(() =>
+      installMockFetch(
+        {
+          [verifiedCimdUrl]: {
+            status: 200,
+            jsonBody: {
+              client_id: verifiedCimdUrl,
+              client_name: "Verified Example Agent",
+              redirect_uris: ["https://verified-agent.example/callback"],
+              token_endpoint_auth_method: "none",
+            },
+          },
+          "https://mismatch-agent.example/oauth/client.json": {
+            status: 200,
+            jsonBody: {
+              client_id: "https://other-agent.example/oauth/client.json",
+              client_name: "Mismatched Agent",
+              redirect_uris: ["https://other-agent.example/callback"],
+              token_endpoint_auth_method: "none",
+            },
+          },
+        },
+        fetchHits,
+      ),
+    ),
+    (restore) => sync(restore),
+  )
+
+  provide Layer.merge(
+    Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })),
+    Layer.fresh(realtimeBusLayer),
+  ) {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+
+    const phone = "+14155550189"
+    try startPhoneVerification({ phoneE164: phone, config: SERVER_CFG.auth })
+    const smsCode = getLoopbackCode(phone, SERVER_CFG.auth) ?? ""
+    const verifiedPhone = try verifyPhoneCode({ phoneE164: phone, code: smsCode, config: SERVER_CFG.auth })
+    if (!verifiedPhone.needsOnboarding) return try Effect.die("expected onboarding")
+    const onboarded = try completePhoneOnboarding({
+      pendingToken: verifiedPhone.pendingToken,
+      username: "cimd_player",
+      accepted18Plus: true,
+      acceptedTerms: true,
+      config: SERVER_CFG.auth,
+    })
+    const sessionCookie = onboarded.sessionCookieHeader.split(";")[0]?.trim() ?? ""
+
+    const unownedSpoofRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/device/code`, "POST", {
+        client_id: "https://unowned-agent.example/oauth/client.json",
+        client_name: "Spoofed Official Agent",
+      }),
+      SERVER_CFG,
+    )
+    const unownedSpoofBody = try decodeBody(unownedSpoofRes)
+
+    const hitsBeforeLocalhost = fetchHits.length
+    const localhostSpoofRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/device`, "POST", {
+        client_id: "https://localhost:9443/oauth/client.json",
+        client_name: "Internal Loopback Spoof",
+      }),
+      SERVER_CFG,
+    )
+    const localhostSpoofBody = try decodeBody(localhostSpoofRes)
+
+    const plainHttpSpoofRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/device/code`, "POST", {
+        client_id: "http://verified-agent.example/oauth/client.json",
+        client_name: "Plaintext HTTP Spoof",
+      }),
+      SERVER_CFG,
+    )
+    const plainHttpSpoofBody = try decodeBody(plainHttpSpoofRes)
+
+    const mismatchRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/device/code`, "POST", {
+        client_id: "https://mismatch-agent.example/oauth/client.json",
+        client_name: "Spoofed Mismatch",
+      }),
+      SERVER_CFG,
+    )
+    const mismatchBody = try decodeBody(mismatchRes)
+    const hitsAfterPreChecks = fetchHits.length
+
+    const uppercaseVerifiedRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/device/code`, "POST", {
+        client_id: "HTTPS://verified-agent.example/oauth/client.json",
+        client_name: "Attacker Overridden Name",
+      }),
+      SERVER_CFG,
+    )
+    const uppercaseVerifiedBody = try decodeBody(uppercaseVerifiedRes)
+    const userCode = String(uppercaseVerifiedBody.user_code ?? "")
+    const deviceCode = String(uppercaseVerifiedBody.device_code ?? "")
+
+    const lookupRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/api/oauth/device/lookup?userCode=${encodeURIComponent(userCode)}`, "GET", undefined, sessionCookie),
+      SERVER_CFG,
+    )
+    const lookupBody = try decodeBody(lookupRes)
+
+    const approveRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/api/oauth/device/approve`, "POST", { userCode }, sessionCookie),
+      SERVER_CFG,
+    )
+    const approveBody = try decodeBody(approveRes)
+
+    const tokenRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/token`, "POST", {
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceCode,
+        client_id: verifiedCimdUrl,
+      }),
+      SERVER_CFG,
+    )
+    const tokenBody = try decodeBody(tokenRes)
+
+    const cliDeviceRes = try handleFeedRequest(
+      buildReq(`${ORIGIN}/oauth/device/code`, "POST", {
+        client_id: "local-cli-agent",
+        client_name: "Local CLI Helper",
+      }),
+      SERVER_CFG,
+    )
+
+    try Effect.try(() => {
+      assert.deepStrictEqual([unownedSpoofRes.status, unownedSpoofBody.code], [400, "invalid_client"])
+      assert.strictEqual(hitsBeforeLocalhost, 1)
+      assert.deepStrictEqual([localhostSpoofRes.status, localhostSpoofBody.code], [400, "invalid_client"])
+      assert.deepStrictEqual([plainHttpSpoofRes.status, plainHttpSpoofBody.code], [400, "invalid_client"])
+      assert.deepStrictEqual([mismatchRes.status, mismatchBody.code], [400, "invalid_client_metadata"])
+      assert.strictEqual(hitsAfterPreChecks, 2)
+      assert.strictEqual(uppercaseVerifiedRes.status, 200)
+      assert.strictEqual(fetchHits.length, 3)
+      assert.deepStrictEqual(
+        [lookupRes.status, lookupBody.clientId, lookupBody.clientName],
+        [200, verifiedCimdUrl, "Verified Example Agent"],
+      )
+      assert.deepStrictEqual(
+        [approveRes.status, approveBody.clientId, approveBody.clientName],
+        [200, verifiedCimdUrl, "Verified Example Agent"],
+      )
+      assert.strictEqual(tokenRes.status, 200)
+      assert.isString(tokenBody.access_token)
+      assert.strictEqual(cliDeviceRes.status, 200)
+      assert.strictEqual(fetchHits.length, 3)
+    })
+  }
+}), 120_000)
