@@ -12,8 +12,7 @@ import {
 } from "@repo/ui";
 import { SettingsIcon } from "../icons.tsx";
 import { storeActions, useAppStore } from "../store.ts";
-import { isNotificationVisibleInMode } from "../types.ts";
-import type { AppNotification } from "../types.ts";
+import { isNotificationVisibleInMode, type AppNotification } from "../types.ts";
 
 type NotifFilter = "all" | "mentions" | "verified" | "markets";
 

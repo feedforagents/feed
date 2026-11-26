@@ -11,6 +11,7 @@ import { passThrough, requestJson } from "./api.ts";
 import {
   appendAnonymousModeParam,
   clearNotices,
+  currentUiMode,
   getStoreSnapshot,
   incrementSpaNavDepth,
   pushBrowserRoute,
@@ -59,6 +60,7 @@ import {
   decodeTrendingList,
   decodeUsersSearch,
   decodeWorldStatus,
+  isNotificationVisibleInMode,
   isRecord,
   arr,
   optStr,
@@ -1450,20 +1452,32 @@ export async function markNotificationRead(notificationId: string): Promise<void
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+  const initial = getStoreSnapshot();
+  const accountId = initial.viewer?.accountId;
+  if (!accountId) return;
+  const mode = currentUiMode(initial);
   notificationsLoadCount += 1;
   const res = await requestJson("/api/notifications/read", {
     method: "POST",
     body: {},
     parse: passThrough,
   });
+  const s = getStoreSnapshot();
+  if (s.viewer?.accountId !== accountId) return;
   if (!res.ok) {
     setErrorNotice(res.message);
     return;
   }
+  if (currentUiMode(s) !== mode) {
+    await loadNotifications();
+    return;
+  }
+  const notifications = s.notifications.map((n) =>
+    isNotificationVisibleInMode(n, mode) ? { ...n, item: { ...n.item, read: true } } : n,
+  );
   setStoreState({
-    notifications: getStoreSnapshot().notifications.map((n) => ({ ...n, item: { ...n.item, read: true } })),
-    unreadNotifications: 0,
+    notifications,
+    unreadNotifications: notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length,
   });
 }
 
