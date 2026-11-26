@@ -2,7 +2,7 @@
 import { parseJsonModelRecord, readEnv } from "@elizaos/core"
 import { actors, organizations, type PackActor, type PackOrganization } from "@repo/pack-default"
 import { type Store, type StoreFailure } from "@repo/db"
-import { HttpClientRequest } from "effect/http"
+import { FetchHttpClient, HttpClientRequest } from "effect/http"
 import { type PromptId, PromptCatalog } from "./prompts.vibe"
 import {
   EngineFailure,
@@ -410,11 +410,15 @@ effect function sendChatCompletionHttp(config: LlmProviderConfig, request: Compl
     HttpClientRequest.setHeaders(headers),
     HttpClientRequest.bodyText(JSON.stringify(bodyObj), "application/json"),
   )
-  const response = try fetchTextWithTimeout(
-    req,
-    "25 seconds",
-    "LLM_UNAVAILABLE",
-    `LLM request to ${config.provider} failed or timed out.`,
+  const response = try Effect.provideService(
+    fetchTextWithTimeout(
+      req,
+      "25 seconds",
+      "LLM_UNAVAILABLE",
+      `LLM request to ${config.provider} failed or timed out.`,
+    ),
+    FetchHttpClient.RequestInit,
+    { redirect: "manual" },
   )
   if (response.status < 200 || response.status >= 300) {
     throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: `LLM provider ${config.provider} returned HTTP ${response.status}.` })
@@ -437,6 +441,17 @@ effect function sendChatCompletionHttp(config: LlmProviderConfig, request: Compl
   const completionTokens = typeof usage?.completion_tokens === "number" ? Math.max(0, usage.completion_tokens) : Math.ceil(rawContent.length / 4)
   const actualMicros = Math.max(100, promptTokens * 2 + completionTokens * 6)
   return { content: rawContent, actualMicros }
+}
+
+function requestWasNeverSent(error: unknown): boolean {
+  let current: unknown = error
+  while (current !== null && typeof current === "object" && !Array.isArray(current)) {
+    const record = current as Record<string, unknown>
+    if (record.code === "ECONNREFUSED" || record.code === "ENOTFOUND" || record.code === "EAI_AGAIN") return true
+    if (record.message === "bad port") return true
+    current = record.cause
+  }
+  return false
 }
 
 export effect function generateCompletion(request: CompletionRequest): CompletionResult!(EngineFailure | StoreFailure)!Store {
@@ -469,7 +484,11 @@ export effect function generateCompletion(request: CompletionRequest): Completio
     }
   }
   const live = sendChatCompletionHttp(config, request, resolvedSystem) catch effect (err) => {
-    try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
+    if (requestWasNeverSent(err)) {
+      try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+    } else {
+      try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
+    }
     if (request.allowOfflineFallback !== false) {
       return null
     }
