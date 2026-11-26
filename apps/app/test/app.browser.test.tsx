@@ -8,6 +8,7 @@ import { storeActions } from "../src/web/store.ts";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
+const createdEventSources: Array<EventTarget> = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
 
@@ -57,30 +58,38 @@ const SAMPLE_POSTS = [
   },
 ];
 
+const SEED_MARKET_1 = {
+  id: "seed-market-1",
+  slotIndex: 0,
+  question: "Will OpenAGI ship Strawberry-9000 before Friday?",
+  description: "Virtual prediction market",
+  category: "tech",
+  timeframe: "1d",
+  phase: "opening",
+  yesShares: 5000,
+  noShares: 5000,
+  liquidityCents: 100_000,
+  yesPriceBps: 5000,
+  noPriceBps: 5000,
+  status: "open",
+  resolvedOutcome: null,
+  resolutionProof: null,
+  resolutionArticleId: null,
+  expiresAt: Date.now() + 3_600_000,
+  resolvedAt: null,
+  createdAt: Date.now() - 300_000,
+};
+
+const SEED_MARKET_2 = {
+  ...SEED_MARKET_1,
+  id: "seed-market-2",
+  slotIndex: 1,
+  question: "Will the city marathon break its course record this year?",
+  category: "sports",
+};
+
 const SAMPLE_MARKETS = {
-  predictions: [
-    {
-      id: "seed-market-1",
-      slotIndex: 0,
-      question: "Will OpenAGI ship Strawberry-9000 before Friday?",
-      description: "Virtual prediction market",
-      category: "tech",
-      timeframe: "1d",
-      phase: "opening",
-      yesShares: 5000,
-      noShares: 5000,
-      liquidityCents: 100_000,
-      yesPriceBps: 5000,
-      noPriceBps: 5000,
-      status: "open",
-      resolvedOutcome: null,
-      resolutionProof: null,
-      resolutionArticleId: null,
-      expiresAt: Date.now() + 3_600_000,
-      resolvedAt: null,
-      createdAt: Date.now() - 300_000,
-    },
-  ],
+  predictions: [SEED_MARKET_1, SEED_MARKET_2],
   perps: [],
   positions: {
     predictionPositions: [
@@ -195,6 +204,9 @@ const SAMPLE_TRADES = [
 function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
   const heldHistory = new Map<string, Array<() => void>>();
   const requestedHistoryRanges = new Set<string>();
+  const heldMarkets: Array<() => void> = [];
+  let marketsHeld = false;
+  let marketsRequestedCount = 0;
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -301,7 +313,16 @@ function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
     if (path === "/api/articles") return json({ articles: [] });
-    if (path === "/api/markets") return json(signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] });
+    if (path === "/api/markets") {
+      marketsRequestedCount += 1;
+      const body = signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] };
+      if (marketsHeld) {
+        return new Promise<Response>((resolve) => {
+          heldMarkets.push(() => resolve(Response.json(body)));
+        });
+      }
+      return json(body);
+    }
     if (path === "/api/world/status") {
       return json({
         currentDay: 3,
@@ -316,7 +337,8 @@ function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
     }
     if (path.endsWith("/history")) {
       const range = url.searchParams.get("range") ?? "1D";
-      const finalPriceCents = range === "1D" ? 1111 : range === "1W" ? 2222 : 50;
+      const marketId = path.split("/")[4] ?? "";
+      const finalPriceCents = marketId === "seed-market-2" ? 3333 : range === "1D" ? 1111 : range === "1W" ? 2222 : 50;
       const body = {
         range,
         points: [
@@ -413,6 +435,10 @@ function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
   vi.stubGlobal("fetch", fetchMock);
 
   class StubEventSource extends EventTarget {
+    constructor() {
+      super();
+      createdEventSources.push(this);
+    }
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
@@ -421,6 +447,18 @@ function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
     historyRequested: (range: string) => requestedHistoryRanges.has(range),
     releaseHistory: (range: string) => {
       for (const release of heldHistory.get(range)?.splice(0) ?? []) release();
+    },
+    holdMarkets: () => {
+      marketsHeld = true;
+    },
+    releaseMarkets: () => {
+      for (const release of heldMarkets.splice(0)) release();
+    },
+    marketsRequestedCount: () => marketsRequestedCount,
+    dispatchSse: (type: string, data: unknown) => {
+      const source = createdEventSources.at(-1);
+      if (!source) throw new Error("no EventSource created yet");
+      source.dispatchEvent(new MessageEvent(type, { data }));
     },
   };
 }
@@ -576,5 +614,55 @@ it('Stale market history is dropped after switching ranges (spec/markets/predict
   await act(() => Promise.resolve());
   expect(getStoreSnapshot().marketTimeRange).toBe("1W");
   expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(2222);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+});
+
+it('Market refresh in flight loads the newly selected market (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
+  const network = await mountApp({ holdHistoryRange: "1D" });
+
+  await act(() => storeActions.navigate("/markets"));
+  expect(getStoreSnapshot().route).toBe("Markets");
+  await act(() => storeActions.setMarketTimeRange("1D"));
+
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await act(() => Promise.resolve());
+  expect(network.historyRequested("1D")).toBe(true);
+
+  network.releaseHistory("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-1");
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(1111);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+
+  const marketsBefore = network.marketsRequestedCount();
+  network.holdMarkets();
+  act(() => {
+    network.dispatchSse("world.tick", "{}");
+  });
+  await act(() => Promise.resolve());
+  expect(network.marketsRequestedCount()).toBe(marketsBefore + 1);
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-1");
+
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-2");
+  });
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-2");
+  expect(getStoreSnapshot().marketHistory).toEqual([]);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(true);
+
+  network.releaseMarkets();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-2");
+
+  network.releaseHistory("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(3333);
   expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
 });
