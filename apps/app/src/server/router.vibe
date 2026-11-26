@@ -1618,7 +1618,9 @@ effect function handleSocialChatsAndNotifications(
   if (method === "GET" && (path === "/api/chats/invites" || path === "/api/chats/alpha-invites")) {
     const session = try requireSession(request, config)
     const rawKind = url.searchParams.get("kind")
-    const kind: GroupInviteFilterKind = rawKind === "npc_alpha" || rawKind === "user_group" ? rawKind : "all"
+    const kind: GroupInviteFilterKind = path === "/api/chats/alpha-invites"
+      ? "npc_alpha"
+      : rawKind === "npc_alpha" || rawKind === "user_group" ? rawKind : "all"
     return jsonResponse({ invites: try listPendingGroupInvites(session.accountId, kind) })
   }
   const inviteRespondMatch = /^\/api\/chats\/(?:alpha-)?invites\/([^/]+)\/respond$/.exec(path)
