@@ -262,6 +262,8 @@ export interface PredictionOrderPanelProps {
   yesPositionShares?: number;
   /** Owned NO shares on this market (used for Sell + Max button). */
   noPositionShares?: number;
+  /** Side the ticket opens on (default `YES`); a new value moves an open ticket to that side. */
+  initialSide?: "YES" | "NO";
   /** Submits a buy or sell prediction order. */
   onSubmitOrder: (order: PredictionOrderInput) => void;
   /** Invoked when clicking the resolution article link in the info modal. */
@@ -309,6 +311,8 @@ export type MarketsTradingTerminalProps = Omit<ComponentProps<"div">, "children"
   onRebalancePerp?: (order: PerpRebalanceOrderInput) => void;
   /** Closes an open perp position by ID. */
   onClosePerp?: (positionId: string) => void;
+  /** Side the prediction ticket opens on (default `YES`); a new value moves an open ticket to that side. */
+  initialPredictionSide?: "YES" | "NO";
   /** Submits a prediction buy or sell order. */
   onSubmitPrediction?: (order: PredictionOrderInput) => void;
   /** Invoked when the user clicks a resolution article link. */
@@ -1419,6 +1423,7 @@ export function PredictionOrderPanel({
   balancePts,
   yesPositionShares = 0,
   noPositionShares = 0,
+  initialSide = "YES",
   onSubmitOrder,
   onOpenResolutionArticle,
   confirmBeforeSubmit = true,
@@ -1430,7 +1435,12 @@ export function PredictionOrderPanel({
   const maxOddsMovePct = (market.maxOddsMoveBps ?? 2000) / 100;
 
   const [action, setAction] = useState<"buy" | "sell">("buy");
-  const [side, setSide] = useState<"YES" | "NO">("YES");
+  const [side, setSide] = useState<"YES" | "NO">(initialSide);
+  const [prevInitialSide, setPrevInitialSide] = useState(initialSide);
+  if (initialSide !== prevInitialSide) {
+    setPrevInitialSide(initialSide);
+    setSide(initialSide);
+  }
   const [amountText, setAmountText] = useState("10");
   const [resolutionOpen, setResolutionOpen] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<TradeConfirmationDetails | null>(null);
@@ -1473,6 +1483,14 @@ export function PredictionOrderPanel({
 
   const executeOrder = () => {
     onSubmitOrder({ marketId: market.id, action, side, amountOrShares: numericValue });
+  };
+
+  const executeConfirmedOrder = () => {
+    if (pendingConfirm?.kind === "buy-prediction") {
+      onSubmitOrder({ marketId: market.id, action: "buy", side: pendingConfirm.side, amountOrShares: pendingConfirm.amountPts });
+    } else if (pendingConfirm?.kind === "sell-prediction") {
+      onSubmitOrder({ marketId: market.id, action: "sell", side: pendingConfirm.side, amountOrShares: pendingConfirm.shares });
+    }
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -1662,7 +1680,7 @@ export function PredictionOrderPanel({
         details={pendingConfirm}
         submitting={submitting}
         onClear={() => setPendingConfirm(null)}
-        onExecute={executeOrder}
+        onExecute={executeConfirmedOrder}
       />
     </div>
   );
@@ -1830,6 +1848,7 @@ export function MarketsTradingTerminal({
   onOpenPerp,
   onRebalancePerp,
   onClosePerp,
+  initialPredictionSide,
   onSubmitPrediction,
   onOpenResolutionArticle,
   submitting = false,
@@ -1880,6 +1899,7 @@ export function MarketsTradingTerminal({
         balancePts={balancePts}
         yesPositionShares={yesSharesOwned}
         noPositionShares={noSharesOwned}
+        initialSide={initialPredictionSide}
         onSubmitOrder={(order) => onSubmitPrediction?.(order)}
         onOpenResolutionArticle={onOpenResolutionArticle}
         confirmBeforeSubmit={confirmBeforeSubmit}

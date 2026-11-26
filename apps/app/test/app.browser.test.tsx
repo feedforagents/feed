@@ -7,6 +7,7 @@ import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
 
 const opened: Root[] = [];
+const predictionBuyBodies: string[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
 
@@ -392,6 +393,10 @@ function installMockNetwork() {
     if (path === "/api/chats") return json({ chats: [] });
     if (path === "/api/chats/invites") return json({ invites: [] });
     if (path === "/api/notifications") return json({ items: [], unreadCount: 0 });
+    if (path.endsWith("/buy")) {
+      predictionBuyBodies.push(typeof init?.body === "string" ? init.body : "");
+      return json({ ok: true });
+    }
     if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
     return json({});
@@ -421,12 +426,29 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+async function mountApp() {
   installMockNetwork();
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   opened.push(root);
   await act(() => Promise.resolve(root.render(<App />)));
+}
+
+async function mountAppAtHome() {
+  await mountApp();
+  await act(() => storeActions.navigate("/"));
+}
+
+async function signInAsReviewer() {
+  await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
+  await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
+  await act(() => userEvent.fill(page.getByLabelText(/Password/i), "secret-pass"));
+  await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
+  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+}
+
+it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await mountApp();
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   await expect.element(page.getByText("Prediction Market").first()).toBeInTheDocument();
@@ -478,11 +500,7 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Email" })).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
-  await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
-  await act(() => userEvent.fill(page.getByLabelText(/Password/i), "secret-pass"));
-  await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
-  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  await signInAsReviewer();
 
   await act(() => storeActions.setPlayMode("game"));
 
@@ -500,13 +518,35 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
   await expect.element(page.getByText("BUY YES").first()).toBeInTheDocument();
 });
 
-it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md, "Story: Request and consume a single-use email magic link safely")', async () => {
-  installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  await mountAppAtHome();
+
+  await expect.element(page.getByText("Prediction Market").first()).toBeInTheDocument();
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await signInAsReviewer();
+
   await act(() => storeActions.navigate("/"));
+  await act(() => userEvent.click(page.getByRole("button", { name: /BUY NO/ }).first()));
+
+  await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Buy NO" })).toBeInTheDocument();
+
+  await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=yes"));
+  await expect.element(page.getByRole("button", { name: "Buy YES" })).toBeInTheDocument();
+  await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=no"));
+  await expect.element(page.getByRole("button", { name: "Buy NO" })).toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Buy NO" })));
+  await expect.element(page.getByText("Confirm Buy NO")).toBeInTheDocument();
+  await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=yes"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Confirm Trade" })));
+  expect(predictionBuyBodies.at(-1)).toContain('"side":"no"');
+});
+
+it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md, "Story: Request and consume a single-use email magic link safely")', async () => {
+  await mountAppAtHome();
 
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));

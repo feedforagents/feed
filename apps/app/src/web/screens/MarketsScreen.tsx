@@ -334,6 +334,7 @@ export function MarketsScreen() {
           <MarketsTradingTerminal
             key={`${terminalMarket.kind}:${terminalMarket.kind === "perp" ? terminalMarket.data.ticker : terminalMarket.data.id}`}
             market={terminalMarket}
+            initialPredictionSide={s.selectedMarketSide}
             balancePts={balancePtsNum}
             timeRange={s.marketTimeRange}
             onTimeRangeChange={(range) => { void storeActions.setMarketTimeRange(range); }}

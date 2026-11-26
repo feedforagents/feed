@@ -861,6 +861,7 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
   setStoreState({
     selectedMarketKind: kind,
     selectedMarketId: id,
+    selectedMarketSide: "YES",
     selectedTicker: kind === "perp" ? id : null,
     marketsViewMode: "terminal",
     marketHistory: [],

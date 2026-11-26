@@ -14,6 +14,7 @@ export interface ParsedLocation {
   readonly queryTicker: string | null;
   readonly marketId: string | null;
   readonly marketKind: "prediction" | "perp" | null;
+  readonly marketSide: "YES" | "NO" | null;
   readonly walletView: boolean;
   readonly settingsTab: SettingsTabId | null;
   readonly chatId: string | null;
@@ -142,6 +143,7 @@ export function parseLocation(pathname: string, search: string): ParsedLocation 
     queryTicker: null,
     marketId: null,
     marketKind: null,
+    marketSide: null,
     walletView: false,
     settingsTab: null,
     chatId: null,
@@ -225,11 +227,13 @@ export function parseLocation(pathname: string, search: string): ParsedLocation 
   const predMatch = /^\/markets\/predictions\/([^/]+)$/u.exec(cleanPath);
   if (predMatch?.[1]) {
     const marketId = decodePart(predMatch[1]);
+    const rawSide = params.get("side")?.trim().toLowerCase();
     return {
       ...base,
       route: "Markets",
       marketKind: "prediction",
       marketId,
+      marketSide: rawSide === "no" ? "NO" : rawSide === "yes" ? "YES" : null,
     };
   }
 
