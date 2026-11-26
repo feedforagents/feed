@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
-import { storeActions } from "../src/web/store.ts";
+import { reconnectRealtime, storeActions } from "../src/web/store.ts";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { hydrateAuth } from "../src/web/store-auth.ts";
 import type { ViewerSession } from "../src/web/types.ts";
@@ -508,6 +508,12 @@ function installMockNetwork(
     if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
     if (path.startsWith("/api/users/")) {
       const handle = decodeURIComponent(path.slice("/api/users/".length));
+      if (profileShouldFail) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+      }
+      if (profileShould404 || handle === "ghost") {
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
       return json({
         profile: {
           id: handle === viewerHandle ? (viewerIsReviewer ? "acct-player-1" : "acct-email-1") : "ailon-musk",
@@ -607,39 +613,6 @@ function installMockNetwork(
     if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
     if (path === "/api/posts") return json({ items: [], nextCursor: null });
-    if (path.startsWith("/api/users/")) {
-      const userHandle = decodeURIComponent(path.slice("/api/users/".length));
-      if (userHandle !== "ailonmusk") {
-        if (profileShouldFail) {
-          return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
-        }
-        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
-      }
-      if (profileShould404) {
-        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
-      }
-      if (profileShouldFail) {
-        return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
-      }
-      return json({
-        profile: {
-          id: "ailonmusk",
-          handle: "ailonmusk",
-          displayName: "AIlon Musk",
-          bio: "",
-          isParody: true,
-          followersCount: 10,
-          followingCount: 5,
-          postsCount: 1,
-          viewerFollows: false,
-          viewerMutes: false,
-          viewerBlocks: false,
-        },
-        posts: SAMPLE_POSTS,
-        nextCursor: null,
-        positions: [],
-      });
-    }
     return json({});
   };
   vi.stubGlobal("fetch", fetchMock);
@@ -650,9 +623,13 @@ function installMockNetwork(
       createdEventSources.push(this);
       liveEventSources.push(this);
     }
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
+  reconnectRealtime();
 
   return {
     historyRequested: (range: string) => requestedHistoryRanges.has(range),
@@ -711,13 +688,6 @@ async function renderApp() {
   await act(() => Promise.resolve(root.render(<App />)));
 }
 
-async function renderApp() {
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-}
-
 beforeAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -726,6 +696,7 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
+  storeActions.setJoinSheetOpen(false);
   await act(() => storeActions.logout());
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
@@ -1168,7 +1139,10 @@ it('Switching profiles never shows the previous profile (spec/app/navigation.md,
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1223,11 +1197,13 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
 
   profileShouldFail = true;
-  liveEventSources[0].dispatchEvent(new Event("market.spot"));
-  await vi.waitFor(() => expect(getStoreSnapshot().profileLoading).toBe(false));
+  liveEventSources.at(-1)?.dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().errorMessage).not.toBeNull();
+    expect(getStoreSnapshot().profileLoading).toBe(false);
+  });
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
   expect(getStoreSnapshot().profileBundle?.posts.length).toBe(1);
-  expect(getStoreSnapshot().errorMessage).not.toBeNull();
   await expect.element(page.getByText("Profile not found")).not.toBeInTheDocument();
   await expect.element(page.getByText("1 post")).toBeInTheDocument();
 
@@ -1380,7 +1356,10 @@ it('Stale chats response is dropped when a newer load lands first', async () => 
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1471,7 +1450,10 @@ it('Stale markets response is dropped when a newer load lands first', async () =
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1541,7 +1523,10 @@ it('Stale notifications response is dropped after mark all read', async () => {
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1688,7 +1673,10 @@ it('Stale chat messages are dropped after switching chats', async () => {
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1764,7 +1752,10 @@ it('Chat switch survives a background refresh of the old chat', async () => {
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1803,15 +1794,6 @@ it('Chat switch survives a background refresh of the old chat', async () => {
   expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
 });
 
-function profilePayload(id: string, handle: string, displayName: string) {
-  return {
-    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
-    posts: [],
-    positions: {},
-    nextCursor: null,
-  };
-}
-
 it('Stale profile response is dropped after navigating on (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   let aliceRequested = false;
   const aliceReleases: Array<(res: Response) => void> = [];
@@ -1847,7 +1829,10 @@ it('Stale profile response is dropped after navigating on (spec/app/navigation.m
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -1863,13 +1848,13 @@ it('Stale profile response is dropped after navigating on (spec/app/navigation.m
   expect(getStoreSnapshot().profileHandle).toBe("alice");
 
   await act(() => storeActions.navigate("/u/bob"));
-  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
 
   releaseAlice(Response.json(profilePayload("acc-alice", "alice", "Alice Aardvark")));
   await act(() => navAlice);
 
-  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
   await expect.element(page.getByText("Alice Aardvark")).not.toBeInTheDocument();
   expect(getStoreSnapshot().profileHandle).toBe("bob");
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
@@ -1881,13 +1866,13 @@ it('Stale profile response is dropped after navigating on (spec/app/navigation.m
   expect(getStoreSnapshot().profileHandle).toBe("alice");
 
   await act(() => storeActions.navigate("/u/bob"));
-  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
 
   releaseAlice(new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } }));
   await act(() => navAliceAgain);
 
-  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
   expect(getStoreSnapshot().profileHandle).toBe("bob");
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
   expect(getStoreSnapshot().profileLoading).toBe(false);
@@ -1969,7 +1954,10 @@ it('Stale profile page is dropped after a profile refresh (spec/app/navigation.m
   };
   vi.stubGlobal("fetch", fetchMock);
   class StubEventSource extends EventTarget {
-    close() {}
+    close() {
+      const idx = liveEventSources.indexOf(this);
+      if (idx >= 0) liveEventSources.splice(idx, 1);
+    }
   }
   vi.stubGlobal("EventSource", StubEventSource);
 
@@ -2095,7 +2083,7 @@ async function openThreadDetail() {
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
   await act(() => userEvent.click(replyButton));
-  await expect.element(page.getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Post", exact: true }).first()).toBeInTheDocument();
 }
 
 it('Thread close during load stays closed (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {

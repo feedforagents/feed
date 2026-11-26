@@ -3,7 +3,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { loadChatMessages } from "../src/web/store-world.ts";
+import { loadChatMessages, selectChat } from "../src/web/store-world.ts";
 import type { AppChatSummary, ViewerSession } from "../src/web/types.ts";
 
 const viewer: ViewerSession = {
@@ -14,6 +14,9 @@ const viewer: ViewerSession = {
   avatarUrl: null,
   bannerUrl: null,
   phoneLast2: null,
+  phoneVerifiedAt: null,
+  emailMasked: null,
+  emailVerifiedAt: null,
   uiMode: "game",
   balanceCents: 0,
   startingGrantCents: 0,
@@ -225,7 +228,7 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
   sseTarget.dispatchEvent(
     new MessageEvent("chat.message", { data: JSON.stringify({ chatId: "chat-1" }) }),
   );
-  await loadChatMessages("chat-2");
+  await selectChat("chat-2");
   expect(getStoreSnapshot().selectedChatId).toBe("chat-2");
   const secondResponse = gate.response;
   expect(secondResponse).not.toBeNull();

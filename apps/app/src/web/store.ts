@@ -522,6 +522,10 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     const chatId = data ? optStr(data.chatId) : null;
     void runDomainRefresh("chats", async () => {
       const live = getStoreSnapshot();
+      if (eventType === "chat.updated") {
+        await loadChats(live.route === "Chats", chatId ?? live.selectedChatId);
+        return;
+      }
       if (live.route === "Chats" && chatId && chatId === live.selectedChatId) {
         await loadChatMessages(chatId);
         await loadChats(false);

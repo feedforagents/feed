@@ -1850,19 +1850,19 @@ it.effect(
       authorId: "alice",
       authorKind: "user",
       content: "Thinking about the market today",
-      ticker: "BTC"
+      ticker: "ZQXK"
     })
     const badgePost = try createPost({
       authorId: "alice",
       authorKind: "user",
       content: "Thinking about the market today",
       marketId: "seed-market-1",
-      ticker: "BTC"
+      ticker: "ZQXK"
     })
     const contentPost = try createPost({
       authorId: "bob",
       authorKind: "user",
-      content: "BTC is holding the line today"
+      content: "ZQXK is holding the line today"
     })
     const unrelated = try createPost({
       authorId: "bob",
@@ -1870,8 +1870,8 @@ it.effect(
       content: "Cooking dinner tonight"
     })
     const tickerOnlyThread = try getPostThread(tickerOnly.id, "alice", "game")
-    const gameResult = try searchWorld({ query: "BTC", mode: "game", viewerId: "alice" })
-    const socialResult = try searchWorld({ query: "BTC", mode: "social", viewerId: "alice" })
+    const gameResult = try searchWorld({ query: "ZQXK", mode: "game", viewerId: "alice" })
+    const socialResult = try searchWorld({ query: "ZQXK", mode: "social", viewerId: "alice" })
     try check(() => assert.deepStrictEqual({
       tickerOnlyHasNoTradeEmbed: tickerOnlyThread.post.showTradeEmbed,
       gameFound: gameResult.posts.map((p) => p.id).sort(),
