@@ -238,6 +238,26 @@ function computePriceImpactBps(beforeMark: number, afterMark: number): number {
   return Math.round((Math.abs(afterMark - beforeMark) * BPS_DENOMINATOR) / beforeMark)
 }
 
+function computeFlippedOiAndMark(
+  indexPriceCents: number,
+  longOiCents: number,
+  shortOiCents: number,
+  existingSide: PerpSide,
+  existingSizeCents: number,
+  nextSide: PerpSide,
+  flipSizeCents: number
+): { readonly finalLong: number; readonly finalShort: number; readonly executionPriceCents: number } {
+  const afterCloseLong = existingSide === "long" ? Math.max(0, longOiCents - existingSizeCents) : longOiCents
+  const afterCloseShort = existingSide === "short" ? Math.max(0, shortOiCents - existingSizeCents) : shortOiCents
+  const finalLong = nextSide === "long" ? afterCloseLong + flipSizeCents : afterCloseLong
+  const finalShort = nextSide === "short" ? afterCloseShort + flipSizeCents : afterCloseShort
+  return {
+    finalLong,
+    finalShort,
+    executionPriceCents: computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+  }
+}
+
 effect function assertSlippageWithinCap(beforeMark: number, afterMark: number, maxSlippageBps?: number): void!MarketFailure {
   if (maxSlippageBps === undefined) return
   if (!Number.isFinite(maxSlippageBps) || maxSlippageBps < 0) {
@@ -1131,11 +1151,15 @@ export effect function previewPerpOrder(input: PreviewPerpOrderInput): PerpOrder
         }
       }
       if (input.mode === "flip") {
-        const afterCloseLong = existingSide === "long" ? Math.max(0, longOi - existing.sizeCents) : longOi
-        const afterCloseShort = existingSide === "short" ? Math.max(0, shortOi - existing.sizeCents) : shortOi
-        const finalLong = input.side === "long" ? afterCloseLong + sizeCents : afterCloseLong
-        const finalShort = input.side === "short" ? afterCloseShort + sizeCents : afterCloseShort
-        const executionPriceCents = computeMarkPriceCents(indexPriceCents, finalLong, finalShort)
+        const { finalLong, finalShort, executionPriceCents } = computeFlippedOiAndMark(
+          indexPriceCents,
+          longOi,
+          shortOi,
+          existingSide,
+          existing.sizeCents,
+          input.side,
+          sizeCents
+        )
         const closeFeeCents = canonicalTradingFee(existing.sizeCents)
         const openFeeCents = canonicalTradingFee(sizeCents)
         const feeCents = closeFeeCents + openFeeCents
@@ -1334,11 +1358,20 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       })
     }
     if (input.mode === "flip") {
+      const { executionPriceCents: finalFlipMark } = computeFlippedOiAndMark(
+        market.indexPriceCents,
+        market.longOiCents,
+        market.shortOiCents,
+        existingSide,
+        existing.sizeCents,
+        input.side,
+        sizeCents
+      )
+      try assertSlippageWithinCap(market.markPriceCents, finalFlipMark, input.maxSlippageBps)
       const closedOld = try settlePerpCloseSliceTx(tx, {
         posRow: existingRow,
         market,
         closeSizeCents: existing.sizeCents,
-        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
         viaClientName,
         now
       })
@@ -1357,7 +1390,6 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
         collateralCents: input.collateralCents,
         sizeCents,
         leverage: input.leverage,
-        ...(input.maxSlippageBps === undefined ? {} : { maxSlippageBps: input.maxSlippageBps }),
         viaClientName,
         currentPeriod,
         action: "flip",
