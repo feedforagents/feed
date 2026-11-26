@@ -211,7 +211,7 @@ function profilePayload(id: string, handle: string, displayName: string) {
   };
 }
 
-function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?: string; holdLikesFor?: string } = {}) {
+function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?: string; holdLikesFor?: string; holdArticleId?: string } = {}) {
   const heldHistory = new Map<string, Array<() => void>>();
   const requestedHistoryRanges = new Set<string>();
   const heldMarkets: Array<() => void> = [];
@@ -221,6 +221,8 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
   const requestedTrades = new Set<string>();
   const heldLikes = new Map<string, Array<(items: unknown[]) => void>>();
   const requestedLikes = new Set<string>();
+  const heldArticles = new Map<string, Array<() => void>>();
+  const requestedArticleIds = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -327,6 +329,19 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
     if (path === "/api/articles") return json({ articles: [] });
+    if (path.startsWith("/api/articles/")) {
+      const id = decodeURIComponent(path.slice("/api/articles/".length));
+      const body = { id, title: `Article ${id}`, summary: `Summary of ${id}`, body: `Body of ${id}`, publishedAt: Date.now() - 60_000 };
+      if (options.holdArticleId === id) {
+        requestedArticleIds.add(id);
+        return new Promise<Response>((resolve) => {
+          const pending = heldArticles.get(id) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldArticles.set(id, pending);
+        });
+      }
+      return json(body);
+    }
     if (path === "/api/markets") {
       marketsRequestedCount += 1;
       const body = signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] };
@@ -508,6 +523,10 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
     likesRequested: (handle: string) => requestedLikes.has(handle),
     releaseLikes: (handle: string, items: unknown[]) => {
       for (const release of heldLikes.get(handle)?.splice(0) ?? []) release(items);
+    },
+    articleRequested: (id: string) => requestedArticleIds.has(id),
+    releaseArticle: (id: string) => {
+      for (const release of heldArticles.get(id)?.splice(0) ?? []) release();
     },
   };
 }
@@ -808,4 +827,26 @@ it('Late likes never land on another profile (spec/app/navigation.md, "Story: Br
   await act(() => Promise.resolve());
   expect(network.likesRequested("bob")).toBe(false);
   expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["browser-post-1"]);
+});
+
+it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdArticleId: "article-a" });
+
+  act(() => {
+    void storeActions.loadArticle("article-a");
+  });
+  await act(() => Promise.resolve());
+  expect(network.articleRequested("article-a")).toBe(true);
+  expect(getStoreSnapshot().activeArticleId).toBe("article-a");
+
+  await act(() => storeActions.loadArticle("article-b"));
+  expect(getStoreSnapshot().activeArticleId).toBe("article-b");
+  expect(getStoreSnapshot().activeArticle?.id).toBe("article-b");
+
+  network.releaseArticle("article-a");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().activeArticleId).toBe("article-b");
+  expect(getStoreSnapshot().activeArticle?.id).toBe("article-b");
+  expect(getStoreSnapshot().articleLoading).toBe(false);
 });

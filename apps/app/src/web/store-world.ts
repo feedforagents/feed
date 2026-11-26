@@ -326,6 +326,7 @@ export async function loadArticle(articleId: string): Promise<void> {
   const res = await requestJson(appendAnonymousModeParam(`/api/articles/${encodeURIComponent(articleId)}`, s), {
     parse: decodeArticle,
   });
+  if (getStoreSnapshot().activeArticleId !== articleId) return;
   if (res.ok && res.data) {
     setStoreState({ activeArticle: res.data, articleLoading: false });
     return;
