@@ -1244,3 +1244,35 @@ it.effect('list_markets with status resolved returns no perp markets', () =>
     })
   })
 )
+
+it.effect(
+  'get_market returns a related article older than the 50 newest articles (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["buried-market-article", "Buried market scoop", "Buried summary", "Buried body", "the-new-york-taimes", "seed-market-1", false, now - 1_000_000]
+      )
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["buried-proof-article", "Unreleased proof", "Proof summary", "Proof body", "the-new-york-taimes", "seed-market-1", true, now - 2_000_000]
+      )
+      for (let i = 1; i <= 60; i += 1) {
+        try tx.query(
+          "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+          [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
+        )
+      }
+    })
+    const marketRes = try callMcpTool(201, "get_market", { marketId: "seed-market-1" }, authConfig)
+    const marketPayload = unwrapToolPayload(marketRes)
+    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(relatedArticles.some((a) => a.id === "buried-market-article"), true)
+      assert.strictEqual(relatedArticles.every((a) => a.relatedMarketId === "seed-market-1"), true)
+      assert.strictEqual(relatedArticles.some((a) => a.id === "buried-proof-article"), false)
+    })
+  })
+)

@@ -1880,6 +1880,18 @@ export effect function listArticles(
   return rows.map((row) => rowToArticle(row, mode))
 }
 
+export effect function listArticlesForMarket(
+  marketId: string,
+  mode: SocialPresentationMode = "game"
+): ReadonlyArray<ArticleView>!StoreFailure!Store {
+  const store = try Store
+  const rows = try store.transaction((tx) => tx.query(
+    `${ARTICLE_BASE_SQL} WHERE a.related_market_id = $1 AND ${ARTICLE_VISIBLE_SQL} ORDER BY a.published_at DESC, a.id DESC LIMIT 50`,
+    [marketId]
+  ))
+  return rows.map((row) => rowToArticle(row, mode))
+}
+
 export effect function getArticle(
   articleId: string,
   mode: SocialPresentationMode = "game"
