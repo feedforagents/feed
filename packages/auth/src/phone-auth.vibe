@@ -154,6 +154,7 @@ export interface SessionIdentity extends Pick<
   readonly authAt: number
   readonly expiresAt: number
   readonly sessionsEpoch: number
+  readonly refreshedSessionCookieHeader?: string | undefined
 }
 
 export interface StartPhoneVerificationResult {
@@ -1528,11 +1529,16 @@ export effect function authenticateSessionCookie(
     if (!Number.isSafeInteger(tokenEpoch) || tokenEpoch !== accountEpoch) return null
     const sessionKey = toText(row.session_key) ?? ""
     const extendedExpiry = Math.min(now + SESSION_SLIDING_MS, refreshExpiresAt)
+    let refreshedSessionCookieHeader: string | undefined = undefined
     if (extendedExpiry - accessExpiresAt > 3_600_000) {
       try tx.query(
         "UPDATE sessions SET access_expires_at = $2, updated_at = $3 WHERE key = $1",
         [sessionKey, extendedExpiry, now]
       )
+      const publicAppUrl = config?.publicAppUrl ?? ""
+      if (publicAppUrl !== "") {
+        refreshedSessionCookieHeader = buildSessionCookieHeader(token, Math.floor((extendedExpiry - now) / 1000), publicAppUrl)
+      }
     }
     const profile = rowToAccountProfile(row)
     return {
@@ -1556,7 +1562,8 @@ export effect function authenticateSessionCookie(
       isReviewer: profile.isReviewer,
       authAt: toInt(row.auth_at),
       expiresAt: extendedExpiry,
-      sessionsEpoch: accountEpoch
+      sessionsEpoch: accountEpoch,
+      refreshedSessionCookieHeader
     }
   })
 }
