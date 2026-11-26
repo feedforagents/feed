@@ -1182,6 +1182,60 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
     )
     const raceSends = dispatchedMessages.filter((message) => message.to === "raceparallel@example.com")
 
+    const testClock = try TestClock.testClockWith((clock) => Effect.succeed(clock))
+    const outOfOrderNested: Array<string> = []
+    const outOfOrderConfig: AuthRuntimeConfig = {
+      ...cloudflareConfig,
+      cloudflareEmailSender: {
+        send: async (message) => {
+          dispatchedMessages.push(message)
+          if (message.to === "raceoutoforder@example.com" && outOfOrderNested.length === 0) {
+            await runPromise(testClock.adjust("31 seconds"))
+            await runPromise(Effect.provide(
+              Effect.provide(
+                requestEmailMagicLink({
+                  email: "raceoutoforder@example.com",
+                  ipAddress: "203.0.113.13",
+                  config: emailConfig
+                }),
+                Layer.succeed(Store, store)
+              ),
+              Layer.succeed(Clock.Clock, testClock)
+            )).then(
+              () => { outOfOrderNested.push("ok") },
+              (err: unknown) => { outOfOrderNested.push(failureCode(err)) }
+            )
+          }
+          return { messageId: "cf-msg-outoforder" }
+        }
+      }
+    }
+    const outOfOrderFirst = try requestEmailMagicLink({
+      email: "raceoutoforder@example.com",
+      ipAddress: "203.0.113.13",
+      config: outOfOrderConfig
+    })
+    const outOfOrderHash = try hashEmail(emailConfig.digestKey, "raceoutoforder@example.com")
+    const outOfOrderRows = try sqlQuery(
+      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_hash = $1 ORDER BY created_at",
+      [outOfOrderHash]
+    )
+    const outOfOrderSends = dispatchedMessages.filter((message) => message.to === "raceoutoforder@example.com")
+    const outOfOrderMessage = dispatchedMessages.find((message) => message.to === "raceoutoforder@example.com")
+    const outOfOrderFirstToken = outOfOrderMessage?.text?.split("token=")[1]?.split("\n")[0] ?? ""
+    const outOfOrderFirstRefusal = try refusedCode(verifyEmailMagicLink({
+      token: outOfOrderFirstToken,
+      config: emailConfig
+    }))
+    const outOfOrderSecondLink = getLoopbackMagicLink("raceoutoforder@example.com", emailConfig)
+    if (outOfOrderSecondLink === undefined) {
+      return try Effect.die("Missing out-of-order second loopback magic link")
+    }
+    const outOfOrderSecondVerify = try verifyEmailMagicLink({
+      token: outOfOrderSecondLink.token,
+      config: emailConfig
+    })
+
     try check(() => assert.deepStrictEqual(
       {
         validation: [invalidEmail, disposableEmail, disabledMode, rapidResend, supersededRefusal, expiredRefusal, replayRefusal],
@@ -1228,7 +1282,7 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           cfSent.emailMasked,
           cfSent.devToken === undefined,
           cfSent.devMagicLinkUrl === undefined,
-          dispatchedMessages.length - raceSends.length,
+          dispatchedMessages.length - raceSends.length - outOfOrderSends.length,
           dispatchedMessages[0]?.from,
           dispatchedMessages[0]?.to,
           dispatchedMessages[0]?.subject,
@@ -1248,6 +1302,15 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           raceRows.length,
           raceSends.length,
           raceFirst.emailMasked
+        ],
+        outOfOrderSupersession: [
+          outOfOrderNested[0] ?? "missing",
+          outOfOrderRows.length,
+          outOfOrderRows[0]?.superseded_at !== null,
+          outOfOrderRows[1]?.superseded_at === null,
+          outOfOrderSecondVerify.status,
+          outOfOrderFirstRefusal,
+          outOfOrderFirst.emailMasked
         ]
       },
       {
@@ -1298,6 +1361,15 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
           "rate_limited:email_send",
           1,
           1,
+          "r***@example.com"
+        ],
+        outOfOrderSupersession: [
+          "ok",
+          2,
+          true,
+          true,
+          "needs_onboarding",
+          "magic_link_superseded",
           "r***@example.com"
         ]
       }

@@ -560,14 +560,23 @@ effect function sendEmailMagicLinkInternal(input: {
     )
   }
   try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:email-send:${emailHash}`])
     if (input.purpose === "link_email" && input.accountId !== null) {
+      try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:email-send:account:${input.accountId}`])
       try tx.query(
         `UPDATE feed_email_magic_links
          SET superseded_at = $3
          WHERE purpose = 'link_email'
            AND (email_hash = $1 OR account_id = $2)
            AND id <> $4
-           AND consumed_at IS NULL AND superseded_at IS NULL`,
+           AND created_at <= $3
+           AND consumed_at IS NULL AND superseded_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM feed_email_magic_links self
+             WHERE self.id = $4
+               AND self.consumed_at IS NULL
+               AND self.superseded_at IS NULL
+           )`,
         [emailHash, input.accountId, now, challengeId]
       )
     } else {
@@ -576,7 +585,14 @@ effect function sendEmailMagicLinkInternal(input: {
          SET superseded_at = $2
          WHERE email_hash = $1 AND purpose = 'sign_in'
            AND id <> $3
-           AND consumed_at IS NULL AND superseded_at IS NULL`,
+           AND created_at <= $2
+           AND consumed_at IS NULL AND superseded_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM feed_email_magic_links self
+             WHERE self.id = $3
+               AND self.consumed_at IS NULL
+               AND self.superseded_at IS NULL
+           )`,
         [emailHash, now, challengeId]
       )
     }
