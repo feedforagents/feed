@@ -1326,18 +1326,31 @@ export effect function lookupDeviceCodeForUser(userCodeRaw: string): DeviceCodeL
   })
 }
 
+const DEVICE_APPROVE_ATTEMPTS_PER_HOUR = 20
+const DEVICE_APPROVE_WINDOW_MS = 3_600_000
+
 export effect function approveDeviceAuthorization(input: {
   readonly accountId: string
   readonly userCode: string
   readonly scopes?: ReadonlyArray<string> | string | undefined
   readonly deny?: boolean | undefined
-}): DeviceApprovalResult!(AuthFailure | StoreFailure)!Store {
+}): DeviceApprovalResult!(AuthFailure | RateLimited | StoreFailure)!Store {
   const userCode = input.userCode.trim().toUpperCase()
   if (userCode === "") {
     throw new AuthFailure({ code: "invalid_user_code", message: "Enter a valid pairing code.", status: 400 })
   }
   const store = try Store
   const now = try Clock.currentTimeMillis
+  try store.transaction((tx: Tx) =>
+    consumeRateLimitWindowInTx(tx, {
+      scopeKey: `device_approve:${input.accountId}`,
+      limit: DEVICE_APPROVE_ATTEMPTS_PER_HOUR,
+      windowMs: DEVICE_APPROVE_WINDOW_MS,
+      action: "device_approve",
+      message: "Too many device approval attempts. Try again later.",
+      now
+    })
+  )
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       `SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at

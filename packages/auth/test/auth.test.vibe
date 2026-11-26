@@ -1555,6 +1555,73 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
   })
 }, 180_000)
 
+it.effect('Device approval attempts are budgeted per account so pending user codes cannot be guessed (spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/auth/oauth.md, "Exchanging an approved device code issues tokens and atomically replaces any prior connected agent")', () => effect {
+  try TestClock.setTime(Date.now())
+  try withFeedStore(effect {
+    const onboarded = try onboardViaPhone("+14155550177", "dave_device")
+    const accountId = onboarded.account.accountId
+    const client = try registerDynamicClient({
+      clientName: "Guess Target CLI",
+      redirectUris: ["http://127.0.0.1:49152/callback"],
+      scope: "read"
+    })
+    const first = try startDeviceAuthorization({
+      clientId: client.client_id,
+      scope: "read",
+      resource: "https://feed.fun/mcp/",
+      origin: "https://feed.fun"
+    })
+    const approvedFirst = try approveDeviceAuthorization({ accountId, userCode: first.user_code, scopes: ["read"] })
+
+    const second = try startDeviceAuthorization({
+      clientId: client.client_id,
+      scope: "read",
+      resource: "https://feed.fun/mcp/",
+      origin: "https://feed.fun"
+    })
+    const wrongCode = first.user_code === "FEED-9999" || second.user_code === "FEED-9999" ? "FEED-9998" : "FEED-9999"
+    const wrongCodes: string[] = []
+    for (let i = 0; i < 19; i += 1) {
+      wrongCodes.push(try refusedCode(approveDeviceAuthorization({ accountId, userCode: wrongCode, scopes: ["read"] })))
+    }
+    const cappedWrong = try refusedCode(approveDeviceAuthorization({ accountId, userCode: wrongCode, scopes: ["read"] }))
+    const cappedCorrect = try refusedCode(approveDeviceAuthorization({ accountId, userCode: second.user_code, scopes: ["read"] }))
+
+    const other = try onboardViaPhone("+14155550178", "erin_device")
+    const approvedByOther = try approveDeviceAuthorization({ accountId: other.account.accountId, userCode: second.user_code, scopes: ["read"] })
+
+    try TestClock.adjust("1 hour")
+    const third = try startDeviceAuthorization({
+      clientId: client.client_id,
+      scope: "read",
+      resource: "https://feed.fun/mcp/",
+      origin: "https://feed.fun"
+    })
+    const approvedAfterReset = try approveDeviceAuthorization({ accountId, userCode: third.user_code, scopes: ["read"] })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        approvedFirst: approvedFirst.approved,
+        wrongCodes: [...new Set(wrongCodes)],
+        wrongAttempts: wrongCodes.length,
+        cappedWrong,
+        cappedCorrect,
+        approvedByOther: approvedByOther.approved,
+        approvedAfterReset: approvedAfterReset.approved
+      },
+      {
+        approvedFirst: true,
+        wrongCodes: ["invalid_user_code"],
+        wrongAttempts: 19,
+        cappedWrong: "rate_limited:device_approve",
+        cappedCorrect: "rate_limited:device_approve",
+        approvedByOther: true,
+        approvedAfterReset: true
+      }
+    ))
+  })
+}, 180_000)
+
 it.effect('Security hardening (handle hijack, reviewer lockout, RFC 8252 loopback port, SSRF host checks, device pruning) and DB seeding invariants (spec/auth/phone.md, "Story: Admit directory reviewer password sign-in only for `isReviewer` accounts"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only")', () => effect {
   try TestClock.setTime(Date.now())
   try withFeedStore(effect {
