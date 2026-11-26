@@ -1,4 +1,4 @@
-// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
+// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
@@ -105,7 +105,7 @@ const SAMPLE_MARKETS = {
   },
 };
 
-const SAMPLE_LEADERBOARD_PLAYER_ENTRY = {
+const liveEventSources: EventTarget[] = []; let explorePosts: typeof SAMPLE_POSTS = []; let profilePosts: typeof SAMPLE_POSTS = []; const fetchPaths: string[] = []; const VIEWER: ViewerSession = { accountId: "ailon-musk", handle: "ailonmusk", displayName: "AIlon Musk", bio: "", avatarUrl: null, phoneLast2: null, uiMode: "game", balanceCents: 0, startingGrantCents: 0, purchasedCents: 0, isAdmin: false, isReviewer: false, agentGrant: null }; const SAMPLE_LEADERBOARD_PLAYER_ENTRY = {
   rank: 1,
   accountId: "acct-player-1",
   handle: "alice",
@@ -208,7 +208,8 @@ function installMockNetwork() {
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
-    const path = url.pathname;
+    const path = url.pathname;  
+    fetchPaths.push(path);
     if (path === "/api/auth/logout") {
       signedIn = false;
       return json({ ok: true });
@@ -329,7 +330,7 @@ function installMockNetwork() {
     if (path.endsWith("/trades")) {
       return json({ trades: SAMPLE_TRADES });
     }
-    if (path.startsWith("/api/users/")) {
+    if (path === "/api/users/ailonmusk") { return json({ profile: { id: "ailon-musk", handle: "ailonmusk", kind: "user", displayName: "AIlon Musk"}, posts: profilePosts, nextCursor: null, positions: []}); } if (path.startsWith("/api/users/")) {
       const handle = decodeURIComponent(path.slice("/api/users/".length));
       return json({
         profile: {
@@ -384,7 +385,7 @@ function installMockNetwork() {
         ],
       });
     }
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+    if (path === "/api/explore") { const query = url.searchParams.get("q") ?? ""; return json({ trending: [], articles: [], search: { posts: query === "" ? [] : explorePosts, accounts: [], actors: [], organizations: [], tags: [] } });}
     if (path === "/api/leaderboard") {
       const isChars = url.searchParams.get("scope") === "characters" || url.searchParams.get("filter") === "npcs";
       return json(isChars ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
