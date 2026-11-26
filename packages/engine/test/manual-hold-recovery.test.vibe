@@ -1,0 +1,246 @@
+// spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/narrativeArc.md, "Expired markets prepare a private draft proof or enter manual review hold"; spec/engine/narrativeArc.md, "Only admins may approve or resolve markets on manual hold"; spec/engine/narrativeArc.md, "Inductive invariants for 10 slots, unique clues, and secret isolation"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
+import {
+  EngineFailure,
+  approveManualHold,
+  overrideManualHold,
+  recoverExpiredMarkets,
+} from "../src/index.vibe"
+
+module holdTestEnv {
+  import process from "node:process"
+
+  const DISABLED_PROVIDER_KEYS = [
+    "SURPLUS_BASE_URL",
+    "SURPLUS_API_KEY",
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "OLLAMA_BASE_URL",
+    "NPC_LLM_DAILY_BUDGET_USD",
+  ]
+
+  /** @throws {never} */
+  export function enterOfflineSimClock(): Readonly<Record<string, string | undefined>> {
+    const saved: Record<string, string | undefined> = {}
+    for (const key of DISABLED_PROVIDER_KEYS) {
+      saved[key] = process.env[key]
+      process.env[key] = ""
+    }
+    saved.FEED_CLOCK_MODE = process.env.FEED_CLOCK_MODE
+    process.env.FEED_CLOCK_MODE = "simulated"
+    return saved
+  }
+
+  /** @throws {never} */
+  export function restoreSimEnv(saved: Readonly<Record<string, string | undefined>>): void {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
+      }
+    }
+  }
+}
+import { enterOfflineSimClock, restoreSimEnv } from holdTestEnv
+
+function errCode(err: { readonly _tag: string }): string {
+  return err instanceof EngineFailure ? err.code : err._tag
+}
+
+effect function execSql(sql: string, params: ReadonlyArray<unknown> = []) {
+  const store = try Store
+  return try store.transaction((tx: Tx) => tx.query(sql, params))
+}
+
+it.effect(
+  'Manual-hold approval refuses unreasoned outcome overrides and 3rd settlement failure escalates to manual_hold (spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/narrativeArc.md, "Expired markets prepare a private draft proof or enter manual review hold"; spec/engine/narrativeArc.md, "Only admins may approve or resolve markets on manual hold"; spec/engine/narrativeArc.md, "Inductive invariants for 10 slots, unique clues, and secret isolation")',
+  () => scoped(effect {
+    const startMs = Date.UTC(2026, 10, 26, 20, 0, 0)
+    try TestClock.setTime(startMs)
+    try acquireRelease(
+      sync(() => enterOfflineSimClock()),
+      (saved) => sync(() => restoreSimEnv(saved)),
+    )
+    provide localStoreLayer({ kind: "pglite", file: undefined }) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const retryMarketId = "seed-market-7"
+      const escalateMarketId = "seed-market-8"
+      const unsetHoldMarketId = "seed-market-9"
+      const matchingApproveMarketId = "seed-market-10"
+
+      try execSql(
+        `UPDATE feed_prediction_markets
+         SET status = 'expired', phase = 'expired', secret_outcome = 'YES', expires_at = $2
+         WHERE id = $1`,
+        [retryMarketId, startMs - 10_000],
+      )
+      try execSql(
+        `INSERT INTO feed_prediction_positions (market_id, holder_id, holder_kind, side, shares, cost_basis_cents, settled_at, payout_cents)
+         VALUES ($1, 'orphan-holder-retry', 'user', 'YES', 500, 250, NULL, 0)`,
+        [retryMarketId],
+      )
+      try execSql(
+        `INSERT INTO feed_prediction_resolution_work (market_id, attempts, last_error, next_retry_at, updated_at)
+         VALUES ($1, 1, 'prior failure', $2, $2)`,
+        [retryMarketId, startMs - 1_000],
+      )
+
+      const secondAttemptRun = try recoverExpiredMarkets(startMs)
+      const workAfterSecond = try execSql(
+        "SELECT attempts, last_error FROM feed_prediction_resolution_work WHERE market_id = $1",
+        [retryMarketId],
+      )
+      try execSql("DELETE FROM feed_prediction_positions WHERE market_id = $1", [retryMarketId])
+      try execSql("DELETE FROM feed_prediction_resolution_work WHERE market_id = $1", [retryMarketId])
+      try execSql(
+        "UPDATE feed_prediction_markets SET status = 'open', phase = 'opening', expires_at = $2 WHERE id = $1",
+        [retryMarketId, startMs + 3_600_000],
+      )
+
+      try execSql(
+        `UPDATE feed_prediction_markets
+         SET status = 'expired', phase = 'expired', secret_outcome = 'YES', expires_at = $2
+         WHERE id = $1`,
+        [escalateMarketId, startMs - 10_000],
+      )
+      try execSql(
+        `INSERT INTO feed_prediction_positions (market_id, holder_id, holder_kind, side, shares, cost_basis_cents, settled_at, payout_cents)
+         VALUES ($1, 'orphan-holder-escalate', 'user', 'YES', 500, 250, NULL, 0)`,
+        [escalateMarketId],
+      )
+      try execSql(
+        `INSERT INTO feed_prediction_resolution_work (market_id, attempts, last_error, next_retry_at, updated_at)
+         VALUES ($1, 2, 'two prior failures', $2, $2)`,
+        [escalateMarketId, startMs - 1_000],
+      )
+
+      const thirdAttemptRun = try recoverExpiredMarkets(startMs + 1_000)
+      const escalatedMarketRows = try execSql(
+        "SELECT status, phase, secret_outcome FROM feed_prediction_markets WHERE id = $1",
+        [escalateMarketId],
+      )
+      const escalatedWorkRows = try execSql(
+        "SELECT market_id FROM feed_prediction_resolution_work WHERE market_id = $1",
+        [escalateMarketId],
+      )
+      try execSql("DELETE FROM feed_prediction_positions WHERE market_id = $1", [escalateMarketId])
+
+      try execSql(
+        `UPDATE feed_prediction_markets
+         SET status = 'manual_hold', phase = 'manual_hold', secret_outcome = NULL, expires_at = $2
+         WHERE id = $1`,
+        [unsetHoldMarketId, startMs - 5_000],
+      )
+      try execSql(
+        `UPDATE feed_prediction_markets
+         SET status = 'manual_hold', phase = 'manual_hold', secret_outcome = 'YES', expires_at = $2
+         WHERE id = $1`,
+        [matchingApproveMarketId, startMs - 5_000],
+      )
+
+      const unsetApproveWithExplicitErr = try Effect.flip(approveManualHold(unsetHoldMarketId, "yes"))
+      const flipViaApproveErr = try Effect.flip(approveManualHold(escalateMarketId, "no"))
+      const matchingExplicitApproved = try approveManualHold(matchingApproveMarketId, "yes")
+      const overriddenFlip = try overrideManualHold(
+        escalateMarketId,
+        "no",
+        "Verified post-close restatement overturned initial YES signal",
+      )
+      const overriddenUnset = try overrideManualHold(
+        unsetHoldMarketId,
+        "yes",
+        "Official filing confirmed YES outcome for held market",
+      )
+
+      const finalRows = try execSql(
+        `SELECT id, status, secret_outcome, resolved_outcome
+         FROM feed_prediction_markets
+         WHERE id IN ($1, $2, $3)
+         ORDER BY id ASC`,
+        [escalateMarketId, unsetHoldMarketId, matchingApproveMarketId],
+      )
+      const byId = new Map(
+        finalRows.map((r) => [
+          toText(r.id) ?? "",
+          {
+            status: toText(r.status),
+            secretOutcome: toText(r.secret_outcome),
+            resolvedOutcome: toText(r.resolved_outcome),
+          },
+        ]),
+      )
+
+      try Effect.try(() => {
+        assert.deepStrictEqual(
+          {
+            secondAttempt: {
+              manualHolds: secondAttemptRun.manualHolds,
+              retried: secondAttemptRun.retried,
+              pendingCount: secondAttemptRun.pendingCount,
+              attempts: toInt(workAfterSecond[0]?.attempts),
+            },
+            thirdAttempt: {
+              manualHolds: thirdAttemptRun.manualHolds,
+              retried: thirdAttemptRun.retried,
+              pendingCount: thirdAttemptRun.pendingCount,
+              status: toText(escalatedMarketRows[0]?.status),
+              phase: toText(escalatedMarketRows[0]?.phase),
+              workRemaining: escalatedWorkRows.length,
+            },
+            unsetApproveCode: errCode(unsetApproveWithExplicitErr),
+            flipApproveCode: errCode(flipViaApproveErr),
+            matchingApproveOutcome: matchingExplicitApproved.outcome,
+            overriddenFlipOutcome: overriddenFlip.outcome,
+            overriddenUnsetOutcome: overriddenUnset.outcome,
+            escalatedFinal: byId.get(escalateMarketId),
+            unsetFinal: byId.get(unsetHoldMarketId),
+            matchingFinal: byId.get(matchingApproveMarketId),
+          },
+          {
+            secondAttempt: {
+              manualHolds: 0,
+              retried: 1,
+              pendingCount: 1,
+              attempts: 2,
+            },
+            thirdAttempt: {
+              manualHolds: 1,
+              retried: 0,
+              pendingCount: 0,
+              status: "manual_hold",
+              phase: "manual_hold",
+              workRemaining: 0,
+            },
+            unsetApproveCode: "MANUAL_HOLD_INVALID",
+            flipApproveCode: "MANUAL_HOLD_INVALID",
+            matchingApproveOutcome: "yes",
+            overriddenFlipOutcome: "no",
+            overriddenUnsetOutcome: "yes",
+            escalatedFinal: {
+              status: "resolved",
+              secretOutcome: "NO",
+              resolvedOutcome: "NO",
+            },
+            unsetFinal: {
+              status: "resolved",
+              secretOutcome: "YES",
+              resolvedOutcome: "YES",
+            },
+            matchingFinal: {
+              status: "resolved",
+              secretOutcome: "YES",
+              resolvedOutcome: "YES",
+            },
+          },
+        )
+      })
+    }
+  }),
+  60_000,
+)
