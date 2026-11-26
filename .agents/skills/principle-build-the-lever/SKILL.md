@@ -20,4 +20,14 @@ Default to building the lever. Skip it only when the task is trivial, a couple o
 
 The bar is triviality, not repetition. A one-off still earns a lever when the lever is what makes the work checkable. Per the [Laziness Protocol](../principle-laziness-protocol/SKILL.md), build the smallest script that does or proves the job, never a framework.
 
+## Project CLI (`packages/cli`)
+
+In a Vibestack project, persistent levers belong in the project CLI (`packages/cli`, invoked with `pnpm cli <command>`) instead of loose files under `scripts/` or proliferating one-off `package.json` scripts:
+
+- **One home for every project lever.** Verification harnesses, fixture or database seeding, state inspection, data validation, codemods, smoke checks, and operational scripts are subcommands of `pnpm cli`. Run `pnpm cli --help` (or `pnpm cli help --json`) to discover existing commands and extend one before adding another.
+- **One file, one registry entry.** Add a subcommand as a file under `packages/cli/src/commands` using `defineCommand`, register it in `packages/cli/src/commands/index.ts`, and cover it in `packages/cli/test`.
+- **Tool runtime.** `packages/cli` is a project tool running on Node 26 TypeScript by default (~35ms startup, zero runtime dependencies, works in `vibelang`, `typescript`, and `specs-only` modes). Subcommands that need to drive VibeLang or Effect services can invoke or import them when needed.
+- **Boundary-parsed, structured, and idempotent.** Declare flags on `defineCommand` so arguments are validated at the boundary, support `--json` automatically via the returned `CommandResult`, write output through `CommandResult` or injected `ctx.io` (never `console.*`), keep operations safe to rerun, and delete commands once they are no longer needed.
+- **Existing repositories without `packages/cli`.** Extend the repository's existing CLI entrypoint if it has one, or introduce the same `packages/cli` workspace package instead of adding ad-hoc scripts.
+
 Distinct from [Encode Lessons in Structure](../principle-encode-lessons-in-structure/SKILL.md), which makes a recurring instruction a durable guardrail. This is throughput and reviewability on the work in front of you. For scripting the verification itself, see [Prove It Works](../principle-prove-it-works/SKILL.md).

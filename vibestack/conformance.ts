@@ -26,6 +26,55 @@ export interface Driver<E, V> {
   receive?(key: string, raw: unknown, by?: unknown): Outcome | Promise<Outcome>;
 }
 
+export type PathStrategy = "shortest" | "transitions" | "simple";
+
+export interface ModelStep<S, E> {
+  readonly before: S;
+  readonly event: Sent<E>;
+  readonly allowed: boolean;
+  readonly after: S;
+  readonly out?: unknown;
+}
+
+export interface ModelPath<S, E> {
+  readonly description: string;
+  readonly targetState: string;
+  readonly steps: readonly ModelStep<S, E>[];
+  readonly events: readonly Sent<E>[];
+}
+
+export interface PlanOptions<S, E> {
+  readonly strategy?: PathStrategy;
+  readonly stateKey?: (state: S) => string;
+  readonly includeRefusals?: boolean;
+  readonly maxStates?: number;
+  readonly maxDepth?: number;
+  readonly maxPaths?: number;
+  readonly transitions?: readonly string[];
+  readonly predicates?: Readonly<Record<string, (state: S) => boolean>>;
+  readonly seedTraces?: readonly (readonly Sent<E>[])[];
+  readonly hasOutput?: boolean;
+}
+
+export interface TransitionCoverage {
+  readonly total: number;
+  readonly accepted: readonly string[];
+  readonly refused: readonly string[];
+  readonly uncovered: readonly string[];
+}
+
+export interface ModelPlan<S, E> {
+  readonly strategy: PathStrategy;
+  readonly paths: readonly ModelPath<S, E>[];
+  readonly prefixForTransition: ReadonlyMap<string, { readonly prefix: readonly Sent<E>[]; readonly event: Sent<E> }>;
+  readonly coverage: {
+    readonly states: number;
+    readonly paths: number;
+    readonly truncated: boolean;
+    readonly transitions: TransitionCoverage;
+  };
+}
+
 export interface Options<S, V> {
   /** What of the spec's state the driver can observe; without it, `observe` returns the whole state. */
   view?: (state: S) => V;
@@ -33,11 +82,15 @@ export interface Options<S, V> {
   keys?: string[];
   /**
    * At most this many random walks after the journeys, within the fixed profile (conform.ts); 0 runs the journeys
-   * only, as a slow driver (a browser) should.
+   * and model paths only, as a slow driver (a browser) should.
    */
   walks?: number;
   steps?: number;
   seed?: number;
+  /** Deterministic model-based path strategy run before random walks; `false` disables generated paths. */
+  paths?: PathStrategy | false;
+  /** Optional state abstraction key for model path planning. */
+  stateKey?: (state: S) => string;
 }
 
 /** What the generated `gen/<name>.ts` gives the check. */
@@ -63,6 +116,7 @@ export interface Found<E> {
   shape: ComparisonShape;
   outputShape?: ComparisonShape;
   traces?: Sent<E>[][];
+  transitions?: string[];
 }
 export type Sent<E> = E & { by?: unknown };
 
@@ -84,17 +138,406 @@ export class ConformanceError<E = unknown> extends Error {
   }
 }
 
+const eventTypeOf = (sent: unknown): string => String((sent as { type?: unknown })?.type ?? "");
+
+function isOutputEnvelope<S, E>(oracle: Oracle<S, E>, value: unknown): value is { state: S; out: unknown } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return keys.length === 2 && Object.hasOwn(record, "state") && Object.hasOwn(record, "out")
+    && Array.isArray(record.out) && oracle.parseState(value) === undefined && oracle.parseState(record.state) !== undefined;
+}
+
+function stepOracle<S, E>(oracle: Oracle<S, E>, before: S, sent: Sent<E>, hasOutput?: boolean): ModelStep<S, E> {
+  const { by, ...raw } = sent as Sent<E> & Record<string, unknown>;
+  const allowed = oracle.enabled(before, raw as E, by);
+  if (!allowed) return { before, event: sent, allowed: false, after: before };
+  const result = oracle.step(before, raw as E, by);
+  const emits = hasOutput ?? isOutputEnvelope(oracle, result);
+  const after = emits ? (result as { state: S; out: unknown }).state : result as S;
+  const out = emits ? (result as { state: S; out: unknown }).out : undefined;
+  return { before, event: sent, allowed: true, after, ...(out !== undefined ? { out } : {}) };
+}
+
+function orderEventsDiverse<E>(events: readonly Sent<E>[]): Sent<E>[] {
+  const unique = new Map<string, Sent<E>>();
+  for (const event of events) unique.set(JSON.stringify(event), event);
+  const sorted = [...unique.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, event]) => event);
+  const buckets = new Map<string, Sent<E>[]>();
+  for (const event of sorted) {
+    const key = `${eventTypeOf(event)}\0${JSON.stringify((event as Sent<E> & { by?: unknown }).by)}`;
+    const list = buckets.get(key);
+    if (list) list.push(event);
+    else buckets.set(key, [event]);
+  }
+  const ordered: Sent<E>[] = [];
+  const groups = [...buckets.values()];
+  for (let round = 0; ordered.length < sorted.length; round++) {
+    for (const group of groups) if (round < group.length) ordered.push(group[round]);
+  }
+  return ordered;
+}
+
+function describeSteps<S, E>(steps: readonly ModelStep<S, E>[]): string {
+  if (!steps.length) return "initial";
+  return steps.map((step) => `${eventTypeOf(step.event)}${step.allowed ? "" : " (refused)"}`).join(" -> ");
+}
+
+function deduplicateSpines<S, E>(spines: readonly { targetState: string; steps: readonly ModelStep<S, E>[] }[]): { targetState: string; steps: readonly ModelStep<S, E>[] }[] {
+  const keyed = spines.map((spine) => ({
+    spine,
+    keys: spine.steps.map((step) => JSON.stringify(step.event)),
+    joined: spine.steps.map((step) => JSON.stringify(step.event)).join("\0"),
+  }));
+  keyed.sort((a, b) => b.keys.length - a.keys.length || a.joined.localeCompare(b.joined));
+  const kept: typeof keyed = [];
+  for (const candidate of keyed) {
+    const subsumed = kept.some((existing) => candidate.keys.length <= existing.keys.length
+      && candidate.keys.every((key, index) => existing.keys[index] === key));
+    if (!subsumed) kept.push(candidate);
+  }
+  return kept.map((entry) => entry.spine).reverse();
+}
+
+const MAX_CONCRETE_PER_ABSTRACT = 4;
+const MAX_INLINE_REFUSALS = 64;
+
+function collectSimpleSpines<S, E>(
+  oracle: Oracle<S, E>,
+  ordered: readonly Sent<E>[],
+  abstractKeyOf: (state: S) => string,
+  initialAbstract: string,
+  maxDepth: number,
+  maxPaths: number,
+  hasOutput?: boolean,
+): { spines: { targetState: string; steps: readonly ModelStep<S, E>[] }[]; truncated: boolean } {
+  const simpleSpines: { targetState: string; steps: ModelStep<S, E>[] }[] = [];
+  let truncated = false;
+  const visit = (state: S, abstractKey: string, visited: Set<string>, steps: ModelStep<S, E>[]) => {
+    if (simpleSpines.length >= maxPaths) { truncated = true; return; }
+    let extended = false;
+    if (steps.length < maxDepth) {
+      const seenNext = new Set<string>();
+      for (const sent of ordered) {
+        const stepped = stepOracle(oracle, state, sent, hasOutput);
+        if (!stepped.allowed) continue;
+        const nextAbstract = abstractKeyOf(stepped.after);
+        if (visited.has(nextAbstract)) continue;
+        const dedup = `${eventTypeOf(sent)}\0${nextAbstract}`;
+        if (seenNext.has(dedup)) continue;
+        seenNext.add(dedup);
+        extended = true;
+        visited.add(nextAbstract);
+        steps.push(stepped);
+        visit(stepped.after, nextAbstract, visited, steps);
+        steps.pop();
+        visited.delete(nextAbstract);
+        if (simpleSpines.length >= maxPaths) { truncated = true; return; }
+      }
+    }
+    if (!extended && steps.length > 0) simpleSpines.push({ targetState: abstractKey, steps: [...steps] });
+  };
+  visit(oracle.initial, initialAbstract, new Set([initialAbstract]), []);
+  return { spines: deduplicateSpines(simpleSpines), truncated };
+}
+
+function attachInlineRefusals<S, E>(
+  oracle: Oracle<S, E>,
+  ordered: readonly Sent<E>[],
+  rawSpines: readonly { targetState: string; steps: readonly ModelStep<S, E>[] }[],
+  modeKeyOf: (state: S) => string,
+  includeRefusals: boolean,
+  hasOutput?: boolean,
+): ModelPath<S, E>[] {
+  const emittedRefusedTypes = new Set<string>();
+  const emittedModeRefusals = new Set<string>();
+  let totalRefusals = 0;
+
+  const refusalsAt = (state: S): ModelStep<S, E>[] => {
+    if (!includeRefusals || totalRefusals >= MAX_INLINE_REFUSALS) return [];
+    const mode = modeKeyOf(state);
+    const chosen: ModelStep<S, E>[] = [];
+    const seenTypesHere = new Set<string>();
+    const candidates: ModelStep<S, E>[] = [];
+    for (const sent of ordered) {
+      const stepped = stepOracle(oracle, state, sent, hasOutput);
+      if (stepped.allowed) continue;
+      const type = eventTypeOf(sent);
+      if (seenTypesHere.has(type)) continue;
+      const modePair = `${mode}\0${type}`;
+      if (emittedRefusedTypes.has(type) && emittedModeRefusals.has(modePair)) continue;
+      seenTypesHere.add(type);
+      candidates.push(stepped);
+    }
+    candidates.sort((a, b) => Number(emittedRefusedTypes.has(eventTypeOf(a.event))) - Number(emittedRefusedTypes.has(eventTypeOf(b.event))));
+    for (const stepped of candidates) {
+      if (totalRefusals >= MAX_INLINE_REFUSALS) break;
+      const type = eventTypeOf(stepped.event);
+      emittedRefusedTypes.add(type);
+      emittedModeRefusals.add(`${mode}\0${type}`);
+      chosen.push(stepped);
+      totalRefusals++;
+    }
+    return chosen;
+  };
+
+  return rawSpines.map((spine) => {
+    const steps: ModelStep<S, E>[] = [];
+    steps.push(...refusalsAt(oracle.initial));
+    for (const step of spine.steps) {
+      steps.push(step);
+      steps.push(...refusalsAt(step.after));
+    }
+    return {
+      description: describeSteps(steps),
+      targetState: spine.targetState,
+      steps,
+      events: steps.map((step) => step.event),
+    };
+  });
+}
+
 /**
- * Run the journeys, the probes of a driver that can `receive`, then seeded random walks; throw a ConformanceError at
- * the first disagreement, shrunk to the fewest events that show it, or an Error at the first probe that fails.
+ * Compute deterministic model-based test paths over a generated state machine oracle.
+ * Uses bounded concrete BFS with behavioral state abstraction (enabledness + predicates),
+ * optional deep-trace seeding from Quint, prefix deduplication, and inline refusal checks.
+ */
+export function planModel<S, E>(
+  oracle: Oracle<S, E>,
+  events: readonly Sent<E>[],
+  shape: ComparisonShape = "scalar",
+  options: PlanOptions<S, E> = {},
+): ModelPlan<S, E> {
+  const strategy: PathStrategy = options.strategy ?? "transitions";
+  const includeRefusals = options.includeRefusals ?? strategy === "transitions";
+  const maxStates = options.maxStates ?? 256;
+  const maxDepth = options.maxDepth ?? 12;
+  const maxPaths = options.maxPaths ?? 64;
+  for (const [name, count] of Object.entries({ maxStates, maxDepth, maxPaths })) {
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error(`model plan ${name} must be a nonnegative safe integer`);
+  }
+  const ordered = orderEventsDiverse(events);
+  const allTransitions = [...new Set([...(options.transitions ?? []), ...ordered.map(eventTypeOf)])].sort();
+  if (!ordered.length || maxStates === 0 || maxPaths === 0) {
+    return {
+      strategy,
+      paths: [],
+      prefixForTransition: new Map(),
+      coverage: {
+        states: 1,
+        paths: 0,
+        truncated: ordered.length > 0,
+        transitions: { total: allTransitions.length, accepted: [], refused: [], uncovered: allTransitions },
+      },
+    };
+  }
+
+  const probeEvents = ordered.slice(0, 48);
+  const predicateEntries = Object.entries(options.predicates ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const transitionNames = [...new Set(ordered.map(eventTypeOf))].sort();
+  const modeKeyOf = (state: S): string => transitionNames.map((name) =>
+    ordered.some((sent) => eventTypeOf(sent) === name && stepOracle(oracle, state, sent, options.hasOutput).allowed) ? "1" : "0").join("");
+  const abstractKeyOf = (state: S): string => {
+    if (options.stateKey) return options.stateKey(state);
+    const enabledBits = probeEvents.map((sent) => {
+      const { by, ...raw } = sent as Sent<E> & Record<string, unknown>;
+      return oracle.enabled(state, raw as E, by) ? "1" : "0";
+    }).join("");
+    if (!predicateEntries.length) return enabledBits;
+    const predBits = predicateEntries.map(([, fn]) => (fn(state) ? "1" : "0")).join("");
+    return `${enabledBits}|${predBits}`;
+  };
+
+  interface Node {
+    concreteKey: string;
+    abstractKey: string;
+    modeKey: string;
+    state: S;
+    steps: ModelStep<S, E>[];
+  }
+
+  const initialAbstract = abstractKeyOf(oracle.initial);
+  const nodes: Node[] = [{
+    concreteKey: canonical(oracle.initial, shape),
+    abstractKey: initialAbstract,
+    modeKey: modeKeyOf(oracle.initial),
+    state: oracle.initial,
+    steps: [],
+  }];
+  const seenConcrete = new Set<string>([nodes[0].concreteKey]);
+  const abstractCount = new Map<string, number>([[initialAbstract, 1]]);
+  const abstractFirst = new Map<string, number>([[initialAbstract, 0]]);
+  const acceptedByType = new Map<string, { nodeIndex: number; step: ModelStep<S, E> }>();
+  const refusedByType = new Map<string, { nodeIndex: number; step: ModelStep<S, E> }>();
+  let truncated = false;
+
+  const inspectRefusals = (nodeIndex: number) => {
+    const node = nodes[nodeIndex];
+    for (const sent of ordered) {
+      const stepped = stepOracle(oracle, node.state, sent, options.hasOutput);
+      if (stepped.allowed) continue;
+      const type = eventTypeOf(sent);
+      if (!refusedByType.has(type)) refusedByType.set(type, { nodeIndex, step: stepped });
+    }
+  };
+
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    inspectRefusals(i);
+    const expanded = new Set<string>();
+    for (const sent of ordered) {
+      const stepped = stepOracle(oracle, node.state, sent, options.hasOutput);
+      if (!stepped.allowed) continue;
+      const type = eventTypeOf(sent);
+      if (!acceptedByType.has(type)) acceptedByType.set(type, { nodeIndex: i, step: stepped });
+      const nextConcrete = canonical(stepped.after, shape);
+      const nextAbstract = abstractKeyOf(stepped.after);
+      const edgeKey = `${type}\0${nextAbstract}`;
+      if (node.steps.length >= maxDepth || seenConcrete.has(nextConcrete) || expanded.has(edgeKey)) continue;
+      expanded.add(edgeKey);
+      const count = abstractCount.get(nextAbstract) ?? 0;
+      if (count >= MAX_CONCRETE_PER_ABSTRACT) continue;
+      if (nodes.length >= maxStates) { truncated = true; continue; }
+      seenConcrete.add(nextConcrete);
+      abstractCount.set(nextAbstract, count + 1);
+      const nextIndex = nodes.length;
+      nodes.push({
+        concreteKey: nextConcrete,
+        abstractKey: nextAbstract,
+        modeKey: modeKeyOf(stepped.after),
+        state: stepped.after,
+        steps: [...node.steps, stepped],
+      });
+      if (!abstractFirst.has(nextAbstract)) abstractFirst.set(nextAbstract, nextIndex);
+    }
+  }
+
+  for (const seedTrace of options.seedTraces ?? []) {
+    let state = oracle.initial;
+    const prefix: ModelStep<S, E>[] = [];
+    for (const sent of seedTrace) {
+      const stepped = stepOracle(oracle, state, sent, options.hasOutput);
+      if (!stepped.allowed) break;
+      const type = eventTypeOf(sent);
+      const existingAccepted = acceptedByType.get(type);
+      if (!existingAccepted || prefix.length < nodes[existingAccepted.nodeIndex].steps.length) {
+        let hostIndex = nodes.findIndex((n) => n.steps.length === prefix.length
+          && n.steps.every((s, idx) => JSON.stringify(s.event) === JSON.stringify(prefix[idx].event)));
+        if (hostIndex < 0) {
+          hostIndex = nodes.length;
+          nodes.push({
+            concreteKey: canonical(state, shape),
+            abstractKey: abstractKeyOf(state),
+            modeKey: modeKeyOf(state),
+            state,
+            steps: [...prefix],
+          });
+        }
+        acceptedByType.set(type, { nodeIndex: hostIndex, step: stepped });
+      }
+      prefix.push(stepped);
+      state = stepped.after;
+      const nextAbstract = abstractKeyOf(state);
+      if (!abstractFirst.has(nextAbstract)) {
+        const idx = nodes.length;
+        nodes.push({
+          concreteKey: canonical(state, shape),
+          abstractKey: nextAbstract,
+          modeKey: modeKeyOf(state),
+          state,
+          steps: [...prefix],
+        });
+        abstractFirst.set(nextAbstract, idx);
+        inspectRefusals(idx);
+      }
+    }
+  }
+
+  let rawSpines: { targetState: string; steps: readonly ModelStep<S, E>[] }[];
+  if (strategy === "simple") {
+    const simple = collectSimpleSpines(oracle, ordered, abstractKeyOf, initialAbstract, maxDepth, maxPaths, options.hasOutput);
+    rawSpines = simple.spines;
+    truncated ||= simple.truncated;
+  } else {
+    const candidates: { targetState: string; steps: readonly ModelStep<S, E>[] }[] = [];
+    for (const nodeIndex of abstractFirst.values()) {
+      const node = nodes[nodeIndex];
+      if (node.steps.length > 0) candidates.push({ targetState: node.abstractKey, steps: node.steps });
+    }
+    if (strategy === "transitions") {
+      for (const { nodeIndex, step } of acceptedByType.values()) {
+        const host = nodes[nodeIndex];
+        candidates.push({ targetState: abstractKeyOf(step.after), steps: [...host.steps, step] });
+      }
+      for (const { nodeIndex } of refusedByType.values()) {
+        const host = nodes[nodeIndex];
+        if (host.steps.length > 0) candidates.push({ targetState: host.abstractKey, steps: host.steps });
+      }
+    }
+    rawSpines = deduplicateSpines(candidates);
+    if (!rawSpines.length && includeRefusals && refusedByType.size > 0) {
+      rawSpines = [{ targetState: initialAbstract, steps: [] }];
+    }
+  }
+
+  if (rawSpines.length > maxPaths) {
+    rawSpines = rawSpines.slice(0, maxPaths);
+    truncated = true;
+  }
+
+  const paths = attachInlineRefusals(oracle, ordered, rawSpines, modeKeyOf, includeRefusals, options.hasOutput);
+  const prefixForTransition = new Map<string, { readonly prefix: readonly Sent<E>[]; readonly event: Sent<E> }>();
+  for (const [type, { nodeIndex, step }] of acceptedByType) {
+    prefixForTransition.set(type, { prefix: nodes[nodeIndex].steps.map((s) => s.event), event: step.event });
+  }
+
+  const accepted = [...new Set(paths.flatMap((p) => p.steps.filter((s) => s.allowed).map((s) => eventTypeOf(s.event))))].sort();
+  const refused = [...new Set(paths.flatMap((p) => p.steps.filter((s) => !s.allowed).map((s) => eventTypeOf(s.event))))].sort();
+  const uncovered = allTransitions.filter((t) => !accepted.includes(t));
+
+  return {
+    strategy,
+    paths,
+    prefixForTransition,
+    coverage: {
+      states: abstractFirst.size,
+      paths: paths.length,
+      truncated,
+      transitions: { total: allTransitions.length, accepted, refused, uncovered },
+    },
+  };
+}
+
+/**
+ * Run the journeys, deterministic model-based paths, probes of a driver that can `receive`, then seeded random walks;
+ * throw a ConformanceError at the first disagreement, shrunk to the fewest events that show it, or an Error at the
+ * first probe that fails.
  */
 export async function check<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, driver: Driver<E, V>, options: Options<S, V> = {}) {
-  const { differ, run, fail, seen, outcomes, keys, walks, steps, seed } = runner(oracle, found, driver, options);
+  const { differ, run, fail, seen, outcomes, acceptedTransitions, refusedTransitions, keys, walks, steps, seed } = runner(oracle, found, driver, options);
+  const ranTraces = new Set<string>();
   for (const j of found.journeys) {
     const trace: Trace<E> = j.events.map((e) => [keys[0], e]);
+    ranTraces.add(JSON.stringify(j.events));
     if (await differ(trace)) await fail(`journey "${j.story}" / "${j.rule}"`, trace);
   }
-  const probes = driver.receive ? await probe(oracle, found, driver, keys[0], run, options.view) : 0;
+  const plan = options.paths === false ? undefined : planModel(oracle, found.events, found.shape, {
+    strategy: options.paths ?? "transitions",
+    stateKey: options.stateKey,
+    transitions: found.transitions,
+    hasOutput: !!found.outputShape,
+    seedTraces: [...found.journeys.map((j) => j.events), ...(found.traces ?? [])],
+  });
+  let executedPlans = 0;
+  for (const modelPath of plan?.paths ?? []) {
+    const key = JSON.stringify(modelPath.events);
+    if (ranTraces.has(key)) continue;
+    ranTraces.add(key);
+    executedPlans++;
+    const trace: Trace<E> = modelPath.events.map((e) => [keys[0], e]);
+    if (await differ(trace)) await fail(`model path "${modelPath.description}"`, trace);
+  }
+  const probes = driver.receive ? await probe(oracle, found, driver, keys[0], run, options.view, plan?.prefixForTransition) : 0;
   // A walk mostly takes events the spec allows, so that it reaches deep states, and sometimes any event, so that refusals are tried.
   const random = rng(seed);
   for (let w = 0; w < walks; w++) {
@@ -115,7 +558,26 @@ export async function check<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, driv
     if (await differ(trace)) await fail(`walk ${w + 1} of seed ${seed}`, trace);
   }
 
-  return { journeys: found.journeys.length, probes, walks, observed: seen.size, outcomes: [...outcomes], effects: found.outputShape ? driver.observeOutput ? "checked" : "not observed" : "none" };
+  const knownTransitions = [...new Set([...(found.transitions ?? []), ...found.events.map(eventTypeOf)])].sort();
+  const accepted = [...acceptedTransitions].sort();
+  const refused = [...refusedTransitions].sort();
+  const coverage: TransitionCoverage = {
+    total: knownTransitions.length,
+    accepted,
+    refused,
+    uncovered: knownTransitions.filter((t) => !acceptedTransitions.has(t)),
+  };
+
+  return {
+    plans: executedPlans,
+    journeys: found.journeys.length,
+    probes,
+    walks,
+    observed: seen.size,
+    outcomes: [...outcomes],
+    coverage,
+    effects: found.outputShape ? driver.observeOutput ? "checked" : "not observed" : "none",
+  };
 }
 
 /**
@@ -135,14 +597,18 @@ export async function replay<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, dri
  * the application copies what it decodes (SPEC.md, "Using the generated code"). Returns how many were sent.
  */
 async function probe<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, driver: Driver<E, V>, key: string,
-  run: (trace: Trace<E>) => Promise<Map<string, S> | string>, view?: (state: S) => V) {
+  run: (trace: Trace<E>) => Promise<Map<string, S> | string>, view?: (state: S) => V,
+  prefixForTransition?: ReadonlyMap<string, { readonly prefix: readonly Sent<E>[]; readonly event: Sent<E> }>) {
   const prefixes: Sent<E>[][] = [[], ...found.journeys.flatMap((j) => j.events.map((_, i) => j.events.slice(0, i + 1)))];
   const after = (prefix: Sent<E>[]) => prefix.reduce<S>((s, { by, ...e }) => { const t = transition(oracle, found, s, e, by); return typeof t === "string" ? s : t.after; }, oracle.initial);
   let sent = 0;
   const typeOf = (e: unknown) => (e as { type: string }).type;
   for (const type of new Set(found.events.map(typeOf))) {
+    const planned = prefixForTransition?.get(type);
     const samples = found.events.filter((e) => typeOf(e) === type);
-    const [prefix, sample] = prefixes.flatMap((p) => samples.filter(({ by, ...e }) => oracle.enabled(after(p), e as E, by)).map((e) => [p, e] as const))[0] ?? [[], samples[0]] as const;
+    const [prefix, sample] = planned
+      ? [[...planned.prefix], planned.event] as const
+      : prefixes.flatMap((p) => samples.filter(({ by, ...e }) => oracle.enabled(after(p), e as E, by)).map((e) => [p, e] as const))[0] ?? [[], samples[0]] as const;
     const { by, ...event } = sample as Sent<E> & Record<string, unknown>;
     const model = await run(prefix.map((e) => [key, e]));
     if (typeof model === "string") throw new Error(`conformance to ${found.source}: before probing ${type}: ${model}`);
@@ -182,6 +648,8 @@ function runner<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, driver: Driver<E
   for (const [name, count] of Object.entries({ walks, steps, seed })) if (!Number.isSafeInteger(count) || count < 0) throw new Error(`conformance ${name} must be a nonnegative safe integer`);
   const seen = new Set<string>();
   const outcomes = new Set<Outcome>();
+  const acceptedTransitions = new Set<string>();
+  const refusedTransitions = new Set<string>();
 
   /** The first way the application differs from the spec along `trace`, or else the spec's state of each key after it. */
   const run = async (trace: Trace<E>): Promise<Map<string, S> | string> => {
@@ -204,6 +672,8 @@ function runner<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, driver: Driver<E
       if (did !== "accepted" && did !== "refused") return `${at}: dispatch returned ${show(did)}; it returns "accepted" or "refused" and throws otherwise`;
       outcomes.add(did);
       if (allowed !== (did === "accepted")) return `${at}: the spec ${allowed ? "allows" : "refuses"} it, the application ${did} it`;
+      if (allowed) acceptedTransitions.add(eventTypeOf(event));
+      else refusedTransitions.add(eventTypeOf(event));
       if (found.outputShape && driver.observeOutput) {
         const actual = await driver.observeOutput(key);
         if (canonical(actual, found.outputShape) !== canonical(out, found.outputShape)) return `${at}: emitted effects differ from the spec`;
@@ -228,7 +698,7 @@ function runner<S, E, V>(oracle: Oracle<S, E>, found: Found<E>, driver: Driver<E
     throw new ConformanceError(`conformance to ${found.source}: ${what}, shrunk to ${trace.length} events:\n${lines(trace)}\n${await differ(trace)}`, trace, seed, what);
   };
 
-  return { differ, run, fail, seen, outcomes, keys, walks, steps, seed };
+  return { differ, run, fail, seen, outcomes, acceptedTransitions, refusedTransitions, keys, walks, steps, seed };
 }
 
 /** The state type, resolved by the generator so sets are sorted only in the variant that owns them. */

@@ -35,6 +35,17 @@ export default {
         "wrangler"
       ]
     },
+    "packages/cli": {
+      "entry": [
+        "src/index.ts",
+        "src/main.ts",
+        "test/**/*.test.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "test/**/*.ts"
+      ]
+    },
     "packages/ui": {
       "entry": [
         "src/**/*.{meta,stories}.tsx"

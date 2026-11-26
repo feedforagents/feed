@@ -336,11 +336,12 @@ function witnessedIn(traces: Step[][], goals: string[]): Map<string, Step[]> {
 const SPECS_AT_ONCE = 2 * os.availableParallelism();
 let specsSimulating = 0;
 const specsWaiting: (() => void)[] = [];
-async function inTurn<T>(go: () => Promise<T>): Promise<T> {
-  if (specsSimulating < SPECS_AT_ONCE) specsSimulating++;
+async function inTurn<T>(go: (waited: boolean) => Promise<T>): Promise<T> {
+  const waited = specsSimulating >= SPECS_AT_ONCE;
+  if (!waited) specsSimulating++;
   else await new Promise<void>((start) => specsWaiting.push(start));
   try {
-    return await go();
+    return await go(waited);
   } finally {
     const next = specsWaiting.shift();
     if (next) next();
@@ -374,7 +375,7 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
   const key = [...Object.keys(files).sort().map((f) => `${f}\0${files[f].key}`), model.guardHarness, ...(model.witness ? [model.witness.harness] : []),
     ...(model.refusal ? [model.refusal.harness, String(REFUSAL_GUIDE_STEPS)] : []), spec.file, spec.rules.map((r) => `${r.key}\0${r.defs.join(" ")}`).join("\n"),
     String([SAMPLES, WITNESS_SAMPLES, WITNESS_PREFLIGHT_SAMPLES, COMPARED_SAMPLES, REPLAYED, LASSO_TRACES, simulationSteps, ...DEPTHS, seed])];
-  return remembered<Simulation>(memory, entry(memory.root, "simulate", key), (memory) => inTurn(async () => {
+  return remembered<Simulation>(memory, entry(memory.root, "simulate", key), async (memory) => {
     const mainInput = await project();
     const harness: Harness = mainInput ? { memory, model, files: { ...files, [modelFile]: mainInput }, reproduceIn } : { memory, model, files };
     const guided = model.witness && { memory, model, files: harnessFiles(spec, specs, model, model.witness), main: witnessFile(model.name) } satisfies Harness;
@@ -414,15 +415,16 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
       // The usual starting states each get a whole bounded interval after them.
       const sim = await simulate(harness, "inv", model.leadsTo.length ? LASSO_TRACES : REPLAYED, SAMPLES, "step", true, simulationSteps, seed);
       if (broke([sim])) return { said, tested };
+      const tryGuide = (goal: string, invariant: string) => {
+        const path = model.witness?.paths.get(goal);
+        return guided && path && simulate(guided, invariant, 1, 1, witnessAction(goal), false, path.length + 1 + Number(!!model.opaques.length), seed);
+      };
       const [probe, ...searches] = await allDone([
         simulate(harness, "inv", REPLAYED, COMPARED_SAMPLES, "probe", true, STEPS, seed),
         ...model.sometimes.map(async (w) => {
           const invariant = `never_${w}`;
-          const length = model.witness?.lengths.get(w);
-          if (guided && length !== undefined) {
-            const run = await simulate(guided, invariant, 1, 1, witnessAction(w), false, length + 1 + Number(!!model.opaques.length), seed);
-            if (run.broken) return run;
-          }
+          const run = await tryGuide(w, invariant);
+          if (run?.broken) return run;
           return search(harness, invariant, "step", DEPTHS, WITNESS_SAMPLES, seed);
         }),
       ]);
@@ -443,10 +445,26 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
       // search also stops at a broken rule (see the harness), which is then reported as any other.
       const guarded = model.transitions.filter((t) => t.guard);
       const seen = new Map(guarded.map((t) => [t.guard!, { allows: false, refuses: false }]));
-      for (const { event, evaluated } of traces.flat()) {
-        const fired = event && guarded.find((g) => g.name === event.type);
-        if (fired) seen.get(fired.guard!)!.allows = true;
+      const guardOf = new Map(guarded.map((t) => [t.name, t.guard!]));
+      const observeGuard = ({ event, evaluated }: Step) => {
+        const guard = event && guardOf.get(event.type);
+        if (guard) seen.get(guard)!.allows = true;
         if (evaluated && seen.has(evaluated.name)) seen.get(evaluated.name)![evaluated.result ? "allows" : "refuses"] = true;
+      };
+      traces.flat().forEach(observeGuard);
+      const routes = [...model.witness?.paths ?? []].filter(([goal, path]) => seen.has(goal) && path.some((name) => {
+        const guard = guardOf.get(name);
+        return guard && !seen.get(guard)!.allows;
+      }));
+      const allowances = await allDone(routes.map(([goal]) => tryGuide(goal, `never_allows_${goal}`)!));
+      if (broke(allowances)) return { said, tested };
+      for (const [i, run] of allowances.entries()) {
+        if (!run.broken) continue;
+        const [goal, path] = routes[i];
+        const trace = run.traces.find((steps) => isDeepStrictEqual(steps.flatMap(({ event }) => event ? [event.type] : []), path));
+        if (!trace) throw new Error(`the simulator reported an allowance of ${goal} without its transition path (${run.again})`);
+        trace.forEach(observeGuard);
+        traces.push(trace);
       }
       const neverAllowed: { t: (typeof guarded)[number]; again?: string }[] = [];
       const neverRefused: string[] = [];
@@ -504,7 +522,7 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
         `${shown}\n      ${sim.again}`);
         return { said, tested };
       }
-      const retained = witnessedIn(probe.traces, witnesses.filter(({ w, run }) => !run.broken && !model.witness?.lengths.has(w)).map(({ w }) => w));
+      const retained = witnessedIn(probe.traces, witnesses.filter(({ w, run }) => !run.broken && !model.witness?.paths.has(w)).map(({ w }) => w));
       const reached = witnesses.map(({ w, run }) => {
         const fallback = retained.get(w);
         if (fallback) {
@@ -544,7 +562,7 @@ export function simulation(memory: Memory, spec: Spec, specs: Spec[], model: Mod
       say(false, mismatch ? "replay" : "always", mismatch ? "this is a bug in the generator (vibestack/gen.ts, vibestack/gen/), not in the spec" : COULD_NOT_RUN, indent((e as Error).message));
     }
     return { said, tested };
-  }), ({ said }) => reusable && !said.some((r) => r.summary === COULD_NOT_RUN)).then(async ({ said, tested }) => {
+  }, ({ said }) => reusable && !said.some((r) => r.summary === COULD_NOT_RUN), inTurn).then(async ({ said, tested }) => {
     let replayReady = true;
     if (said.some((row) => row.detail.includes(replayCommand))) {
       const mainInput = await project();

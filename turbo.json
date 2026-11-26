@@ -217,6 +217,7 @@
     "//#lint:js": {
       "dependsOn": [
         "@repo/design-system#build",
+        "@repo/cli#typecheck",
         "@repo/ui#typecheck",
         "@repo/pack-default#typecheck",
         "@repo/db#typecheck",
@@ -361,14 +362,26 @@
       ],
       "outputs": []
     },
+    "@repo/cli#typecheck": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": []
+    },
+    "@repo/cli#test": {
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        ".cache/test-result-*.json"
+      ]
+    },
     "@repo/ui#typecheck": {
       "dependsOn": [
         "^build",
         "gen"
       ],
-      "outputs": [
-        ".vibe/declarations/**"
-      ]
+      "outputs": []
     },
     "@repo/design-system#build": {
       "dependsOn": [

@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
-import { check, compareObservation, ConformanceError, departure, replay, transition, type Found, type Line, type Oracle, type Sent } from "./conformance.ts";
+import { check, compareObservation, ConformanceError, departure, planModel, replay, transition, type Found, type Line, type Oracle, type Sent } from "./conformance.ts";
 import type { Model } from "./gen.ts";
 import { heading, type Spec } from "./parse.ts";
 import type { Step } from "./simulate.ts";
@@ -30,14 +30,30 @@ export function conformanceFound(model: Model, spec: Spec, traces: Step[][], wit
       events.set(JSON.stringify(event), event);
     }
   }
+  const rawTraces = traces.map((trace) => trace.flatMap((step) => step.event ? [step.event] : []));
+  const byTransition = new Map<string, Sent<any>[]>();
+  for (const trace of rawTraces) {
+    for (let i = 0; i < trace.length; i++) {
+      const type = String(trace[i]?.type ?? "");
+      if (!type) continue;
+      const existing = byTransition.get(type);
+      if (!existing || i + 1 < existing.length) byTransition.set(type, trace.slice(0, i + 1));
+    }
+  }
+  const keptTraces = new Map<string, Sent<any>[]>();
+  for (const trace of [...byTransition.values(), ...rawTraces]) {
+    if (keptTraces.size >= 100) break;
+    keptTraces.set(JSON.stringify(trace), trace);
+  }
   return {
     spec: model.name, source: model.source, sender: !!model.sender, shape: model.shape!, outputShape: model.outputShape,
+    transitions: model.transitions.map((t) => t.name),
     events: [...events.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
     journeys: witnesses.map(({ w, trace }) => {
       const rule = spec.rules.find((rule) => rule.defs.includes(w))!;
       return { story: rule.story, rule: heading(rule), events: trace.flatMap((step) => step.event ? [step.event] : []) };
     }),
-    traces: traces.slice(0, 100).map((trace) => trace.flatMap((step) => step.event ? [step.event] : [])),
+    traces: [...keptTraces.values()],
   };
 }
 
@@ -88,9 +104,20 @@ function driver(root: string, command: string) {
 
 async function drive(root: string, machine: Machine, command: string): Promise<string | undefined> {
   const { domain, model, found } = machine;
+  const plan = planModel(domain, found.events, found.shape, {
+    strategy: "transitions",
+    includeRefusals: false,
+    transitions: found.transitions,
+    hasOutput: !!found.outputShape,
+    seedTraces: [...found.journeys.map((j) => j.events), ...found.traces],
+  });
+  const orderedTraces = new Map<string, readonly Sent<any>[]>();
+  for (const trace of [...plan.paths.map((p) => p.events), ...found.traces]) {
+    orderedTraces.set(JSON.stringify(trace), trace);
+  }
   const program = driver(root, command);
   try {
-    for (const [n, events] of found.traces.entries()) {
+    for (const [n, events] of [...orderedTraces.values()].entries()) {
       const initial = await program.ask({});
       const lines: Line[] = [{ state: initial.state }];
       const resetProblem = compareObservation(domain, found, domain.initial, initial.state);
@@ -175,9 +202,18 @@ async function main(name: string, foundFile: string, mode: TestProfile) {
   try {
     const files = fs.existsSync(path.join(root, saved)) ? fs.readdirSync(path.join(root, saved)).filter((f) => f.endsWith(".json")).sort() : [];
     for (const file of files) await replay(oracle, found, driver, JSON.parse(fs.readFileSync(path.join(root, saved, file), "utf8")).trace, options, `${saved}/${file}`);
-    const { journeys, probes } = await check(oracle, found, driver, { ...options, seed, walks });
-    const parts = [[files.length, "saved counterexamples"], [journeys, "journeys"], [probes, "malformed inputs"], [walks, `walks of seed ${seed}`]].filter(([n]) => n);
-    return parts.map((p) => p.join(" ")).join(", ");
+    const { plans, journeys, probes, coverage } = await check(oracle, found, driver, { ...options, seed, walks });
+    const parts = [
+      [files.length, "saved counterexamples"],
+      [plans, plans === 1 ? "model path" : "model paths"],
+      [journeys, "journeys"],
+      [probes, "malformed inputs"],
+      [walks, `walks of seed ${seed}`],
+    ].filter(([n]) => n).map((p) => p.join(" "));
+    const cov = coverage.total
+      ? `(${coverage.accepted.length}/${coverage.total} transitions accepted, ${coverage.refused.length}/${coverage.total} refused${coverage.uncovered.length ? `; uncovered: ${coverage.uncovered.join(", ")}` : ""})`
+      : "";
+    return [parts.join(", "), cov].filter(Boolean).join(" ");
   } catch (error) {
     if (!(error instanceof ConformanceError) || error.origin === "replay") throw error;
     const file = `${saved}/${createHash("sha256").update(JSON.stringify(error.trace)).digest("hex").slice(0, 12)}.json`;

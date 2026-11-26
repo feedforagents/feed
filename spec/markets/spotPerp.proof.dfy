@@ -353,8 +353,8 @@ lemma AccrueFundingClaims(m: SpotPerpMarket, period: int)
 }
 
 lemma tradeSpot_ensures(m: SpotPerpMarket, spotSide: SpotSide, spotAmount: int, by_: Sender)
-  ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> alwaysOpenInterestMatchesPositions(tradeSpot(m, spotSide, spotAmount, by_)))
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> alwaysSpotAndPricesConsistent(tradeSpot(m, spotSide, spotAmount, by_)))
+  ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> alwaysOpenInterestMatchesPositions(tradeSpot(m, spotSide, spotAmount, by_)))
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> alwaysPositionsWithin20xAndUnique(tradeSpot(m, spotSide, spotAmount, by_)))
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> alwaysFundingAccruedAtMostOncePerPeriod(tradeSpot(m, spotSide, spotAmount, by_)))
   ensures (inv(m) ==> canTradeSpot(m, spotSide, spotAmount, by_) ==> stepOnlyNpcTradesSpot(m, "tradeSpot", tradeSpot(m, spotSide, spotAmount, by_)))
@@ -385,8 +385,8 @@ lemma tradeSpot_ensures(m: SpotPerpMarket, spotSide: SpotSide, spotAmount: int, 
 }
 
 lemma openPerp_ensures(m: SpotPerpMarket, traderId: string, perpSide: PerpSide, perpSizeCents: int, leverage: int, by_: Sender)
-  ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> alwaysOpenInterestMatchesPositions(openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> alwaysSpotAndPricesConsistent(openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
+  ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> alwaysOpenInterestMatchesPositions(openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> alwaysPositionsWithin20xAndUnique(openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> alwaysFundingAccruedAtMostOncePerPeriod(openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
   ensures (inv(m) ==> canOpenPerp(m, traderId, perpSide, perpSizeCents, leverage, by_) ==> stepOnlyNpcTradesSpot(m, "openPerp", openPerp(m, traderId, perpSide, perpSizeCents, leverage, by_)))
@@ -439,8 +439,8 @@ lemma openPerp_ensures(m: SpotPerpMarket, traderId: string, perpSide: PerpSide, 
 }
 
 lemma closePerp_ensures(m: SpotPerpMarket, traderId: string, by_: Sender)
-  ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> alwaysOpenInterestMatchesPositions(closePerp(m, traderId, by_)))
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> alwaysSpotAndPricesConsistent(closePerp(m, traderId, by_)))
+  ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> alwaysOpenInterestMatchesPositions(closePerp(m, traderId, by_)))
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> alwaysPositionsWithin20xAndUnique(closePerp(m, traderId, by_)))
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> alwaysFundingAccruedAtMostOncePerPeriod(closePerp(m, traderId, by_)))
   ensures (inv(m) ==> canClosePerp(m, traderId, by_) ==> stepOnlyNpcTradesSpot(m, "closePerp", closePerp(m, traderId, by_)))
@@ -470,8 +470,8 @@ lemma closePerp_ensures(m: SpotPerpMarket, traderId: string, by_: Sender)
 }
 
 lemma advanceHours_ensures(m: SpotPerpMarket, deltaHours: int)
-  ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> alwaysOpenInterestMatchesPositions(advanceHours(m, deltaHours)))
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> alwaysSpotAndPricesConsistent(advanceHours(m, deltaHours)))
+  ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> alwaysOpenInterestMatchesPositions(advanceHours(m, deltaHours)))
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> alwaysPositionsWithin20xAndUnique(advanceHours(m, deltaHours)))
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> alwaysFundingAccruedAtMostOncePerPeriod(advanceHours(m, deltaHours)))
   ensures (inv(m) ==> canAdvanceHours(m, deltaHours) ==> stepOnlyNpcTradesSpot(m, "advanceHours", advanceHours(m, deltaHours)))
@@ -486,8 +486,8 @@ lemma advanceHours_ensures(m: SpotPerpMarket, deltaHours: int)
 }
 
 lemma accrueFunding_ensures(m: SpotPerpMarket, period: int)
-  ensures (inv(m) ==> canAccrueFunding(m, period) ==> alwaysOpenInterestMatchesPositions(accrueFunding(m, period)))
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> alwaysSpotAndPricesConsistent(accrueFunding(m, period)))
+  ensures (inv(m) ==> canAccrueFunding(m, period) ==> alwaysOpenInterestMatchesPositions(accrueFunding(m, period)))
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> alwaysPositionsWithin20xAndUnique(accrueFunding(m, period)))
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> alwaysFundingAccruedAtMostOncePerPeriod(accrueFunding(m, period)))
   ensures (inv(m) ==> canAccrueFunding(m, period) ==> stepOnlyNpcTradesSpot(m, "accrueFunding", accrueFunding(m, period)))
@@ -509,8 +509,8 @@ lemma accrueFunding_ensures(m: SpotPerpMarket, period: int)
 }
 
 lemma liquidate_ensures(m: SpotPerpMarket, traderId: string)
-  ensures (inv(m) ==> canLiquidate(m, traderId) ==> alwaysOpenInterestMatchesPositions(liquidate(m, traderId)))
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> alwaysSpotAndPricesConsistent(liquidate(m, traderId)))
+  ensures (inv(m) ==> canLiquidate(m, traderId) ==> alwaysOpenInterestMatchesPositions(liquidate(m, traderId)))
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> alwaysPositionsWithin20xAndUnique(liquidate(m, traderId)))
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> alwaysFundingAccruedAtMostOncePerPeriod(liquidate(m, traderId)))
   ensures (inv(m) ==> canLiquidate(m, traderId) ==> stepOnlyNpcTradesSpot(m, "liquidate", liquidate(m, traderId)))

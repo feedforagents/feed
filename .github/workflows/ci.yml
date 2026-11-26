@@ -32,33 +32,9 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           job: simulate-${{ matrix.shard }}
-      - name: Simulate the specs whose files hash to this shard
+      - name: Simulate the specs assigned to this shard
         id: precompute
-        env:
-          SHARD: ${{ matrix.shard }}
-          SHARDS: 4
-        run: |
-          node --input-type=module <<'JS'
-          import { createHash } from "node:crypto";
-          import fs from "node:fs";
-          import path from "node:path";
-          import { prepareSimulationReceipts, readSpecs } from "./vibestack/formal.ts";
-          const simulations = () => fs.existsSync(".spec-cache") ? fs.readdirSync(".spec-cache").filter((name) => name.startsWith("simulate-")) : [];
-          const restored = new Set(simulations());
-          const specs = readSpecs(process.cwd());
-          const inShard = ({ file }) => parseInt(createHash("sha256").update(file).digest("hex").slice(0, 8), 16) % Number(process.env.SHARDS) === Number(process.env.SHARD) - 1;
-          const names = specs.filter(inShard).map(({ name }) => name);
-          const { results, seedDirectory } = await prepareSimulationReceipts(process.cwd(), specs, names, process.env.RUNNER_TEMP);
-          const transfer = seedDirectory ?? fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, "simulation-delta-"));
-          if (!seedDirectory) for (const name of simulations().filter((file) => !restored.has(file))) {
-            fs.copyFileSync(path.join(".spec-cache", name), path.join(transfer, name));
-          }
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `directory=${transfer}\n`);
-          const failed = results.filter(({ ok }) => !ok);
-          for (const { stage, summary, detail, where } of failed) console.log(`✗ ${stage} ${where ?? ""}: ${summary}\n${detail}`);
-          console.log(`shard ${process.env.SHARD} of ${process.env.SHARDS}: ${names.length} specs, ${results.length} results, ${fs.readdirSync(transfer).length} ${seedDirectory ? "complete seed" : "new aggregate"} entries, ${failed.length} failed`);
-          process.exitCode = failed.length ? 1 : 0;
-          JS
+        run: node vibestack/spec.ts ci precompute-simulations --shard ${{ matrix.shard }} --shards 4
       - if: always() && steps.precompute.outputs.directory != ''
         uses: actions/upload-artifact@v7
         with:

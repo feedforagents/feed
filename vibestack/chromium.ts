@@ -10,13 +10,25 @@ export function hostedCiWorkspace(): string | undefined {
     && GITHUB_WORKFLOW_REF?.startsWith(`${GITHUB_REPOSITORY}/.github/workflows/ci.yml@`)) return GITHUB_WORKSPACE;
 }
 
+function isWorkspaceChromium(workspace: string): boolean {
+  const candidates = [
+    path.join(workspace, "vibestack", "chromium.ts"),
+    path.join(workspace, "packages", "vibestack", "src", "chromium.ts"),
+    path.join(workspace, "packages", "vibestack", "dist", "chromium.js"),
+    path.join(workspace, "node_modules", "vibestack", "dist", "chromium.js"),
+  ];
+  if (candidates.includes(import.meta.filename)) return true;
+  const rel = path.relative(workspace, import.meta.filename);
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 function hostedVerify() {
   const workspace = hostedCiWorkspace();
   const { GITHUB_JOB, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, PLAYWRIGHT_BROWSERS_PATH: browserPath } = process.env;
   if (process.platform !== "linux" || GITHUB_JOB !== "verify" || !workspace
     || (browserPath && !path.isAbsolute(browserPath))
     || !/^[1-9]\d*$/.test(GITHUB_RUN_ID ?? "") || !/^[1-9]\d*$/.test(GITHUB_RUN_ATTEMPT ?? "")
-    || path.join(workspace, "vibestack", "chromium.ts") !== import.meta.filename) return;
+    || !isWorkspaceChromium(workspace)) return;
   const directory = path.join(workspace, ".cache", `hosted-chromium-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}`);
   return { workspace, directory, lock: path.join(directory, "lock") };
 }

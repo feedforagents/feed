@@ -33,7 +33,7 @@ for each one, in this order:
 Counting is per obligation. Dafny verifies each definition whole, and one
 that fails again with every assertion on its own; a failing `ensures` is never
 assumed while another is checked. The prover works to a fixed resource limit
-(`RESOURCE_LIMIT` in `vibestack/prove.ts`, per definition and then per assertion)
+(`RESOURCE_LIMIT` in `packages/vibestack/src/prove.ts`, per definition and then per assertion)
 rather than a time limit, so the answer does not depend on the machine. An obligation it
 could not finish is marked `[the prover ran out of resources]`. A lemma
 assumes what every lemma it calls ensures, so an obligation whose proof calls,
@@ -79,13 +79,13 @@ a body.
 - Names from Dafny's standard library (`Std.…`) only as the generated code
   writes them, such as `Std.Collections.Seq.Filter`: the library holds axioms,
   and `dafny audit` does not report them in the unit. `ProofLib.<Name>` only
-  for what `vibestack/proof/lib.dfy` declares.
+  for what `packages/vibestack/src/proof/lib.dfy` declares.
 - Refused: block comments, `@`, any other attribute, character literals, NUL,
   anything but ASCII outside comments and strings, and the words that
   declare or trust something: `assume`, `expect`, `function`, `predicate`,
   `method`, `ghost`, `const`, `type`, `datatype`, `include`, `import`,
   `module`, `reads`, `modifies`, `opaque`, `axiom`, `verify` and the rest of
-  `FORBIDDEN` in `vibestack/prove.ts`.
+  `FORBIDDEN` in `packages/vibestack/src/prove.ts`.
 - After that, LemmaScript refuses the `.dfy` unless it is its own output plus
   added lines, and `dafny audit` refuses anything assumed rather than proved.
   A failure anywhere but in a generated definition (a helper, the library, a
@@ -96,7 +96,7 @@ a body.
 
 **What a proof can call:**
 
-- `ProofLib.<Name>(...)` from `vibestack/proof/lib.dfy`, of which every unit that
+- `ProofLib.<Name>(...)` from `packages/vibestack/src/proof/lib.dfy`, of which every unit that
   has a proof file gets what the file calls and what that uses: `Filter` (a heap-free view of `Std.Collections.Seq.Filter`,
   see below), `Distinct`, `DistinctBy`, and lemmas about filters
   (`FilterNil`, `FilterCons`, `FilterAppend`, `FilterMember`, `FilterSubset`,
@@ -118,7 +118,7 @@ a body.
   gives `<module>_<law>(args) == true`, and `<module>_<transition>_ensures(s, …)`
   gives each rule of that module for `<module>_<transition>(s, …)`, under its
   `inv` and guard, so a machine that holds another need not prove its rules
-  again (`vibestack/fixtures/office.md`). (In a `src` unit, those of the module
+  again (`selftest/fixtures/office.md`). (In a `src` unit, those of the module
   it imports are `<fn>_ensures`.)
 - The laws of the unit's [opaque functions](../../../SPEC.md#opaque-functions), assumed:
   `<law>_ensures(args)`.
@@ -152,8 +152,8 @@ supply one to replace it.
 3. Run `pnpm check`. Dafny's messages point into the `.dfy`; the log has
    them all.
 
-`vibestack/fixtures/highest.md` is the smallest example: its law needs induction
-over a fold, and `vibestack/fixtures/highest.proof.dfy` proves it (the selftest runs it):
+`selftest/fixtures/highest.md` is the smallest example: its law needs induction
+over a fold, and `selftest/fixtures/highest.proof.dfy` proves it (the selftest runs it):
 
 ```dafny
 lemma lawTheHighestIsAtLeastTheStart_ensures(xs: seq<int>, start: int)
@@ -169,7 +169,7 @@ Put logic in the spec when you can: it is then simulated, proved and
 generated. For pure logic that Quint cannot express, such as a loop over an
 event log, write TypeScript under `src/` with
 [LemmaScript](https://github.com/midspiral/LemmaScript) annotations.
-`vibestack/examples/order/src/ledger.ts` is the worked example.
+`examples/order/src/ledger.ts` is the worked example.
 
 - Any `.ts` file under `src/` that contains `//@` is proved by
   `pnpm check`, as the unit `src-<path>`; under an owner's `src/`, as

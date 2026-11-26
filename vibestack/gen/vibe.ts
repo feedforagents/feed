@@ -1,6 +1,7 @@
 // The Effect face of a generated module, in VibeLang: gen/<name>.effect.vibe beside gen/<name>.ts. It is read off the
 // generated TypeScript itself, so it cannot say anything that module does not.
-import ts from "typescript";
+import type * as TS from "typescript";
+import { tsApi } from "../util.ts";
 import { HELPERS } from "./typescript.ts";
 import { fail } from "./types.ts";
 
@@ -20,27 +21,30 @@ const OWN = [...FAILURES, "Machine", "machine", "machineOver", "stored", "apply"
  * (`stored`) or wherever the shell loads and keeps it (`machineOver`).
  */
 export function effectAdapter(name: string, source: string, text: string, namespace: string): string {
+  const ts = tsApi();
   const file = ts.createSourceFile(`${name}.ts`, text, ts.ScriptTarget.Latest, true);
-  const exported = (s: ts.Statement) => ts.canHaveModifiers(s) && !!ts.getModifiers(s)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
-  const types = file.statements.filter((s): s is ts.TypeAliasDeclaration | ts.InterfaceDeclaration => (ts.isTypeAliasDeclaration(s) || ts.isInterfaceDeclaration(s)) && exported(s)).map((s) => s.name.text);
+  const exported = (s: TS.Statement) => ts.canHaveModifiers(s) && !!ts.getModifiers(s)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+  const types = file.statements.filter((s): s is TS.TypeAliasDeclaration | TS.InterfaceDeclaration => (ts.isTypeAliasDeclaration(s) || ts.isInterfaceDeclaration(s)) && exported(s)).map((s) => s.name.text);
   // A type of another module is spelled <module>_<name> in signatures, as the generated module imports it.
   const foreign = file.statements.filter(ts.isImportDeclaration).flatMap((s) => {
     const names = s.importClause?.namedBindings && ts.isNamedImports(s.importClause.namedBindings) ? s.importClause.namedBindings.elements.filter((e) => e.isTypeOnly) : [];
     return names.length ? [`  import type { ${names.map((e) => `${e.propertyName!.text} as ${e.name.text}`).join(", ")} } from ${s.moduleSpecifier.getText(file)}`] : [];
   });
-  const doc = (s: ts.Node) => {
+  const doc = (s: TS.Node) => {
     const said = ts.getJSDocCommentsAndTags(s).filter(ts.isJSDoc).map((d) => ts.getTextOfJSDocComment(d.comment) ?? "").join(" ").replace(/\s+/g, " ").trim();
     return `  /** ${said ? `${said} ` : ""}@throws {never} */`;
   };
-  const consts = file.statements.filter((s): s is ts.VariableStatement => ts.isVariableStatement(s) && exported(s)).flatMap((s) =>
+  const consts = file.statements.filter((s): s is TS.VariableStatement => ts.isVariableStatement(s) && exported(s)).flatMap((s) =>
     s.declarationList.declarations.map((d) => ({ name: d.name.getText(file), line: `${doc(s)}\n  export const ${d.name.getText(file)}: ${d.type!.getText(file)} = M.${d.name.getText(file)}` })));
-  const funs = file.statements.filter((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && exported(s) && !INTERNAL.test(s.name!.text));
-  const wrapper = (f: ts.FunctionDeclaration) => {
+  const funs = file.statements.filter((s): s is TS.FunctionDeclaration => ts.isFunctionDeclaration(s) && exported(s) && !INTERNAL.test(s.name!.text));
+  const wrapper = (f: TS.FunctionDeclaration) => {
     const params = f.parameters.map((p) => p.getText(file)).join(", ");
     return `${doc(f)}\n  export function ${f.name!.text}(${params}): ${f.type!.getText(file)} { return M.${f.name!.text}(${f.parameters.map((p) => p.name.getText(file)).join(", ")}) }`;
   };
   const names = [...consts.map((c) => c.name), ...funs.map((f) => f.name!.text)];
-  const snapshot = `snapshot_${name}`;
+  const freeze = `snapshot_${name}`;
+  const capture = `snapshot_in_${name}`;
+  const storedCache = `snapshot_cache_${name}`;
   const step = funs.find((f) => f.name!.text === "step");
   const body = names.length ? [
     `module pure {`,
@@ -49,10 +53,33 @@ export function effectAdapter(name: string, source: string, text: string, namesp
     ...foreign,
     ...consts.map((c) => c.line),
     ...funs.map(wrapper),
-    ...(step ? [`  /** A Machine never shares a state with its callers. @throws {never} */`,
-      `  export function ${snapshot}<A>(value: A): A { return structuredClone(value) }`] : []),
+    ...(step ? [
+      `  /** @throws {never} */`,
+      `  export function ${freeze}<A>(value: A): A {`,
+      `    if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value`,
+      `    Object.freeze(value)`,
+      `    if (Array.isArray(value)) {`,
+      `      for (let i = 0; i < value.length; i++) ${freeze}(value[i])`,
+      `    } else {`,
+      `      for (const key of Object.keys(value)) ${freeze}((value as Record<string, unknown>)[key])`,
+      `    }`,
+      `    return value`,
+      `  }`,
+      `  /** @throws {never} */`,
+      `  export function ${capture}<A>(value: A): A {`,
+      `    if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value`,
+      `    if (Array.isArray(value)) {`,
+      `      const copy: unknown[] = new Array(value.length)`,
+      `      for (let i = 0; i < value.length; i++) copy[i] = ${capture}(value[i])`,
+      `      return Object.freeze(copy) as A`,
+      `    }`,
+      `    const copy: Record<string, unknown> = {}`,
+      `    for (const key of Object.keys(value)) copy[key] = ${capture}((value as Record<string, unknown>)[key])`,
+      `    return Object.freeze(copy) as A`,
+      `  }`,
+    ] : []),
     `}`,
-    `import { ${[...names, ...step ? [snapshot] : []].join(", ")} } from pure`,
+    `import { ${[...names, ...step ? [freeze, capture] : []].join(", ")} } from pure`,
     `export { ${names.join(", ")} }`,
   ] : [];
   const out = [
@@ -67,16 +94,18 @@ export function effectAdapter(name: string, source: string, text: string, namesp
   const clash = OWN.find((n) => names.includes(n) || types.includes(n));
   if (clash) fail(`${source}: \`${clash}\` is a name of the generated Effect adapter (gen/${name}.effect.vibe); name the definition otherwise`);
   // A type the module exports is named through it; any other is read off `step`, so that no name of the spec is bound here.
-  const typed = (node: ts.TypeNode, otherwise: string) => (types.includes(node.getText(file)) ? `T.${node.getText(file)}` : otherwise);
+  const typed = (node: TS.TypeNode, otherwise: string) => (types.includes(node.getText(file)) ? `T.${node.getText(file)}` : otherwise);
   const state = typed(step.parameters[0].type!, "Parameters<typeof step>[0]");
   const stepped = typed(step.type!, "ReturnType<typeof step>");
   const sender = step.parameters[2] && typed(step.parameters[2].type!, "Parameters<typeof step>[2]");
   const emits = step.type!.getText(file) !== step.parameters[0].type!.getText(file);
   const by = sender ? `, by: ${sender}` : "";
   const passed = sender ? ", by" : "";
+  const guard = `, isCurrent?: (state: ${state}) => boolean`;
   return [
     ...out,
     `import * as KeyValueStore from "effect/persistence/KeyValueStore"`,
+    `import { PreventSchedulerYield } from "effect/References"`,
     `import type * as T from "./${name}.ts"`,
     ``,
     `/** The rules do not allow this event in this state${sender ? " from this sender" : ""}. */`,
@@ -91,14 +120,14 @@ export function effectAdapter(name: string, source: string, text: string, namesp
     `export effect function decodeEvent(input: unknown): T.Event!NotAnEvent {`,
     `  const event = parseEvent(input)`,
     `  if (event === undefined) throw new NotAnEvent({ input })`,
-    `  return event`,
+    `  return ${freeze}(event)`,
     `}`,
     ``,
     `/** \`parseState\`, failing where it returns undefined. */`,
     `export effect function decodeState(input: unknown): ${state}!NotAState {`,
     `  const parsed = parseState(input)`,
     `  if (parsed === undefined) throw new NotAState({ input })`,
-    `  return parsed`,
+    `  return ${freeze}(parsed)`,
     `}`,
     ...(sender ? [
       ``,
@@ -106,7 +135,7 @@ export function effectAdapter(name: string, source: string, text: string, namesp
       `export effect function decodeSender(input: unknown): ${sender}!NotASender {`,
       `  const parsed = parseSender(input)`,
       `  if (parsed === undefined) throw new NotASender({ input })`,
-      `  return parsed`,
+      `  return ${freeze}(parsed)`,
       `}`,
     ] : []),
     ``,
@@ -125,8 +154,8 @@ export function effectAdapter(name: string, source: string, text: string, namesp
     `  readonly changes: Stream.Stream<${state}>`,
     `  /** The state as it is kept now. */`,
     `  get(): ${state}!!`,
-    `  /** An event already parsed; a value from outside goes through \`receive\`. */`,
-    `  send(event: T.Event${by}): ${stepped}!Rejected`,
+    `  /** An event already parsed. An optional source check runs under the writer immediately before saving. A value from outside goes through \`receive\`. */`,
+    `  send(event: T.Event${by}${guard}): ${stepped}!Rejected`,
     `  receive(input: unknown${by}): ${stepped}!(NotAnEvent | Rejected)`,
     `}`,
     ``,
@@ -137,20 +166,26 @@ export function effectAdapter(name: string, source: string, text: string, namesp
     ` * or \`keep\` dies, \`send\` dies and the state stays as it was. It never shares a state with its callers.`,
     ` */`,
     `export effect function machineOver<E>(load: () => ${state}!E, keep: (next: ${state}) => void!!): Machine.Shape!E {`,
-    `  const shown = try SubscriptionRef.make(${snapshot}(try load()))`,
-    `  effect function send(event: T.Event${by}): ${stepped}!Rejected {`,
-    `    const input = ${snapshot}({ event${passed} })`,
+    `  const shown = try SubscriptionRef.make(${capture}(try load()))`,
+    `  effect function send(event: T.Event${by}${guard}): ${stepped}!Rejected {`,
+    `    const input = ${capture}({ event${passed} })`,
     `    uninterruptible {`,
     `      return try SubscriptionRef.modifyEffect(shown, effect () => {`,
-    `        const next = try apply(${snapshot}(try orDie(load())), input.event${sender ? ", input.by" : ""})`,
-    `        try keep(${snapshot}(${emits ? "next.state" : "next"}))`,
-    `        return [${snapshot}(next), ${emits ? "next.state" : "next"}] as const`,
+    `        const current = ${capture}(try orDie(load()))`,
+    `        const next = ${freeze}(try apply(current, input.event${sender ? ", input.by" : ""}))`,
+    `        const nextState = ${emits ? "next.state" : "next"}`,
+    `        const save = effect {`,
+    `          if (isCurrent && !isCurrent(current)) throw new Rejected({ ...input, state: current })`,
+    `          try keep(nextState)`,
+    `        }`,
+    `        try (isCurrent ? Effect.provideService(save, PreventSchedulerYield, true) : save)`,
+    `        return [next, nextState] as const`,
     `      })`,
     `    }`,
     `  }`,
     `  return {`,
-    `    changes: Stream.map(SubscriptionRef.changes(shown), ${snapshot}),`,
-    `    effect get() { return ${snapshot}(try orDie(load())) },`,
+    `    changes: SubscriptionRef.changes(shown),`,
+    `    effect get() { return ${capture}(try orDie(load())) },`,
     `    send,`,
     `    effect receive(input: unknown${by}) { return try send(try decodeEvent(input)${passed}) }`,
     `  }`,
@@ -159,10 +194,12 @@ export function effectAdapter(name: string, source: string, text: string, namesp
     `/** A Machine in memory, from \`initial\` or a state \`decodeState\` returned. */`,
     `export function machine(start: ${state} = initial) {`,
     `  return Layer.effect(Machine, effect {`,
-    `    const kept = try Ref.make(${snapshot}(start))`,
+    `    const kept = try Ref.make(start === initial ? ${freeze}(start) : ${capture}(start))`,
     `    return try machineOver(() => Ref.get(kept), (next) => Ref.set(kept, next))`,
     `  })`,
     `}`,
+    ``,
+    `const ${storedCache} = new WeakMap<object, Map<string, { readonly raw: string; readonly state: ${state} }>>()`,
     ``,
     `/**`,
     ` * A Machine kept in the KeyValueStore under \`key\`, as JSON: each event is applied to what is stored there when it`,
@@ -174,12 +211,37 @@ export function effectAdapter(name: string, source: string, text: string, namesp
     `export function stored(key: string, start: ${state} = initial) {`,
     `  return Layer.effect(Machine, effect {`,
     `    const store = try KeyValueStore.KeyValueStore`,
+    `    const fallback = start === initial ? ${freeze}(start) : ${capture}(start)`,
+    `    let entries = ${storedCache}.get(store)`,
+    `    if (entries === undefined) {`,
+    `      entries = new Map()`,
+    `      ${storedCache}.set(store, entries)`,
+    `    }`,
+    `    const cache = entries`,
     `    effect function load() {`,
     `      const found = try store.get(key)`,
-    `      return found === undefined ? start`,
-    `        : try decodeState(try Effect.try({ try: () => JSON.parse(found) as unknown, catch: () => new NotAState({ input: found }) }))`,
+    `      if (found === undefined) {`,
+    `        cache.delete(key)`,
+    `        return fallback`,
+    `      }`,
+    `      const cached = cache.get(key)`,
+    `      if (cached !== undefined && cached.raw === found) return cached.state`,
+    `      const decoded = try decodeState(try Effect.try({ try: () => JSON.parse(found) as unknown, catch: () => new NotAState({ input: found }) }))`,
+    `      cache.set(key, { raw: found, state: decoded })`,
+    `      return decoded`,
     `    }`,
-    `    return try machineOver(load, (next) => orDie(store.set(key, JSON.stringify(next))))`,
+    `    effect function keep(next: ${state}) {`,
+    `      const cached = cache.get(key)`,
+    `      if (cached !== undefined && Object.is(cached.state, next)) return`,
+    `      const raw = JSON.stringify(next)`,
+    `      if (cached !== undefined && cached.raw === raw) {`,
+    `        cache.set(key, { raw, state: next })`,
+    `        return`,
+    `      }`,
+    `      try orDie(store.set(key, raw))`,
+    `      cache.set(key, { raw, state: next })`,
+    `    }`,
+    `    return try machineOver(load, keep)`,
     `  })`,
     `}`,
     ``,
