@@ -1692,7 +1692,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
       }
     })
     let postRows: ReadonlyArray<Row>
-    let tagCountRows: ReadonlyArray<Row> = []
+    let tagCountRows: ReadonlyArray<Row>
     if ((isHashtagQuery || isCashtagQuery) && entityQuery !== "") {
       const escapedTag = escapeRegExp(entityQuery)
       const tagRegex = isHashtagQuery
