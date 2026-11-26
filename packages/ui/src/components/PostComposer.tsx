@@ -45,6 +45,8 @@ export type PostComposerProps = Omit<ComponentProps<"form">, "onSubmit" | "child
   disabled?: boolean;
   /** Validation or rate-limit message shown below the composer. */
   error?: string;
+  /** Optional DOM `id` forwarded to the composer textarea for programmatic focus. */
+  textareaId?: string;
 };
 
 const RING_RADIUS = 9;
@@ -101,6 +103,7 @@ export function PostComposer({
   loading = false,
   disabled = false,
   error,
+  textareaId,
   className,
   ...props
 }: PostComposerProps) {
@@ -154,6 +157,7 @@ export function PostComposer({
         ) : null}
 
         <Textarea
+          id={textareaId}
           aria-label="Post text"
           value={text}
           placeholder={placeholder}
@@ -165,7 +169,7 @@ export function PostComposer({
         />
 
         {quotePost ? (
-          <div className="flex items-start justify-between gap-2 rounded-xl border border-border bg-card p-3 text-xs">
+          <div className="flex items-start justify-between gap-2 rounded-xl border border-border bg-background p-3 text-xs">
             <div className="min-w-0">
               <span className="font-semibold text-foreground">@{quotePost.authorHandle}</span>
               <p className="truncate text-muted-foreground">{quotePost.excerpt}</p>

@@ -1,10 +1,10 @@
 # Onboarding, JoinSheet doors, and deferred gated actions
 
-JoinSheet two-door onboarding (Phone 6-digit SMS code and one-click AI Agent
-`SKILL.md` deep-link prompt + Reviewer sign-in link), deferred `PendingAction`
-queuing and automatic completion upon sign-in, and the dismissible first-visit
-explainer card, derived from PRD §6.2–§6.4, §7.1, §7.4, §14 D-1–D-4, D-11,
-D-19, and D-29.
+JoinSheet multi-door onboarding (Email Magic Link, Phone 6-digit SMS code, and
+one-click AI Agent `SKILL.md` deep-link prompt + Reviewer sign-in link),
+deferred `PendingAction` queuing and automatic completion upon sign-in, and the
+dismissible first-visit explainer card, derived from PRD §6.2–§6.4, §7.1, §7.4,
+§14 D-1–D-4, D-11, D-19, and D-29.
 
 ## Domain
 
@@ -22,12 +22,13 @@ type GatedActionKind =
   | GatedTrade
   | GatedPersistMode
 
-type JoinDoor = DoorNone | DoorPhone | DoorAgent | DoorReviewer
+type JoinDoor = DoorNone | DoorEmail | DoorPhone | DoorAgent | DoorReviewer
 
 type OnboardingStep =
   | StepClosed
   | StepChooseDoor
   | StepSmsCodeSent
+  | StepEmailLinkSent
   | StepCompleteProfile
   | StepAgentPromptCopied
   | StepReviewerLogin
@@ -233,10 +234,86 @@ pure def completeNewPhoneProfile(
   }
 ```
 
-### AI Agent door launches SKILL.md prompt and hands off to phone verification
+### Email magic link door verifies a single-use token, enforces 18+ attestation, and awards 100 pts once
 
-The agent never receives phone numbers or SMS codes; the user verifies their
-phone once in the browser.
+```quint
+pure def canRequestEmailMagicLink(
+  s: OnboardingState,
+  emailValid: bool
+): bool =
+  not(s.signedIn) and s.joinSheetOpen
+    and (s.stepKind == StepChooseDoor or s.stepKind == StepEmailLinkSent)
+    and emailValid
+
+pure def requestEmailMagicLink(
+  s: OnboardingState,
+  emailValid: bool
+): OnboardingState =
+  {
+    ...s,
+    door: DoorEmail,
+    stepKind: StepEmailLinkSent,
+    codeResendCount: s.codeResendCount + 1,
+  }
+
+pure def canVerifyEmailMagicLink(
+  s: OnboardingState,
+  tokenValid: bool,
+  isNewAccount: bool
+): bool =
+  not(s.signedIn) and tokenValid
+    and (isNewAccount implies not(s.startingGrantAwarded))
+
+pure def verifyEmailMagicLink(
+  s: OnboardingState,
+  tokenValid: bool,
+  isNewAccount: bool
+): OnboardingState =
+  if (isNewAccount)
+    { ...s, joinSheetOpen: true, door: DoorEmail, stepKind: StepCompleteProfile }
+  else {
+    ...s,
+    signedIn: true,
+    joinSheetOpen: false,
+    door: DoorEmail,
+    stepKind: StepSignedIn,
+    pendingAction: noPendingAction,
+    completedActions: completeQueuedIfPresent(s.completedActions, s.pendingAction),
+  }
+
+pure def canCompleteNewEmailProfile(
+  s: OnboardingState,
+  usernameValid: bool,
+  age18Plus: bool,
+  acceptedTerms: bool
+): bool =
+  not(s.signedIn) and s.joinSheetOpen and s.door == DoorEmail
+    and s.stepKind == StepCompleteProfile
+    and not(s.startingGrantAwarded)
+    and usernameValid and age18Plus and acceptedTerms
+
+pure def completeNewEmailProfile(
+  s: OnboardingState,
+  usernameValid: bool,
+  age18Plus: bool,
+  acceptedTerms: bool
+): OnboardingState =
+  {
+    ...s,
+    signedIn: true,
+    joinSheetOpen: false,
+    stepKind: StepSignedIn,
+    pointsBalance: s.pointsBalance + 100,
+    startingGrantAwarded: true,
+    ageConfirmed: true,
+    pendingAction: noPendingAction,
+    completedActions: completeQueuedIfPresent(s.completedActions, s.pendingAction),
+  }
+```
+
+### AI Agent door launches SKILL.md prompt and hands off to phone or email verification
+
+The agent never receives phone numbers, email addresses, or codes; the user verifies once in the browser.
 
 ```quint
 pure def canLaunchAgentDoor(s: OnboardingState): bool =
@@ -257,6 +334,12 @@ pure def canProceedToPhoneFromAgent(s: OnboardingState): bool =
 
 pure def proceedToPhoneFromAgent(s: OnboardingState): OnboardingState =
   { ...s, door: DoorPhone, stepKind: StepChooseDoor }
+
+pure def canProceedToEmailFromAgent(s: OnboardingState): bool =
+  not(s.signedIn) and s.joinSheetOpen and s.stepKind == StepAgentPromptCopied
+
+pure def proceedToEmailFromAgent(s: OnboardingState): OnboardingState =
+  { ...s, door: DoorEmail, stepKind: StepChooseDoor }
 ```
 
 ### Reviewer sign-in link allows password auth strictly for operator-flagged reviewer accounts
@@ -347,6 +430,9 @@ pure def sometimesAgentDoorUsed(s: OnboardingState): bool =
 
 pure def sometimesReviewerSignedIn(s: OnboardingState): bool =
   s.isReviewer and s.signedIn
+
+pure def sometimesEmailSignUpCompleted(s: OnboardingState): bool =
+  s.signedIn and s.door == DoorEmail and s.startingGrantAwarded
 ```
 
 ### Discovered by the proof: Pending gated action has a positive target

@@ -17,6 +17,7 @@ import { publishFeedEvent, type FeedRealtimeEvent } from "./realtime.vibe"
 export error SocialFailure {
   code: string
   message: string
+  retryAfterSeconds?: number
   cause?: unknown
 }
 
@@ -54,6 +55,8 @@ export interface NotificationSeed {
   readonly actorId: string | null
   readonly postId: string | null
   readonly marketId: string | null
+  readonly chatId?: string | null
+  readonly inviteId?: string | null
   readonly title: string
   readonly body: string
   readonly isGameOnly: boolean
@@ -67,8 +70,18 @@ module web {
   export function uuid(): string {
     return globalThis.crypto.randomUUID()
   }
+
+  /** @throws {never} */
+  export function isValidHttpsUrl(raw: string): boolean {
+    try {
+      const parsed = new URL(raw)
+      return parsed.protocol === "https:" && parsed.hostname !== ""
+    } catch {
+      return false
+    }
+  }
 }
-import { uuid } from web
+import { isValidHttpsUrl, uuid } from web
 
 export function freshId(): string {
   return uuid()
@@ -84,6 +97,45 @@ export function clampLimit(limit: number | undefined, fallback: number, max: num
   const floored = Math.floor(limit)
   if (floored < 1) return 1
   return floored > max ? max : floored
+}
+
+function hasDisallowedUrlCharacters(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x20 || code === 0x7f) return true
+  }
+  return /\s/.test(value)
+}
+
+export effect function validateProfileImageUrl(
+  raw: string | null | undefined,
+  fieldLabel: string
+): (string | null)!SocialFailure {
+  if (raw === undefined || raw === null) return null
+  const trimmed = raw.trim()
+  if (trimmed === "") return null
+  if (trimmed.length > 500) {
+    throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} must be 500 characters or fewer` })
+  }
+  if (hasDisallowedUrlCharacters(trimmed)) {
+    throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} contains invalid characters` })
+  }
+  if (trimmed.startsWith("/assets/") || trimmed.startsWith("/images/")) {
+    if (trimmed.includes("..")) {
+      throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} path cannot contain parent traversal` })
+    }
+    return trimmed
+  }
+  if (trimmed.startsWith("https://")) {
+    if (!isValidHttpsUrl(trimmed)) {
+      throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} must be a valid https:// URL or /assets/ path` })
+    }
+    return trimmed
+  }
+  throw new SocialFailure({
+    code: "InvalidInput",
+    message: `${fieldLabel} must start with /assets/, /images/, or https://`
+  })
 }
 
 export function normalizeOptionalText(value: string | undefined): string | null {
@@ -180,7 +232,7 @@ function subjectFromOrgRow(row: Row): ResolvedSubject {
   return {
     id,
     kind: "org",
-    handle: canonicalHandle(id),
+    handle: canonicalHandle(toText(row.username), id),
     displayName: toText(row.name) ?? "",
     avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
     bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null,
@@ -199,7 +251,7 @@ effect function findAccountByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSub
 
 effect function findActorByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const actorRows = try tx.query(
-    "SELECT id, name, username, profile_image_url, profile_banner_url FROM feed_actors WHERE (id = $1 OR lower(username) = lower($1)) AND id NOT LIKE 'test-%' LIMIT 1",
+    "SELECT id, name, username, profile_image_url, profile_banner_url FROM feed_actors WHERE (id = $1 OR lower(username) = lower($1)) AND id NOT LIKE 'test-%' AND id NOT LIKE 'org-%' LIMIT 1",
     [cleaned]
   )
   const actorRow = actorRows[0]
@@ -208,7 +260,7 @@ effect function findActorByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubje
 
 effect function findOrgByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const orgRows = try tx.query(
-    "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE lower(id) = lower($1) OR lower(ticker) = lower($1) LIMIT 1",
+    "SELECT id, username, name, image_url, banner_url FROM feed_organizations WHERE lower(id) = lower($1) OR lower(COALESCE(username, '')) = lower($1) OR lower(COALESCE(ticker, '')) = lower($1) LIMIT 1",
     [cleaned]
   )
   const orgRow = orgRows[0]
@@ -303,7 +355,12 @@ export effect function consumeHourlyRateLimitTx(
     return
   }
   if (recordedCount >= limit) {
-    throw new SocialFailure({ code: "RateLimited", message: "Hourly action limit exceeded" })
+    const retryAfterSeconds = Math.max(1, Math.ceil((recordedStart + HOUR_MS - now) / 1000))
+    throw new SocialFailure({
+      code: "RateLimited",
+      message: "Hourly action limit exceeded",
+      retryAfterSeconds
+    })
   }
   try tx.query(
     "UPDATE feed_rate_limits SET count = count + 1 WHERE scope_key = $1",
@@ -344,8 +401,8 @@ export effect function insertNotificationTx(
   }
   const id = freshId()
   try tx.query(
-    "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
-    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.title, seed.body, seed.isGameOnly, seed.createdAt]
+    "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, chat_id, invite_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12)",
+    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.chatId ?? null, seed.inviteId ?? null, seed.title, seed.body, seed.isGameOnly, seed.createdAt]
   )
   return {
     type: "notification.created",
@@ -407,7 +464,7 @@ export effect function loadSubjectProfilesMapTx(
   }
   if (orgIds.length > 0) {
     const orgRows = try tx.query(
-      "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      "SELECT id, username, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
       [orgIds]
     )
     for (const row of orgRows) {
@@ -415,7 +472,7 @@ export effect function loadSubjectProfilesMapTx(
       profiles.set(`org:${id}`, {
         id,
         kind: "org",
-        handle: canonicalHandle(id),
+        handle: canonicalHandle(toText(row.username), id),
         displayName: toText(row.name) ?? id,
         avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
         bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null
@@ -445,7 +502,7 @@ export effect function loadProfilesByIdsTx(
   const missingAfterUsers = uniqueIds.filter((id) => !profiles.has(id))
   if (missingAfterUsers.length > 0) {
     const orgRows = try tx.query(
-      "SELECT id, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      "SELECT id, username, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
       [missingAfterUsers]
     )
     for (const row of orgRows) {
@@ -454,7 +511,7 @@ export effect function loadProfilesByIdsTx(
         profiles.set(id, {
           id,
           kind: "org",
-          handle: canonicalHandle(id),
+          handle: canonicalHandle(toText(row.username), id),
           displayName: toText(row.name) ?? id,
           avatarUrl: resolveOrgLogoUrl(id, toText(row.image_url)),
           bannerUrl: resolveOrgBannerUrl(id, toText(row.banner_url))
@@ -465,7 +522,7 @@ export effect function loadProfilesByIdsTx(
   const missingAfterOrgs = uniqueIds.filter((id) => !profiles.has(id))
   if (missingAfterOrgs.length > 0) {
     const npcRows = try tx.query(
-      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1) AND id NOT LIKE 'test-%'",
+      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1) AND id NOT LIKE 'test-%' AND id NOT LIKE 'org-%'",
       [missingAfterOrgs]
     )
     for (const row of npcRows) {

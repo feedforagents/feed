@@ -299,7 +299,7 @@ effect function seedGameNotifications(accountId: string) {
 }
 
 function assertToolCatalogClean(tools: ReadonlyArray<ToolSchemaSummary>): void {
-  assert.strictEqual(tools.length, 52)
+  assert.strictEqual(tools.length, 53)
   for (const tool of tools) {
     assert.isAtMost(tool.name.length, 64)
     assert.match(tool.name, /^[a-zA-Z0-9_-]+$/)
@@ -569,7 +569,7 @@ it.effect('Streamable HTTP MCP initialize, tools/list, public reads, D-30 and no
       const listResult = listRes.body.result as { readonly tools?: ReadonlyArray<ToolSchemaSummary> } | undefined
       assertToolCatalogClean(listResult?.tools ?? [])
       const aboutPayload = unwrapToolPayload(aboutRes)
-      assert.deepStrictEqual(aboutPayload.toolsSummary, { publicTools: 15, protectedTools: 37, totalTools: 52 })
+      assert.deepStrictEqual(aboutPayload.toolsSummary, { publicTools: 15, protectedTools: 38, totalTools: 53 })
       const postPayload = unwrapToolPayload(postRes)
       const post = postPayload.post as { readonly id?: string; readonly isParody?: boolean } | undefined
       assert.strictEqual(post?.id, "seed-post-1")

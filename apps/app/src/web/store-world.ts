@@ -1,10 +1,18 @@
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
-import type { LeaderboardMetric, LeaderboardScope, MarketTimeRange, PerpRebalanceOrderInput } from "@repo/ui";
+import type {
+  LeaderboardAudienceFilter,
+  LeaderboardMetric,
+  LeaderboardScope,
+  LeaderboardTimeframe,
+  MarketTimeRange,
+  PerpRebalanceOrderInput,
+} from "@repo/ui";
 import { passThrough, requestJson } from "./api.ts";
 import {
   appendAnonymousModeParam,
   clearNotices,
   getStoreSnapshot,
+  incrementSpaNavDepth,
   pushBrowserRoute,
   recordPublicView,
   requireAuthOrQueue,
@@ -48,6 +56,7 @@ import {
   decodePredictionMarket,
   decodeProfileBundle,
   decodeTrendingList,
+  decodeUsersSearch,
   decodeWorldStatus,
   isRecord,
   arr,
@@ -58,6 +67,9 @@ import {
 const likeInFlight = new Set<string>();
 const repostInFlight = new Set<string>();
 const followInFlight = new Set<string>();
+let feedRequestSeq = 0;
+let exploreRequestSeq = 0;
+let userSearchRequestSeq = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -81,6 +93,9 @@ function findPostInState(postId: string): AppPost | undefined {
     ?? s.activeThread?.ancestors.find((p) => p.card.id === postId)
     ?? s.activeThread?.replies.find((p) => p.card.id === postId)
     ?? s.profileBundle?.posts.find((p) => p.card.id === postId)
+    ?? s.profileReplies.find((p) => p.card.id === postId)
+    ?? s.profileLikes.find((p) => p.card.id === postId)
+    ?? s.marketSocialPosts.find((p) => p.card.id === postId)
     ?? s.explore.posts.find((p) => p.card.id === postId);
 }
 
@@ -93,6 +108,9 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
     feedPosts: patchList(cur.feedPosts),
     explore: { ...cur.explore, posts: patchList(cur.explore.posts) },
     profileBundle: cur.profileBundle ? { ...cur.profileBundle, posts: patchList(cur.profileBundle.posts) } : null,
+    profileReplies: patchList(cur.profileReplies),
+    profileLikes: patchList(cur.profileLikes),
+    marketSocialPosts: patchList(cur.marketSocialPosts),
     activeThread: cur.activeThread
       ? {
           post: patchPost(cur.activeThread.post),
@@ -127,6 +145,8 @@ export function removePostAcrossStore(
       ? { ...cur.profileBundle, posts: cleanList(cur.profileBundle.posts) }
       : null,
     profileReplies: cleanList(cur.profileReplies),
+    profileLikes: cleanList(cur.profileLikes),
+    marketSocialPosts: cleanList(cur.marketSocialPosts),
     activeThread: thread
       ? thread.post.card.id === postId
         ? null
@@ -147,6 +167,9 @@ function filterAuthorOutOfFeeds(handle: string): void {
   setStoreState({
     feedPosts: cur.feedPosts.filter(keep),
     explore: { ...cur.explore, posts: cur.explore.posts.filter(keep) },
+    profileReplies: cur.profileReplies.filter(keep),
+    profileLikes: cur.profileLikes.filter(keep),
+    marketSocialPosts: cur.marketSocialPosts.filter(keep),
     activeThread: cur.activeThread
       ? {
           ...cur.activeThread,
@@ -166,11 +189,14 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const s = getStoreSnapshot();
   const tab = tabOverride ?? s.feedTab;
   const viewerId = s.viewer?.accountId ?? null;
+  const reqSeq = ++feedRequestSeq;
   setStoreState({ feedLoading: true });
   const url = appendAnonymousModeParam(`/api/feed?tab=${encodeURIComponent(tab)}`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
+  const latest = getStoreSnapshot();
+  if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
     setStoreState({
       feedPosts: res.data.items,
@@ -195,15 +221,21 @@ export async function flushPendingNewPosts(): Promise<void> {
 export async function loadMoreFeed(): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.feedNextCursor || s.feedLoading || s.feedLoadingMore) return;
+  const tab = s.feedTab;
   const viewerId = s.viewer?.accountId ?? null;
+  const reqSeq = feedRequestSeq;
   setStoreState({ feedLoadingMore: true });
   const url = appendAnonymousModeParam(
-    `/api/feed?tab=${encodeURIComponent(s.feedTab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
+    `/api/feed?tab=${encodeURIComponent(tab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
     s,
   );
   const res = await requestJson(url, { parse: (raw) => decodeFeedPage(raw, viewerId) });
+  const latest = getStoreSnapshot();
+  if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) {
+    setStoreState({ feedLoadingMore: false });
+    return;
+  }
   if (res.ok) {
-    const latest = getStoreSnapshot();
     setStoreState({
       feedPosts: appendUniquePosts(latest.feedPosts, res.data.items),
       feedNextCursor: res.data.nextCursor,
@@ -223,8 +255,12 @@ export async function loadTrending(): Promise<void> {
     requestJson(appendAnonymousModeParam("/api/articles?limit=10", s), { parse: decodeArticles }),
   ]);
   const cur = getStoreSnapshot();
+  const nextTrending = trendRes.ok ? trendRes.data : cur.rightRailTrending;
+  const nextArticles = articlesRes.ok && articlesRes.data.length > 0 ? articlesRes.data : cur.rightRailArticles;
   setStoreState({
     trendingLoading: false,
+    rightRailTrending: nextTrending,
+    rightRailArticles: nextArticles,
     explore: {
       ...cur.explore,
       ...(trendRes.ok ? { trending: trendRes.data } : {}),
@@ -447,6 +483,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const s = getStoreSnapshot();
   const q = queryOverride ?? s.exploreQuery;
   const viewerId = s.viewer?.accountId ?? null;
+  const reqSeq = ++exploreRequestSeq;
   setStoreState({ exploreLoading: true, exploreQuery: q });
   const url = appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(q.trim())}`, s);
   const needMarkets = s.perps.length === 0;
@@ -456,6 +493,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     }),
     needMarkets ? requestJson("/api/markets", { parse: passThrough }) : Promise.resolve(null),
   ]);
+  if (reqSeq !== exploreRequestSeq) return;
   let marketPatch: Partial<Pick<ReturnType<typeof getStoreSnapshot>, "predictions" | "perps" | "positions">> = {};
   if (mktRes && mktRes.ok && isRecord(mktRes.data)) {
     const rawPreds = arr(mktRes.data.predictions ?? mktRes.data.predictionMarkets);
@@ -471,7 +509,17 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     }
   }
   if (res.ok) {
-    setStoreState({ explore: res.data, exploreLoading: false, trendingLoading: false, ...marketPatch });
+    const cur = getStoreSnapshot();
+    const isBrowse = q.trim() === "";
+    setStoreState({
+      explore: res.data,
+      ...(isBrowse && res.data.trending.length > 0 ? { rightRailTrending: res.data.trending } : {}),
+      ...(isBrowse && res.data.articles.length > 0 ? { rightRailArticles: res.data.articles } : {}),
+      exploreLoading: false,
+      trendingLoading: false,
+      ...marketPatch,
+      ...(isBrowse ? {} : { rightRailTrending: cur.rightRailTrending, rightRailArticles: cur.rightRailArticles }),
+    });
     return;
   }
   setStoreState({ exploreLoading: false, trendingLoading: false, ...marketPatch });
@@ -480,7 +528,31 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
 
 export async function loadTrendingTag(tag: string): Promise<void> {
   const cleanTag = tag.trim();
-  setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag });
+  const s = getStoreSnapshot();
+  const viewerId = s.viewer?.accountId ?? null;
+  const reqSeq = ++exploreRequestSeq;
+  setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag, exploreLoading: true });
+  const url = appendAnonymousModeParam(`/api/trending/${encodeURIComponent(cleanTag)}`, s);
+  const res = await requestJson(url, {
+    parse: (raw) => decodeFeedPage(raw, viewerId),
+  });
+  if (reqSeq !== exploreRequestSeq) return;
+  if (res.ok) {
+    const cur = getStoreSnapshot();
+    setStoreState({
+      explore: {
+        ...cur.explore,
+        posts: res.data.items,
+        accounts: [],
+        actors: [],
+        organizations: [],
+        tags: [],
+      },
+      exploreLoading: false,
+    });
+    return;
+  }
+  setStoreState({ exploreLoading: false });
   await loadExplore(cleanTag);
 }
 
@@ -488,15 +560,16 @@ export async function searchAccounts(query: string): Promise<{
   readonly accounts: ReadonlyArray<ExploreAccountHit>;
   readonly actors: ReadonlyArray<ExploreActorHit>;
 }> {
-  const trimmed = query.trim();
+  const trimmed = query.trim().replace(/^@/, "");
   if (!trimmed) return { accounts: [], actors: [] };
-  const s = getStoreSnapshot();
-  const res = await requestJson(
-    appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(trimmed)}`, s),
-    { parse: (raw) => decodeExplore(raw, s.viewer?.accountId ?? null) },
-  );
-  if (!res.ok) return { accounts: [], actors: [] };
-  return { accounts: res.data.accounts, actors: res.data.actors };
+  const reqSeq = ++userSearchRequestSeq;
+  const res = await requestJson(`/api/users/search?q=${encodeURIComponent(trimmed)}&limit=12`, {
+    parse: decodeUsersSearch,
+  });
+  if (reqSeq !== userSearchRequestSeq || !res.ok) {
+    return { accounts: [], actors: [] };
+  }
+  return res.data;
 }
 
 export async function loadPositionsSilent(): Promise<void> {
@@ -512,19 +585,29 @@ export async function loadPositionsSilent(): Promise<void> {
   setStoreState({ predictions, perps, positions });
 }
 
+function audienceToScope(audience: LeaderboardAudienceFilter): LeaderboardScope {
+  return audience === "npcs" ? "characters" : "players";
+}
+
 export async function loadLeaderboard(options?: {
   readonly scope?: LeaderboardScope;
+  readonly audience?: LeaderboardAudienceFilter;
+  readonly timeframe?: LeaderboardTimeframe;
   readonly metric?: LeaderboardMetric;
   readonly page?: number;
   readonly pageSize?: number;
 }): Promise<void> {
   const s = getStoreSnapshot();
-  const scope = options?.scope ?? s.leaderboardScope;
+  const audience = options?.audience ?? (options?.scope ? (options.scope === "characters" ? "npcs" : "traders") : s.leaderboardAudience);
+  const scope = options?.scope ?? audienceToScope(audience);
+  const timeframe = options?.timeframe ?? s.leaderboardTimeframe;
   const metric = options?.metric ?? s.leaderboardMetric;
   const page = Math.max(1, options?.page ?? s.leaderboardPage);
   const pageSize = options?.pageSize ?? 25;
   setStoreState({
     leaderboardLoading: true,
+    leaderboardAudience: audience,
+    leaderboardTimeframe: timeframe,
     leaderboardScope: scope,
     leaderboardMetric: metric,
     leaderboardPage: page,
@@ -535,12 +618,18 @@ export async function loadLeaderboard(options?: {
     page: String(page),
     pageSize: String(pageSize),
   });
+  if (audience === "all" || timeframe !== "ALL") {
+    params.set("filter", audience);
+    params.set("timeframe", timeframe);
+  }
   const res = await requestJson(`/api/leaderboard?${params.toString()}`, {
     parse: (raw) => decodeLeaderboardPage(raw, scope, metric),
   });
   if (res.ok) {
     setStoreState({
       leaderboard: res.data.entries,
+      leaderboardAudience: audience,
+      leaderboardTimeframe: timeframe,
       leaderboardScope: res.data.scope,
       leaderboardMetric: res.data.metric,
       leaderboardPage: res.data.page,
@@ -562,13 +651,18 @@ export async function jumpToMyLeaderboardRank(): Promise<void> {
     metric: s.leaderboardMetric,
     pageSize: "25",
   });
+  if (s.leaderboardAudience === "all" || s.leaderboardTimeframe !== "ALL") {
+    params.set("filter", s.leaderboardAudience === "npcs" ? "traders" : s.leaderboardAudience);
+    params.set("timeframe", s.leaderboardTimeframe);
+  }
   const res = await requestJson(`/api/leaderboard/me?${params.toString()}`, {
     parse: decodeLeaderboardPosition,
   });
   if (res.ok && res.data) {
     setStoreState({ leaderboardCurrentUser: res.data.entry });
     await loadLeaderboard({
-      scope: "players",
+      audience: s.leaderboardAudience === "npcs" ? "traders" : s.leaderboardAudience,
+      timeframe: s.leaderboardTimeframe,
       metric: s.leaderboardMetric,
       page: res.data.page,
       pageSize: 25,
@@ -672,11 +766,14 @@ export async function setMarketTimeRange(range: MarketTimeRange): Promise<void> 
   }
 }
 
+export type PerpOrderMode = "open" | "add" | "reduce" | "flip";
+
 export async function previewPerpOrder(
   ticker: string,
   side: "long" | "short",
   marginPts: number,
   leverage: number,
+  mode?: PerpOrderMode,
 ): Promise<void> {
   if (!Number.isFinite(marginPts) || marginPts <= 0 || !Number.isFinite(leverage) || leverage < 1) {
     setStoreState({ perpPreview: null });
@@ -685,7 +782,14 @@ export async function previewPerpOrder(
   const collateralCents = Math.max(1, Math.round(marginPts * 100));
   const res = await requestJson("/api/markets/perp/preview", {
     method: "POST",
-    body: { ticker, side, collateralCents, collateralPts: marginPts, leverage: Math.round(leverage) },
+    body: {
+      ticker,
+      side,
+      collateralCents,
+      collateralPts: marginPts,
+      leverage: Math.round(leverage),
+      ...(mode ? { mode } : {}),
+    },
     parse: decodePerpPreview,
   });
   const latest = getStoreSnapshot();
@@ -695,24 +799,7 @@ export async function previewPerpOrder(
 
 export async function loadMarkets(): Promise<void> {
   setStoreState({ marketsLoading: true });
-  const sBefore = getStoreSnapshot();
-  const lbParams = new URLSearchParams({
-    scope: sBefore.leaderboardScope,
-    metric: sBefore.leaderboardMetric,
-    page: String(sBefore.leaderboardPage),
-    pageSize: "25",
-  });
-  const [mktRes, lbRes] = await Promise.all([
-    requestJson("/api/markets", { parse: passThrough }),
-    requestJson(`/api/leaderboard?${lbParams.toString()}`, {
-      parse: (raw) => decodeLeaderboardPage(raw, sBefore.leaderboardScope, sBefore.leaderboardMetric),
-    }),
-  ]);
-  if (sBefore.viewer) {
-    void loadEconomy();
-    void loadClosedPositions();
-    void loadPnlHistory();
-  }
+  const mktRes = await requestJson("/api/markets", { parse: passThrough });
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
@@ -738,7 +825,7 @@ export async function loadMarkets(): Promise<void> {
       marketsViewMode = "terminal";
     }
   }
-  if (!selectedMarketId) {
+  if (!selectedMarketId && marketsViewMode !== "terminal") {
     if (selectedMarketKind === "perp" && perps[0]) {
       selectedMarketId = perps[0].ticker;
     } else if (predictions[0]) {
@@ -757,19 +844,14 @@ export async function loadMarkets(): Promise<void> {
     positions,
     selectedMarketKind,
     selectedMarketId,
-    ...(lbRes.ok
-      ? {
-          leaderboard: lbRes.data.entries,
-          leaderboardTotalCount: lbRes.data.totalCount,
-          leaderboardTotalPages: lbRes.data.totalPages,
-          leaderboardCurrentUser: lbRes.data.currentUser,
-        }
-      : {}),
   });
-  if (marketsViewMode === "terminal" && selectedMarketId) {
-    void loadMarketDetails(selectedMarketKind, selectedMarketId);
-    if (selectedMarketKind === "perp") {
-      void previewPerpOrder(selectedMarketId, "long", 10, 5);
+  if (s.route === "Markets" && !s.walletView && marketsViewMode === "terminal" && selectedMarketId) {
+    const exists =
+      selectedMarketKind === "perp"
+        ? perps.some((p) => p.ticker.toUpperCase() === selectedMarketId?.toUpperCase())
+        : predictions.some((p) => p.card.id === selectedMarketId);
+    if (exists) {
+      void loadMarketDetails(selectedMarketKind, selectedMarketId);
     }
   }
 }
@@ -781,6 +863,9 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
     selectedMarketId: id,
     selectedTicker: kind === "perp" ? id : null,
     marketsViewMode: "terminal",
+    marketHistory: [],
+    marketTrades: [],
+    marketSocialPosts: [],
     perpPreview: null,
     tradeError: null,
   });
@@ -789,6 +874,7 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
       ? `/markets/perps/${encodeURIComponent(id)}`
       : `/markets/predictions/${encodeURIComponent(id)}`;
     if (window.location.pathname !== targetPath) {
+      incrementSpaNavDepth();
       window.history.pushState(null, "", targetPath);
     }
     if (typeof window.scrollTo === "function") {
@@ -796,6 +882,9 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
     }
   }
   void loadMarketDetails(kind, id);
+  if (kind === "perp") {
+    void previewPerpOrder(id, "long", 10, 5, "open");
+  }
 }
 
 export function openMarketsDashboard(): void {
@@ -807,6 +896,7 @@ export function openMarketsDashboard(): void {
   });
   if (typeof window !== "undefined") {
     if (window.location.pathname !== "/markets") {
+      incrementSpaNavDepth();
       window.history.pushState(null, "", "/markets");
     }
     if (typeof window.scrollTo === "function") {
@@ -883,12 +973,16 @@ export async function submitPredictionOrder(
   const body = action === "Buy"
     ? { side, amountCents: Math.max(1, Math.round(amountPts * 100)), amountPts }
     : { side, shareUnits: computedShareUnits, shares: computedShareUnits };
-  return executeTradeRequest({
+  const ok = await executeTradeRequest({
     endpoint,
     body,
     headers: { "Idempotency-Key": newIdempotencyKey() },
     statusMessage: `${action} ${side.toUpperCase()} executed.`,
   });
+  if (ok && getStoreSnapshot().walletView) {
+    await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
+  }
+  return ok;
 }
 
 export async function submitPerpOrder(
@@ -896,29 +990,43 @@ export async function submitPerpOrder(
   side: "long" | "short",
   marginPts: number,
   leverage: number,
+  mode?: PerpOrderMode,
 ): Promise<boolean> {
+  if (getStoreSnapshot().tradeLoading) return false;
   if (!requireAuthOrQueue({ kind: "trade_perp", ticker, side, marginPts, leverage, label: `open $${ticker} ${side} perp` })) {
     return false;
   }
-  return executeTradeRequest({
+  const roundedLeverage = Math.max(1, Math.round(leverage));
+  const ok = await executeTradeRequest({
     endpoint: `/api/markets/perp/${encodeURIComponent(ticker)}/open`,
-    body: { side, collateralCents: Math.max(1, Math.round(marginPts * 100)), collateralPts: marginPts, leverage },
-    statusMessage: `Opened $${ticker} ${side} ${leverage}x position.`,
+    body: {
+      side,
+      collateralCents: Math.max(1, Math.round(marginPts * 100)),
+      collateralPts: marginPts,
+      leverage: roundedLeverage,
+      ...(mode ? { mode } : {}),
+    },
+    headers: { "Idempotency-Key": newIdempotencyKey() },
+    statusMessage: `Opened $${ticker} ${side} ${roundedLeverage}x position.`,
     formatReceiptMessage: (data) => {
       const action = isRecord(data) ? str(data.action, "open") : "open";
       if (action === "add") return `Added to $${ticker} ${side} position.`;
-      if (action === "flip") return `Flipped $${ticker} position to ${side} ${leverage}x.`;
+      if (action === "flip") return `Flipped $${ticker} position to ${side} ${roundedLeverage}x.`;
       if (action === "reduce") return `Reduced $${ticker} position.`;
-      return `Opened $${ticker} ${side} ${leverage}x position.`;
+      return `Opened $${ticker} ${side} ${roundedLeverage}x position.`;
     },
   });
+  if (ok && getStoreSnapshot().walletView) {
+    await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
+  }
+  return ok;
 }
 
 export async function closePerpPosition(
   positionId: string,
   options?: { readonly sizeCents?: number; readonly closePct?: number },
-): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+): Promise<boolean> {
+  if (!getStoreSnapshot().viewer || getStoreSnapshot().tradeLoading) return false;
   const body: Record<string, number> = {};
   if (options?.sizeCents !== undefined && options.sizeCents > 0) {
     body.sizeCents = Math.max(1, Math.round(options.sizeCents));
@@ -926,25 +1034,31 @@ export async function closePerpPosition(
   if (options?.closePct !== undefined && options.closePct > 0 && options.closePct <= 100) {
     body.closePct = options.closePct;
   }
-  await executeTradeRequest({
+  const ok = await executeTradeRequest({
     endpoint: `/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`,
     body,
+    headers: { "Idempotency-Key": newIdempotencyKey() },
     statusMessage: "Position closed.",
     formatReceiptMessage: (data) => {
       const isFull = isRecord(data) && typeof data.isFullClose === "boolean" ? data.isFullClose : true;
       return isFull ? "Position closed." : "Position partially closed.";
     },
   });
+  if (ok && getStoreSnapshot().walletView) {
+    await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
+  }
+  return ok;
 }
 
 export async function rebalancePerpPosition(order: PerpRebalanceOrderInput): Promise<void> {
-  if (order.action === "reduce") {
+  const mode = order.mode ?? order.action;
+  if (mode === "reduce") {
     await closePerpPosition(order.positionId, {
       sizeCents: Math.max(1, Math.round(order.deltaNotionalPts * 100)),
     });
     return;
   }
-  await submitPerpOrder(order.ticker, order.nextSide, order.marginPts, order.leverage);
+  await submitPerpOrder(order.ticker, order.nextSide, order.marginPts, order.leverage, mode);
 }
 
 export async function markChatRead(chatId: string): Promise<void> {
@@ -963,7 +1077,7 @@ export async function markChatRead(chatId: string): Promise<void> {
   });
 }
 
-export async function loadChats(loadMessages = true): Promise<void> {
+export async function loadChats(loadMessages = true, preferredChatId?: string | null): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
   if (loadMessages) setStoreState({ chatsLoading: true });
@@ -973,8 +1087,9 @@ export async function loadChats(loadMessages = true): Promise<void> {
   ]);
   const s = getStoreSnapshot();
   const nextChats = chatsRes.ok ? chatsRes.data : s.chats;
-  const selectedId = s.selectedChatId && nextChats.some((c) => c.id === s.selectedChatId)
-    ? s.selectedChatId
+  const preferred = preferredChatId ?? s.selectedChatId;
+  const selectedId = preferred && nextChats.some((c) => c.id === preferred)
+    ? preferred
     : (nextChats[0]?.id ?? null);
   setStoreState({
     chatsLoading: false,
@@ -995,15 +1110,12 @@ export async function loadChatMessages(chatId: string): Promise<void> {
   });
   if (res.ok) {
     setStoreState({ selectedChatId: chatId, chatMessages: res.data });
-    const chat = getStoreSnapshot().chats.find((c) => c.id === chatId);
-    if (chat && chat.unreadCount > 0) {
-      void markChatRead(chatId);
-    }
+    void markChatRead(chatId);
   }
 }
 
-export async function startDirectChat(targetHandleOrId: string): Promise<void> {
-  if (!requireAuthOrQueue({ kind: "dm", handle: targetHandleOrId, label: `message @${targetHandleOrId}` })) return;
+export async function startDirectChat(targetHandleOrId: string): Promise<boolean> {
+  if (!requireAuthOrQueue({ kind: "dm", handle: targetHandleOrId, label: `message @${targetHandleOrId}` })) return false;
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   const res = await requestJson("/api/chats/direct", {
     method: "POST",
@@ -1012,7 +1124,7 @@ export async function startDirectChat(targetHandleOrId: string): Promise<void> {
   });
   if (!res.ok) {
     setErrorNotice(res.message);
-    return;
+    return false;
   }
   const createdId = res.data[0]?.id ?? null;
   if (getStoreSnapshot().route !== "Chats") {
@@ -1021,10 +1133,11 @@ export async function startDirectChat(targetHandleOrId: string): Promise<void> {
     sendApp({ type: "navigateApp", targetRoute: "Chats" });
     setStoreState({ route: "Chats" });
   }
-  await loadChats();
+  await loadChats(false, createdId);
   if (createdId) {
     await loadChatMessages(createdId);
   }
+  return true;
 }
 
 export async function createGroupChat(title: string, memberHandles: ReadonlyArray<string>): Promise<boolean> {
@@ -1041,7 +1154,7 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
   const rec = isRecord(res.data) ? (isRecord(res.data.chat) ? res.data.chat : res.data) : {};
   const chatId = optStr(rec.id);
   setStatusNotice(`Created group "${title}".`);
-  await loadChats();
+  await loadChats(false, chatId);
   if (chatId) await loadChatMessages(chatId);
   return true;
 }
@@ -1136,6 +1249,24 @@ export async function removeGroupMember(chatId: string, targetHandleOrId: string
   return true;
 }
 
+export async function transferGroupOwnership(chatId: string, newOwnerHandleOrId: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
+  const cleaned = newOwnerHandleOrId.trim().replace(/^@/, "");
+  if (!cleaned) return false;
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/transfer`, {
+    method: "POST",
+    body: { newOwnerHandleOrId: cleaned },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setErrorNotice(res.message);
+    return false;
+  }
+  setStatusNotice(`Transferred group ownership to @${cleaned}.`);
+  await loadChats(false, chatId);
+  return true;
+}
+
 export function deleteGroupChat(chatId: string): Promise<boolean> {
   return mutateAndClearGroupChat(
     `/api/chats/${encodeURIComponent(chatId)}`,
@@ -1145,8 +1276,8 @@ export function deleteGroupChat(chatId: string): Promise<boolean> {
   );
 }
 
-export async function sendChatMessage(chatId: string, content: string): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+export async function sendChatMessage(chatId: string, content: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer) return false;
   setStoreState({ chatSending: true });
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
     method: "POST",
@@ -1156,9 +1287,10 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
   setStoreState({ chatSending: false });
   if (!res.ok) {
     setErrorNotice(res.message);
-    return;
+    return false;
   }
-  await loadChatMessages(chatId);
+  await Promise.all([loadChatMessages(chatId), loadChats(false, chatId)]);
+  return true;
 }
 
 export async function reactToChatMessage(messageId: string, emoji: string): Promise<void> {
@@ -1274,12 +1406,28 @@ export async function clearNotifications(): Promise<void> {
 export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
-  if (!handle) return;
-  setStoreState({ profileLoading: true, profileHandle: handle, profileReplies: [] });
+  if (!handle) {
+    setStoreState({
+      profileBundle: null,
+      profileHandle: null,
+      profileReplies: [],
+      profileLikes: [],
+      profileTrades: [],
+      profileLoading: false,
+    });
+    return;
+  }
+  const switchingProfile = s.profileBundle?.summary.handle.toLowerCase() !== handle.toLowerCase();
+  setStoreState({
+    profileLoading: true,
+    profileHandle: handle,
+    ...(switchingProfile ? { profileReplies: [], profileLikes: [], profileTrades: [] } : {}),
+  });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
+  if (getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
     setStoreState({ profileBundle: res.data, profileLoading: false });
     return;
@@ -1306,6 +1454,38 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   setStoreState({ profileRepliesLoading: false });
+}
+
+export async function loadProfileLikes(handleOrSelf?: string | null): Promise<void> {
+  const s = getStoreSnapshot();
+  const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
+  if (!handle) return;
+  const viewerId = s.viewer?.accountId ?? null;
+  setStoreState({ profileLikesLoading: true });
+  const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
+  const res = await requestJson(url, {
+    parse: (raw) => decodeFeedPage(raw, viewerId),
+  });
+  if (res.ok) {
+    setStoreState({ profileLikes: res.data.items, profileLikesLoading: false });
+    return;
+  }
+  setStoreState({ profileLikesLoading: false });
+}
+
+export async function loadProfileTrades(handleOrSelf?: string | null): Promise<void> {
+  const s = getStoreSnapshot();
+  const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
+  if (!handle) return;
+  setStoreState({ profileTradesLoading: true });
+  const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/trades?limit=50`, {
+    parse: decodeMarketTrades,
+  });
+  if (res.ok) {
+    setStoreState({ profileTrades: res.data, profileTradesLoading: false });
+    return;
+  }
+  setStoreState({ profileTradesLoading: false });
 }
 
 export async function loadMoreProfilePosts(): Promise<void> {
@@ -1418,28 +1598,74 @@ export async function updateOwnProfile(payload: {
 function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
   const lower = handle.toLowerCase();
   const cur = getStoreSnapshot();
-  const profileMatches = cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower;
+  const viewerHandle = cur.viewer?.handle.toLowerCase() ?? "";
+  const profileMatches = Boolean(cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower);
+  const viewingOwnProfile = Boolean(cur.profileBundle?.summary.isOwnProfile && lower !== viewerHandle);
   const delta = nextFollowing ? 1 : -1;
+  const patchPostAuthor = (p: AppPost): AppPost =>
+    p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p;
+  const patchPosts = (list: ReadonlyArray<AppPost>) => list.map(patchPostAuthor);
+
+  let nextProfileBundle = cur.profileBundle;
+  if (cur.profileBundle) {
+    const nextPosts = patchPosts(cur.profileBundle.posts);
+    if (profileMatches) {
+      nextProfileBundle = {
+        ...cur.profileBundle,
+        posts: nextPosts,
+        summary: {
+          ...cur.profileBundle.summary,
+          isFollowing: nextFollowing,
+          followersCount: Math.max(0, cur.profileBundle.summary.followersCount + delta),
+        },
+      };
+    } else if (viewingOwnProfile) {
+      nextProfileBundle = {
+        ...cur.profileBundle,
+        posts: nextPosts,
+        summary: {
+          ...cur.profileBundle.summary,
+          followingCount: Math.max(0, cur.profileBundle.summary.followingCount + delta),
+        },
+      };
+    } else {
+      nextProfileBundle = {
+        ...cur.profileBundle,
+        posts: nextPosts,
+      };
+    }
+  }
+
   setStoreState({
-    profileBundle: profileMatches && cur.profileBundle
+    profileBundle: nextProfileBundle,
+    profileReplies: patchPosts(cur.profileReplies),
+    profileLikes: patchPosts(cur.profileLikes),
+    marketSocialPosts: patchPosts(cur.marketSocialPosts),
+    activeThread: cur.activeThread
       ? {
-          ...cur.profileBundle,
-          summary: {
-            ...cur.profileBundle.summary,
-            isFollowing: nextFollowing,
-            followersCount: Math.max(0, cur.profileBundle.summary.followersCount + delta),
-          },
+          post: patchPostAuthor(cur.activeThread.post),
+          parentPost: cur.activeThread.parentPost ? patchPostAuthor(cur.activeThread.parentPost) : null,
+          ancestors: patchPosts(cur.activeThread.ancestors),
+          replies: patchPosts(cur.activeThread.replies),
         }
-      : cur.profileBundle,
+      : null,
+    explore: {
+      ...cur.explore,
+      posts: patchPosts(cur.explore.posts),
+      accounts: cur.explore.accounts.map((a) =>
+        a.handle.toLowerCase() === lower ? { ...a, viewerFollows: nextFollowing } : a,
+      ),
+      actors: cur.explore.actors.map((a) =>
+        a.username.toLowerCase() === lower ? { ...a, viewerFollows: nextFollowing } : a,
+      ),
+    },
     followListItems: cur.followListItems.map((item) =>
       item.handle.toLowerCase() === lower ? { ...item, viewerFollows: nextFollowing } : item,
     ),
     leaderboard: cur.leaderboard.map((row) =>
       row.handle.toLowerCase() === lower ? { ...row, isFollowing: nextFollowing } : row,
     ),
-    feedPosts: cur.feedPosts.map((p) =>
-      p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p,
-    ),
+    feedPosts: patchPosts(cur.feedPosts),
   });
 }
 
@@ -1450,6 +1676,9 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
     ?? (s.profileBundle?.summary.handle.toLowerCase() === lower ? s.profileBundle.summary.isFollowing : undefined)
     ?? s.followListItems.find((item) => item.handle.toLowerCase() === lower)?.viewerFollows
     ?? s.leaderboard.find((row) => row.handle.toLowerCase() === lower)?.isFollowing
+    ?? s.explore.accounts.find((a) => a.handle.toLowerCase() === lower)?.viewerFollows
+    ?? s.explore.actors.find((a) => a.username.toLowerCase() === lower)?.viewerFollows
+    ?? s.feedPosts.find((p) => p.card.authorHandle.toLowerCase() === lower)?.card.isFollowingAuthor
     ?? false;
   if (!requireAuthOrQueue({ kind: "follow", handle, currentlyFollowing: inferred, label: `follow @${handle}` })) return;
   if (followInFlight.has(lower)) return;

@@ -20,6 +20,7 @@ import {
   SheetTrigger,
   ToastBanner,
   ToastViewport,
+  type AppNavRoute,
   type UiMode,
   formatPts,
 } from "@repo/ui";
@@ -49,7 +50,7 @@ import {
 import { RightRail } from "./RightRail.tsx";
 import { toAppNavRoute } from "./routes.ts";
 import { ArticleDetailScreen } from "./screens/ArticleDetailScreen.tsx";
-import { AdminScreen, LinkScreen, OAuthConsentScreen } from "./screens/AuthScreens.tsx";
+import { AdminScreen, EmailMagicLinkScreen, LinkScreen, OAuthConsentScreen } from "./screens/AuthScreens.tsx";
 import { ChatsScreen } from "./screens/ChatsScreen.tsx";
 import { ExploreScreen } from "./screens/ExploreScreen.tsx";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
@@ -76,29 +77,9 @@ function themeLabel(theme: ThemePreference): string {
   return "Dark";
 }
 
-function RailComposeAndGameLinks({ mode }: { readonly mode: UiMode }) {
-  const s = useAppStore();
-  const isGame = mode === "GameMode";
-  const onWallet = s.route === "Markets" && s.walletView;
-
+function RailComposeAction() {
   return (
-    <div className="flex flex-col items-center gap-2 lg:items-stretch">
-      {isGame ? (
-        <div className="flex flex-col items-center gap-1 lg:items-stretch">
-          <button
-            type="button"
-            aria-current={onWallet ? "page" : undefined}
-            onClick={() => { void storeActions.navigate("/wallet"); }}
-            className={`group flex items-center justify-center rounded-full px-3 py-2.5 text-lg transition-colors duration-fast hover:bg-accent lg:w-fit lg:justify-start lg:px-3.5 ${onWallet ? "font-bold text-foreground" : "font-normal text-foreground/85 hover:text-foreground"}`}
-          >
-            <span className="flex items-center gap-4">
-              <WalletIcon className="size-6 shrink-0" />
-              <span className="sr-only lg:not-sr-only">Wallet</span>
-            </span>
-          </button>
-        </div>
-      ) : null}
-
+    <div className="flex flex-col items-center lg:items-stretch">
       <Button
         shape="pill"
         onClick={() => storeActions.openComposeDialog(null)}
@@ -339,7 +320,6 @@ function MobileDrawer({
               <Button
                 key={pref}
                 size="sm"
-                shape="pill"
                 variant={s.theme === pref ? "primary" : "outline"}
                 onClick={() => storeActions.setTheme(pref)}
               >
@@ -353,7 +333,6 @@ function MobileDrawer({
           {s.viewer ? (
             <Button
               variant="outline"
-              shape="pill"
               className="w-full"
               onClick={() => {
                 setOpen(false);
@@ -369,7 +348,7 @@ function MobileDrawer({
               className="w-full"
               onClick={() => {
                 setOpen(false);
-                storeActions.openJoinSheet("phone");
+                storeActions.openJoinSheet();
               }}
             >
               Sign in
@@ -392,7 +371,7 @@ function MobileHeaderActions({
     <div className="flex items-center gap-2 md:hidden">
       <ModeToggle compact mode={mode} onModeChange={storeActions.toggleUiModeFromControl} />
       {!signedIn ? (
-        <Button size="sm" shape="pill" onClick={() => storeActions.openJoinSheet("phone")}>
+        <Button size="sm" shape="pill" onClick={() => storeActions.openJoinSheet()}>
           Sign in
         </Button>
       ) : null}
@@ -402,25 +381,22 @@ function MobileHeaderActions({
 
 function VisitorBanner() {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-feed-brand/30 bg-feed-brand px-4 py-3 text-feed-brand-foreground shadow-lg">
+    <div className="-mx-3 -mb-3 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background/95 px-4 py-3 text-foreground backdrop-blur-md">
       <div className="flex min-w-0 flex-col">
-        <span className="text-sm font-bold">Don&apos;t miss what&apos;s happening</span>
-        <span className="text-xs text-feed-brand-foreground/85">Join Feed to post, follow, and trade live.</span>
+        <span className="text-sm font-bold text-foreground">Don&apos;t miss what&apos;s happening</span>
+        <span className="text-xs text-muted-foreground">Join Feed to post, follow, and trade live.</span>
       </div>
       <div className="flex items-center gap-2">
         <Button
           size="sm"
           shape="pill"
-          variant="secondary"
-          onClick={() => storeActions.openJoinSheet("phone")}
+          onClick={() => storeActions.openJoinSheet()}
         >
           Sign in
         </Button>
         <Button
           size="sm"
-          shape="pill"
           variant="outline"
-          className="border-feed-brand-foreground/40 bg-transparent text-feed-brand-foreground hover:bg-feed-brand-foreground/10"
           onClick={() => storeActions.openJoinSheet("agent")}
         >
           Connect AI
@@ -429,7 +405,7 @@ function VisitorBanner() {
           type="button"
           aria-label="Dismiss sign-in banner"
           onClick={storeActions.dismissBottomBanner}
-          className="rounded-full p-1 text-feed-brand-foreground/80 transition-colors hover:bg-feed-brand-foreground/15 hover:text-feed-brand-foreground"
+          className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <XIcon className="size-4" />
         </button>
@@ -450,7 +426,7 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
       return s.activeArticleId ? (
         <ArticleDetailScreen mode={mode} />
       ) : (
-        <ExploreScreen key={`${s.exploreQuery}:${s.activeTrendingTag ?? ""}`} mode={mode} />
+        <ExploreScreen mode={mode} />
       );
     case "Markets":
       if (mode === "SocialMode") return <HomeScreen mode={mode} />;
@@ -462,18 +438,54 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
     case "Notifications":
       return <NotificationsScreen mode={mode} />;
     case "Profile":
-      return <ProfileScreen mode={mode} />;
+      return <ProfileScreen key={s.profileHandle ?? s.viewer?.handle ?? "self"} mode={mode} />;
     case "Settings":
       return <SettingsScreen mode={mode} />;
     case "HowToPlay":
-      return <HowToPlayScreen />;
+      return <HowToPlayScreen mode={mode} />;
     case "Link":
       return <LinkScreen />;
     case "OAuthConsent":
       return <OAuthConsentScreen />;
+    case "AuthEmail":
+      return <EmailMagicLinkScreen />;
     case "Admin":
       return <AdminScreen />;
   }
+}
+
+function computeHeaderTitle(s: ReturnType<typeof useAppStore>): string | undefined {
+  if (s.walletView) return "Wallet";
+  if (s.activeArticleId) return "Article";
+  switch (s.route) {
+    case "PostDetail":
+      return "Post";
+    case "Link":
+      return "Pair AI Agent";
+    case "OAuthConsent":
+      return "Authorize Agent";
+    case "AuthEmail":
+      return "Sign in";
+    case "Admin":
+      return "Admin Console";
+    default:
+      return undefined;
+  }
+}
+
+function computeActiveNavRoute(s: ReturnType<typeof useAppStore>): AppNavRoute | null | undefined {
+  if (s.activeArticleId) return null;
+  if (s.route === "PostDetail" || s.route === "Admin" || s.route === "Link" || s.route === "OAuthConsent" || s.route === "AuthEmail") {
+    return null;
+  }
+  if (
+    s.route === "Profile" &&
+    s.profileHandle &&
+    s.viewer?.handle.toLowerCase() !== s.profileHandle.toLowerCase()
+  ) {
+    return null;
+  }
+  return undefined;
 }
 
 export function App() {
@@ -503,9 +515,9 @@ export function App() {
   return (
     <>
       <AppShell
-        route={toAppNavRoute(s.route)}
-        activeRoute={s.activeArticleId ? null : undefined}
-        headerTitle={s.activeArticleId ? "Article" : undefined}
+        route={toAppNavRoute(s.route, { walletView: s.walletView })}
+        activeRoute={computeActiveNavRoute(s)}
+        headerTitle={computeHeaderTitle(s)}
         mode={mode}
         layout={isWideRoute ? "wide" : "social"}
         hideDesktopHeader
@@ -514,7 +526,7 @@ export function App() {
         unreadChats={unreadChats}
         balancePts={balancePts}
         onNavigate={storeActions.navigateRoute}
-        onSignInClick={() => storeActions.openJoinSheet("phone")}
+        onSignInClick={() => storeActions.openJoinSheet()}
         brand={
           <button
             type="button"
@@ -526,7 +538,7 @@ export function App() {
             <FeedFullLogo className="hidden h-7 w-auto text-foreground lg:block" />
           </button>
         }
-        composeAction={<RailComposeAndGameLinks mode={mode} />}
+        composeAction={<RailComposeAction />}
         modeControl={<RailModeControl mode={mode} showAtRiskNotice={surfaces.showAtRiskPositionsNotice} />}
         accountMenu={<RailUserMenu mode={mode} balancePts={balancePts} />}
         mobileDrawer={<MobileDrawer mode={mode} balancePts={balancePts} />}
@@ -570,8 +582,28 @@ export function App() {
         open={s.joinSheetOpen}
         onOpenChange={storeActions.setJoinSheetOpen}
         trigger={<button type="button" hidden aria-hidden="true" tabIndex={-1} />}
+        emailAuthEnabled={s.emailAuthEnabled}
         activeTab={s.joinTab}
         onTabChange={storeActions.setJoinTab}
+        emailStep={s.joinEmailStep}
+        onEmailStepChange={storeActions.setJoinEmailStep}
+        pendingEmail={s.pendingEmail || undefined}
+        pendingEmailMasked={s.pendingEmailMasked || undefined}
+        devEmailLinkEnabled={s.devEmailLinkEnabled}
+        devEmailMagicLinkUrl={s.devEmailMagicLinkUrl ?? undefined}
+        onOpenDevMagicLink={(url) => {
+          const target = url ?? s.devEmailMagicLinkUrl;
+          if (!target) return;
+          storeActions.setJoinSheetOpen(false);
+          try {
+            const parsed = new URL(target, typeof window !== "undefined" ? window.location.origin : "https://feed.local");
+            void storeActions.navigate(`${parsed.pathname}${parsed.search}`);
+          } catch {
+            void storeActions.navigate(target);
+          }
+        }}
+        onRequestEmailMagicLink={({ email, turnstileToken }) => storeActions.requestEmailMagicLink(email, turnstileToken)}
+        onResendEmailMagicLink={() => storeActions.resendEmailMagicLink()}
         phoneStep={s.joinPhoneStep}
         onPhoneStepChange={storeActions.setJoinPhoneStep}
         pendingActionLabel={s.pendingAction?.label}
@@ -583,10 +615,16 @@ export function App() {
           const phoneE164 = s.pendingPhoneE164 || storeActions.formatPhoneToE164("US", rawPhone);
           return storeActions.fetchLoopbackCode(phoneE164);
         }}
-        onRequestSmsCode={({ country, phone, turnstileToken }) => { void storeActions.requestSmsCode(country, phone, turnstileToken); }}
-        onVerifySmsCode={(code) => { void storeActions.verifySmsCode(code); }}
+        onRequestSmsCode={({ country, phone, turnstileToken }) => storeActions.requestSmsCode(country, phone, turnstileToken)}
+        onVerifySmsCode={(code) => storeActions.verifySmsCode(code)}
         onResendSmsCode={() => { void storeActions.resendSmsCode(); }}
-        onCompleteProfile={(payload) => { void storeActions.completePhoneOnboard(payload); }}
+        onCompleteProfile={(payload) => {
+          if (s.joinTab === "email") {
+            void storeActions.completeEmailOnboard(payload);
+            return;
+          }
+          void storeActions.completePhoneOnboard(payload);
+        }}
         onLaunchHost={storeActions.launchAgentHost}
         onCopySkillPrompt={storeActions.copySkillPrompt}
         onSubmitReviewer={(payload) => { void storeActions.submitReviewerLogin(payload); }}

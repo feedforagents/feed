@@ -19,41 +19,22 @@ import {
 } from "@repo/ui";
 import { MessagePlusIcon, SearchIcon, UsersIcon } from "../icons.tsx";
 import { storeActions, useAppStore } from "../store.ts";
-import type { AppChatSummary, ExploreAccountHit, ExploreActorHit } from "../types.ts";
+import type { AppChatSummary, ExploreAccountHit } from "../types.ts";
 
 type ChatFilterTab = "all" | "dms" | "groups";
 
-interface AccountSuggestionList {
-  readonly accounts: ReadonlyArray<ExploreAccountHit>;
-  readonly actors: ReadonlyArray<ExploreActorHit>;
-}
-
-const EMPTY_SUGGESTIONS: AccountSuggestionList = { accounts: [], actors: [] };
-
 function AccountSuggestions({
-  results,
+  accounts,
   onPick,
 }: {
-  readonly results: AccountSuggestionList;
+  readonly accounts: ReadonlyArray<ExploreAccountHit>;
   readonly onPick: (handle: string) => void;
 }) {
-  if (results.accounts.length === 0 && results.actors.length === 0) return null;
+  if (accounts.length === 0) return null;
 
   return (
-    <div className="max-h-40 divide-y divide-border overflow-y-auto rounded-lg border border-border bg-card">
-      {results.actors.slice(0, 4).map((actor) => (
-        <button
-          key={actor.id}
-          type="button"
-          onClick={() => onPick(actor.username)}
-          className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-accent"
-        >
-          <Avatar name={actor.name} src={actor.avatarUrl ?? undefined} seed={actor.username} size="xs" />
-          <span className="truncate font-semibold text-foreground">{actor.name}</span>
-          <span className="truncate text-xs text-muted-foreground">@{actor.username}</span>
-        </button>
-      ))}
-      {results.accounts.slice(0, 4).map((acct) => (
+    <div className="max-h-40 divide-y divide-border overflow-y-auto rounded-lg border border-border bg-background">
+      {accounts.slice(0, 6).map((acct) => (
         <button
           key={acct.accountId}
           type="button"
@@ -78,17 +59,19 @@ function GroupManagementDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly chat: AppChatSummary | null;
 }) {
+  const s = useAppStore();
   const [inviteHandle, setInviteHandle] = useState("");
   const [inviteBusy, setInviteBusy] = useState(false);
-  const [suggestions, setSuggestions] = useState<AccountSuggestionList>(EMPTY_SUGGESTIONS);
+  const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<ReadonlyArray<ExploreAccountHit>>([]);
 
   const handleQueryChange = (value: string) => {
     setInviteHandle(value);
     const cleaned = value.trim().replace(/^@/, "");
     if (cleaned.length >= 2) {
-      void storeActions.searchAccounts(cleaned).then(setSuggestions);
+      void storeActions.searchAccounts(cleaned).then((res) => setSuggestions(res.accounts));
     } else {
-      setSuggestions(EMPTY_SUGGESTIONS);
+      setSuggestions([]);
     }
   };
 
@@ -100,8 +83,15 @@ function GroupManagementDialog({
     setInviteBusy(false);
     if (ok) {
       setInviteHandle("");
-      setSuggestions(EMPTY_SUGGESTIONS);
+      setSuggestions([]);
     }
+  };
+
+  const handleTransferOwnership = async (handle: string, memberId: string) => {
+    if (!chat) return;
+    setTransferBusyId(memberId);
+    await storeActions.transferGroupOwnership(chat.id, handle);
+    setTransferBusyId(null);
   };
 
   return (
@@ -117,29 +107,50 @@ function GroupManagementDialog({
             <div className="flex flex-col gap-2">
               <span className="text-xs font-semibold text-muted-foreground">Members</span>
               <div className="max-h-48 divide-y divide-border overflow-y-auto rounded-lg border border-border">
-                {chat.members.map((member) => (
-                  <div key={member.memberId} className="flex items-center justify-between gap-2 px-3 py-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onOpenChange(false);
-                        void storeActions.navigate(`/u/${encodeURIComponent(member.handle)}`);
-                      }}
-                      className="flex min-w-0 items-center gap-2 text-left"
-                    >
-                      <Avatar name={member.displayName} src={member.avatarUrl ?? undefined} seed={member.handle} size="xs" />
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-semibold text-foreground hover:underline">{member.displayName}</span>
-                        <span className="block truncate text-xs text-muted-foreground">@{member.handle}</span>
-                      </span>
-                    </button>
-                    <Badge variant="outline">{member.role}</Badge>
-                  </div>
-                ))}
+                {chat.members.map((member) => {
+                  const canTransferTo =
+                    chat.chatType === "UserGroup" &&
+                    chat.isOwner &&
+                    member.memberKind === "user" &&
+                    member.role !== "owner" &&
+                    member.memberId !== s.viewer?.accountId;
+                  return (
+                    <div key={member.memberId} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onOpenChange(false);
+                          void storeActions.navigate(`/u/${encodeURIComponent(member.handle)}`);
+                        }}
+                        className="flex min-w-0 items-center gap-2 text-left"
+                      >
+                        <Avatar name={member.displayName} src={member.avatarUrl ?? undefined} seed={member.handle} size="xs" />
+                        <span className="min-w-0">
+                          <span className="block truncate text-sm font-semibold text-foreground hover:underline">{member.displayName}</span>
+                          <span className="block truncate text-xs text-muted-foreground">@{member.handle}</span>
+                        </span>
+                      </button>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {canTransferTo ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            loading={transferBusyId === member.memberId}
+                            onClick={() => { void handleTransferOwnership(member.handle, member.memberId); }}
+                          >
+                            Transfer ownership
+                          </Button>
+                        ) : null}
+                        <Badge variant="outline">{member.role}</Badge>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
-            {chat.chatType === "UserGroup" ? (
+            {chat.chatType === "UserGroup" && chat.isOwner ? (
               <form onSubmit={(e) => { void handleInvite(e); }} className="flex flex-col gap-2.5 border-t border-border pt-3">
                 <Label htmlFor="group-invite-handle">Invite member</Label>
                 <div className="flex gap-2">
@@ -149,15 +160,15 @@ function GroupManagementDialog({
                     value={inviteHandle}
                     onChange={(e) => handleQueryChange(e.target.value)}
                   />
-                  <Button type="submit" size="sm" shape="pill" loading={inviteBusy} disabled={!inviteHandle.trim()}>
+                  <Button type="submit" size="sm" loading={inviteBusy} disabled={!inviteHandle.trim()}>
                     Invite
                   </Button>
                 </div>
                 <AccountSuggestions
-                  results={suggestions}
+                  accounts={suggestions}
                   onPick={(handle) => {
                     setInviteHandle(handle);
-                    setSuggestions(EMPTY_SUGGESTIONS);
+                    setSuggestions([]);
                   }}
                 />
               </form>
@@ -168,7 +179,6 @@ function GroupManagementDialog({
                 <Button
                   variant="destructive"
                   size="sm"
-                  shape="pill"
                   onClick={() => {
                     void storeActions.leaveGroupChat(chat.id);
                     onOpenChange(false);
@@ -199,20 +209,25 @@ function NewChatDialogs({
   readonly onOpenedThread: () => void;
 }) {
   const [dmHandle, setDmHandle] = useState("");
-  const [dmResults, setDmResults] = useState<AccountSuggestionList>(EMPTY_SUGGESTIONS);
+  const [dmBusy, setDmBusy] = useState(false);
+  const [dmAccounts, setDmAccounts] = useState<ReadonlyArray<ExploreAccountHit>>([]);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupMembers, setGroupMembers] = useState("");
   const [groupSearch, setGroupSearch] = useState("");
-  const [groupResults, setGroupResults] = useState<AccountSuggestionList>(EMPTY_SUGGESTIONS);
+  const [groupAccounts, setGroupAccounts] = useState<ReadonlyArray<ExploreAccountHit>>([]);
 
   const handleStartDm = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!dmHandle.trim()) return;
-    await storeActions.startDirectChat(dmHandle.trim().replace(/^@/, ""));
-    setDmHandle("");
-    setDmResults(EMPTY_SUGGESTIONS);
-    onDmOpenChange(false);
-    onOpenedThread();
+    setDmBusy(true);
+    const ok = await storeActions.startDirectChat(dmHandle.trim().replace(/^@/, ""));
+    setDmBusy(false);
+    if (ok) {
+      setDmHandle("");
+      setDmAccounts([]);
+      onDmOpenChange(false);
+      onOpenedThread();
+    }
   };
 
   const handleCreateGroup = async (e: FormEvent<HTMLFormElement>) => {
@@ -227,7 +242,7 @@ function NewChatDialogs({
       setGroupTitle("");
       setGroupMembers("");
       setGroupSearch("");
-      setGroupResults(EMPTY_SUGGESTIONS);
+      setGroupAccounts([]);
       onGroupOpenChange(false);
       onOpenedThread();
     }
@@ -242,7 +257,7 @@ function NewChatDialogs({
       setGroupMembers([...existing, handle].join(", "));
     }
     setGroupSearch("");
-    setGroupResults(EMPTY_SUGGESTIONS);
+    setGroupAccounts([]);
   };
 
   return (
@@ -250,7 +265,7 @@ function NewChatDialogs({
       <Dialog open={dmOpen} onOpenChange={onDmOpenChange}>
         <DialogContent className="max-w-sm">
           <DialogTitle>New message</DialogTitle>
-          <DialogDescription>Search for an account to start a direct message.</DialogDescription>
+          <DialogDescription>Search for a player account to start a direct message.</DialogDescription>
           <form onSubmit={(e) => { void handleStartDm(e); }} className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="dm-handle-input">Handle</Label>
@@ -263,21 +278,21 @@ function NewChatDialogs({
                   setDmHandle(val);
                   const cleaned = val.trim().replace(/^@/, "");
                   if (cleaned.length >= 2) {
-                    void storeActions.searchAccounts(cleaned).then(setDmResults);
+                    void storeActions.searchAccounts(cleaned).then((res) => setDmAccounts(res.accounts));
                   } else {
-                    setDmResults(EMPTY_SUGGESTIONS);
+                    setDmAccounts([]);
                   }
                 }}
               />
             </div>
             <AccountSuggestions
-              results={dmResults}
+              accounts={dmAccounts}
               onPick={(handle) => {
                 setDmHandle(handle);
-                setDmResults(EMPTY_SUGGESTIONS);
+                setDmAccounts([]);
               }}
             />
-            <Button type="submit" shape="pill" disabled={!dmHandle.trim()}>
+            <Button type="submit" loading={dmBusy} disabled={!dmHandle.trim()}>
               Start chat
             </Button>
           </form>
@@ -287,7 +302,7 @@ function NewChatDialogs({
       <Dialog open={groupOpen} onOpenChange={onGroupOpenChange}>
         <DialogContent className="max-w-sm">
           <DialogTitle>New group chat</DialogTitle>
-          <DialogDescription>Name your group and add members by handle.</DialogDescription>
+          <DialogDescription>Name your group and add player members by handle.</DialogDescription>
           <form onSubmit={(e) => { void handleCreateGroup(e); }} className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="group-title-input">Group name</Label>
@@ -309,13 +324,13 @@ function NewChatDialogs({
                   setGroupSearch(val);
                   const cleaned = val.trim().replace(/^@/, "");
                   if (cleaned.length >= 2) {
-                    void storeActions.searchAccounts(cleaned).then(setGroupResults);
+                    void storeActions.searchAccounts(cleaned).then((res) => setGroupAccounts(res.accounts));
                   } else {
-                    setGroupResults(EMPTY_SUGGESTIONS);
+                    setGroupAccounts([]);
                   }
                 }}
               />
-              <AccountSuggestions results={groupResults} onPick={addMemberToDraft} />
+              <AccountSuggestions accounts={groupAccounts} onPick={addMemberToDraft} />
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="group-members-input">Selected handles</Label>
@@ -326,7 +341,7 @@ function NewChatDialogs({
                 onChange={(e) => setGroupMembers(e.target.value)}
               />
             </div>
-            <Button type="submit" shape="pill" disabled={!groupTitle.trim()}>
+            <Button type="submit" disabled={!groupTitle.trim()}>
               Create group
             </Button>
           </form>
@@ -340,7 +355,8 @@ export function ChatsScreen() {
   const s = useAppStore();
   const [chatTab, setChatTab] = useState<ChatFilterTab>("all");
   const [searchText, setSearchText] = useState("");
-  const [mobileShowThread, setMobileShowThread] = useState(false);
+  const arrivedViaChatParam = typeof window !== "undefined" && Boolean(new URLSearchParams(window.location.search).get("chat"));
+  const [mobileShowThread, setMobileShowThread] = useState(arrivedViaChatParam);
   const [dmOpen, setDmOpen] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
@@ -363,13 +379,13 @@ export function ChatsScreen() {
   };
 
   return (
-    <div className="flex h-[calc(100vh-53px-4rem)] min-h-0 flex-1 overflow-hidden md:h-screen">
+    <div className="flex h-[calc(100dvh-53px-4rem-env(safe-area-inset-bottom))] min-h-0 flex-1 overflow-hidden md:h-dvh">
       <aside
         className={`flex min-h-0 w-full shrink-0 flex-col border-r border-border bg-background md:w-80 ${mobileShowThread ? "hidden md:flex" : "flex"}`}
       >
         <div className="flex h-[53px] items-center justify-between gap-2 border-b border-border px-4">
           <div className="flex items-center gap-2">
-            <h1 className="text-base font-bold text-foreground">Chats</h1>
+            <h1 className="hidden text-base font-bold text-foreground md:block">Chats</h1>
             <span
               aria-label={s.sseConnected ? "Connected" : "Reconnecting"}
               className={`size-2 rounded-full ${s.sseConnected ? "bg-ok" : "bg-muted-foreground/50"}`}
@@ -406,7 +422,7 @@ export function ChatsScreen() {
               placeholder="Search messages"
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
-              className="h-9 rounded-full bg-muted/60 pr-3 pl-9"
+              className="h-9 rounded-full border-transparent bg-muted pr-3 pl-9 focus-visible:border-feed-brand focus-visible:bg-background"
             />
           </div>
         </div>
@@ -430,7 +446,7 @@ export function ChatsScreen() {
               <p className="mb-2 text-xs font-bold text-primary">Pending Invites ({s.alphaInvites.length})</p>
               <div className="flex flex-col gap-2">
                 {s.alphaInvites.map((invite) => (
-                  <div key={invite.id} className="flex flex-col gap-2 rounded-xl border border-border bg-background p-2.5">
+                  <div key={invite.id} className="flex flex-col gap-2 rounded-lg border border-border bg-background p-2.5">
                     <div className="flex items-center gap-2">
                       <Avatar
                         name={invite.actorDisplayName}
@@ -449,10 +465,10 @@ export function ChatsScreen() {
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <Button size="sm" shape="pill" className="flex-1" onClick={() => { void storeActions.respondGroupInvite(invite.id, true); }}>
+                      <Button size="sm" className="flex-1" onClick={() => { void storeActions.respondGroupInvite(invite.id, true); }}>
                         Accept
                       </Button>
-                      <Button size="sm" shape="pill" variant="outline" className="flex-1" onClick={() => { void storeActions.respondGroupInvite(invite.id, false); }}>
+                      <Button size="sm" variant="outline" className="flex-1" onClick={() => { void storeActions.respondGroupInvite(invite.id, false); }}>
                         Decline
                       </Button>
                     </div>
@@ -511,6 +527,7 @@ export function ChatsScreen() {
       <div className={`flex min-h-0 min-w-0 flex-1 flex-col ${mobileShowThread ? "flex" : "hidden md:flex"}`}>
         {activeChat ? (
           <ChatThread
+            key={activeChat.id}
             chatType={activeChat.chatType}
             title={activeChat.title}
             subtitle={activeChat.subtitle}
@@ -536,7 +553,7 @@ export function ChatsScreen() {
                   : undefined
             }
             onMarkRead={() => { void storeActions.markChatRead(activeChat.id); }}
-            onInvite={activeChat.chatType === "UserGroup" ? () => setManageOpen(true) : undefined}
+            onInvite={activeChat.chatType === "UserGroup" && activeChat.isOwner ? () => setManageOpen(true) : undefined}
             onRenameGroup={
               activeChat.chatType === "UserGroup" && activeChat.isOwner
                 ? (nextTitle) => { void storeActions.renameGroupChat(activeChat.id, nextTitle); }
@@ -557,13 +574,13 @@ export function ChatsScreen() {
                 ? () => { void storeActions.leaveGroupChat(activeChat.id); }
                 : undefined
             }
-            onSendMessage={(text) => { void storeActions.sendChatMessage(activeChat.id, text); }}
+            onSendMessage={(text) => storeActions.sendChatMessage(activeChat.id, text)}
             onReact={(messageId, emoji) => { void storeActions.reactToChatMessage(messageId, emoji); }}
           />
         ) : (
           <div className="flex flex-1 items-center justify-center p-8">
             <EmptyState title="Select a conversation">
-              <Button shape="pill" onClick={() => setDmOpen(true)}>
+              <Button onClick={() => setDmOpen(true)}>
                 New message
               </Button>
             </EmptyState>

@@ -1,9 +1,10 @@
-// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
+// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
+import { storeActions } from "../src/web/store.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -25,6 +26,25 @@ const SAMPLE_POSTS = [
     viaClientName: null,
     marketId: "seed-market-1",
     ticker: "XTRPC",
+    marketBadge: {
+      kind: "prediction",
+      marketId: "seed-market-1",
+      ticker: "",
+      label: "Will OpenAGI ship Strawberry-9000 before Friday?",
+      question: "Will OpenAGI ship Strawberry-9000 before Friday?",
+      yesPct: 62,
+      status: "active",
+      resolvedOutcome: null,
+      closesAt: "4h left",
+      yesShares: 6200,
+      noShares: 3800,
+      volumePts: 420,
+      sparkline: [
+        { time: Date.now() - 3_600_000, yesProbability: 0.54 },
+        { time: Date.now() - 1_800_000, yesProbability: 0.58 },
+        { time: Date.now(), yesProbability: 0.62 },
+      ],
+    },
     cashtags: ["XTRPC"],
     hashtags: [],
     likeCount: 14,
@@ -90,6 +110,7 @@ const SAMPLE_LEADERBOARD_PLAYER_ENTRY = {
   displayName: "Alice Trader",
   avatarUrl: null,
   isNpc: false,
+  isFollowing: false,
   balanceCents: 10500,
   positionValueCents: 1028,
   equityCents: 11528,
@@ -132,6 +153,7 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
       displayName: "AIlon Musk",
       avatarUrl: null,
       isNpc: true,
+      isFollowing: false,
       balanceCents: 10_000_000,
       positionValueCents: 0,
       equityCents: 10_000_000,
@@ -149,17 +171,92 @@ const SAMPLE_LEADERBOARD_CHARACTERS = {
   ],
 };
 
+const SAMPLE_TRADES = [
+  {
+    id: "trade-1",
+    traderId: "ailon-musk",
+    traderName: "AIlon Musk",
+    traderDisplayName: "AIlon Musk",
+    traderHandle: "ailonmusk",
+    traderAvatarUrl: null,
+    isNpc: true,
+    marketKind: "prediction",
+    marketRef: "seed-market-1",
+    side: "buy_yes",
+    sharesOrSize: 2000,
+    priceCents: 50,
+    notionalCents: 1000,
+    feeCents: 1,
+    createdAt: Date.now() - 30_000,
+  },
+];
+
 function installMockNetwork() {
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
+  let viewerHandle = "alice";
+  let viewerDisplayName = "Alice Trader";
+  let viewerEmailMasked: string | null = null;
+  let viewerPhoneLast2: string | null = "01";
+  let viewerBalanceCents = 10500;
+  let viewerIsReviewer = true;
+
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
+    if (path === "/api/auth/logout") {
+      signedIn = false;
+      return json({ ok: true });
+    }
     if (path === "/api/auth/reviewer/login") {
       signedIn = true;
+      viewerHandle = "alice";
+      viewerDisplayName = "Alice Trader";
+      viewerPhoneLast2 = "01";
+      viewerEmailMasked = null;
+      viewerBalanceCents = 10500;
+      viewerIsReviewer = true;
       return json({ ok: true });
+    }
+    if (path === "/api/auth/email/start") {
+      return json({
+        ok: true,
+        emailMasked: "e***@example.com",
+        expiresAtMs: Date.now() + 900_000,
+        resendAvailableAtMs: Date.now() + 30_000,
+        devMagicLinkUrl: `${window.location.origin}/auth/email?token=dev-email-token-1`,
+      });
+    }
+    if (path === "/api/auth/email/verify") {
+      return json({
+        status: "needs_onboarding",
+        onboardingToken: "email-onboard-jwt-1",
+        emailMasked: "e***@example.com",
+        redirectTo: "/",
+      });
+    }
+    if (path === "/api/auth/email/onboard") {
+      const bodyObj = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      const nextHandle = typeof bodyObj.username === "string" && bodyObj.username ? bodyObj.username : "erin_trader";
+      signedIn = true;
+      viewerHandle = nextHandle;
+      viewerDisplayName = typeof bodyObj.displayName === "string" && bodyObj.displayName ? bodyObj.displayName : nextHandle;
+      viewerEmailMasked = "e***@example.com";
+      viewerPhoneLast2 = null;
+      viewerBalanceCents = 10000;
+      viewerIsReviewer = false;
+      return json({
+        ok: true,
+        account: {
+          accountId: "acct-email-1",
+          handle: viewerHandle,
+          displayName: viewerDisplayName,
+          emailMasked: viewerEmailMasked,
+          balanceCents: viewerBalanceCents,
+        },
+      });
     }
     if (path === "/api/auth/mode") {
       const bodyStr = typeof init?.body === "string" ? init.body : "";
@@ -170,20 +267,25 @@ function installMockNetwork() {
     if (path === "/api/auth/me") {
       return json({
         authenticated: signedIn,
+        emailAuthEnabled: true,
+        devEmailLinkEnabled: true,
         viewer: signedIn
           ? {
-              accountId: "acct-player-1",
-              handle: "alice",
-              displayName: "Alice Trader",
+              accountId: viewerIsReviewer ? "acct-player-1" : "acct-email-1",
+              handle: viewerHandle,
+              displayName: viewerDisplayName,
               bio: "Trading with 100 pts",
               avatarUrl: null,
               bannerUrl: null,
-              phoneLast2: "01",
+              phoneLast2: viewerPhoneLast2,
+              phoneVerifiedAt: viewerPhoneLast2 ? Date.now() - 60_000 : null,
+              emailMasked: viewerEmailMasked,
+              emailVerifiedAt: viewerEmailMasked ? Date.now() - 60_000 : null,
               uiMode,
-              balanceCents: 10500,
+              balanceCents: viewerBalanceCents,
               startingGrantCents: 10000,
               isAdmin: false,
-              isReviewer: true,
+              isReviewer: viewerIsReviewer,
               agentGrant: null,
             }
           : null,
@@ -218,27 +320,31 @@ function installMockNetwork() {
         ],
       });
     }
+    if (path.endsWith("/likes")) {
+      return json({ posts: SAMPLE_POSTS, nextCursor: null });
+    }
     if (path.endsWith("/trades")) {
+      return json({ trades: SAMPLE_TRADES });
+    }
+    if (path.startsWith("/api/users/")) {
+      const handle = decodeURIComponent(path.slice("/api/users/".length));
       return json({
-        trades: [
-          {
-            id: "trade-1",
-            traderId: "ailon-musk",
-            traderName: "AIlon Musk",
-            traderDisplayName: "AIlon Musk",
-            traderHandle: "ailonmusk",
-            traderAvatarUrl: null,
-            isNpc: true,
-            marketKind: "prediction",
-            marketRef: "seed-market-1",
-            side: "buy_yes",
-            sharesOrSize: 2000,
-            priceCents: 50,
-            notionalCents: 1000,
-            feeCents: 1,
-            createdAt: Date.now() - 30_000,
-          },
-        ],
+        profile: {
+          id: handle === viewerHandle ? (viewerIsReviewer ? "acct-player-1" : "acct-email-1") : "ailon-musk",
+          kind: handle === viewerHandle ? "user" : "npc",
+          handle,
+          displayName: handle === viewerHandle ? viewerDisplayName : "AIlon Musk",
+          bio: "Trading live on Feed",
+          followersCount: 12,
+          followingCount: 4,
+          postsCount: 1,
+          isParody: handle !== viewerHandle,
+          viewerFollows: false,
+          balanceCents: viewerBalanceCents,
+        },
+        posts: SAMPLE_POSTS,
+        nextCursor: null,
+        positions: SAMPLE_MARKETS.positions,
       });
     }
     if (path === "/api/markets/positions/closed") return json({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
@@ -255,13 +361,13 @@ function installMockNetwork() {
     if (path === "/api/economy/me") {
       return json({
         economy: {
-          accountId: "acct-player-1",
-          balanceCents: 10500,
-          positionValueCents: 1028,
-          equityCents: 11528,
+          accountId: viewerIsReviewer ? "acct-player-1" : "acct-email-1",
+          balanceCents: viewerBalanceCents,
+          positionValueCents: viewerIsReviewer ? 1028 : 0,
+          equityCents: viewerIsReviewer ? 11528 : viewerBalanceCents,
           startingGrantCents: 10000,
           totalFeesPaidCents: 10,
-          netProfitCents: 1528,
+          netProfitCents: viewerIsReviewer ? 1528 : 0,
         },
         ledger: [
           {
@@ -277,7 +383,8 @@ function installMockNetwork() {
     }
     if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
     if (path === "/api/leaderboard") {
-      return json(url.searchParams.get("scope") === "characters" ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
+      const isChars = url.searchParams.get("scope") === "characters" || url.searchParams.get("filter") === "npcs";
+      return json(isChars ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
     }
     if (path === "/api/leaderboard/me") {
       return json({ position: { rank: 1, page: 1, totalCount: 1, totalPages: 1, entry: SAMPLE_LEADERBOARD_PLAYERS.currentUser } });
@@ -305,6 +412,7 @@ afterEach(async () => {
   for (const root of opened.splice(0)) {
     await act(() => Promise.resolve(root.unmount()));
   }
+  await act(() => storeActions.logout());
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
 });
@@ -313,7 +421,7 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-it('Visitors browse markets and leaderboard, switch modes, sign in, and view fixed 100 pts wallet (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
   const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
@@ -321,6 +429,7 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   await act(() => Promise.resolve(root.render(<App />)));
 
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await expect.element(page.getByText("Prediction Market").first()).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
 
   await act(() => userEvent.click(page.getByRole("tab", { name: "For You" })));
@@ -341,10 +450,10 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
 
   const leaderboardButton = page.getByRole("button", { name: "Leaderboard" }).first();
   await act(() => userEvent.click(leaderboardButton));
-  await expect.element(page.getByText("Alice Trader")).toBeInTheDocument();
-  await expect.element(page.getByText("+15.3%")).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("radio", { name: "Characters" })));
-  await expect.element(page.getByText("AIlon Musk")).toBeInTheDocument();
+  await expect.element(page.getByText("Alice Trader").first()).toBeInTheDocument();
+  await expect.element(page.getByText("+15.3%").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "NPCs" })));
+  await expect.element(page.getByText("AIlon Musk").first()).toBeInTheDocument();
 
   const modeSwitch = page.getByRole("switch", { name: "Social mode" }).first();
   await act(() => userEvent.click(modeSwitch));
@@ -353,7 +462,7 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   await expect.element(page.getByRole("button", { name: "Leaderboard" })).not.toBeInTheDocument();
 
   await act(() => userEvent.click(page.getByRole("button", { name: /^Reply/ })));
-  await expect.element(page.getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
   const reply = page.getByRole("textbox", { name: "Post text" });
   await act(() => userEvent.fill(reply, "Draft reply"));
   await act(() => userEvent.click(page.getByRole("button", { name: /^Like/ })));
@@ -367,6 +476,7 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
+  await expect.element(page.getByRole("tab", { name: "Email" })).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
   await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
   await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
@@ -374,10 +484,53 @@ it('Visitors browse markets and leaderboard, switch modes, sign in, and view fix
   await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
 
+  await act(() => storeActions.setPlayMode("game"));
+
   const walletButton = page.getByRole("button", { name: "Wallet" }).first();
   await act(() => userEvent.click(walletButton));
   await expect.element(page.getByText("Size 19.78 shares")).toBeInTheDocument();
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Likes" })));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await expect.element(page.getByText("BUY YES").first()).toBeInTheDocument();
+});
+
+it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md, "Story: Request and consume a single-use email magic link safely")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => storeActions.navigate("/"));
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await expect.element(page.getByRole("dialog", { name: "Join Feed" })).toBeInTheDocument();
+  await expect.element(page.getByRole("tab", { name: "Email" })).toBeInTheDocument();
+
+  await act(() => userEvent.fill(page.getByPlaceholder("you@example.com"), "erin@example.com"));
+  await act(() => userEvent.click(page.getByRole("button", { name: /Send magic link/i })));
+
+  await expect.element(page.getByText("e***@example.com")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("button", { name: /Open dev magic link/i })));
+
+  expect(window.location.pathname).toBe("/auth/email");
+  expect(window.location.search).toBe("");
+  await expect.element(page.getByText("Finish creating your Feed account")).toBeInTheDocument();
+
+  await act(() => userEvent.fill(page.getByLabelText("Username"), "erin_trader"));
+  await act(() => userEvent.click(page.getByLabelText(/at least 18 years old/i)));
+  await act(() => userEvent.click(page.getByLabelText(/Terms of Service/i)));
+  await act(() => userEvent.click(page.getByRole("button", { name: /Claim 100 pts & enter/i })));
+
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  await act(() => storeActions.navigate("/settings?tab=account"));
+  await expect.element(page.getByText("e***@example.com")).toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Change email" })).toBeInTheDocument();
 });

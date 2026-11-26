@@ -1,5 +1,10 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"
-import { DEFAULT_ALLOWED_COUNTRIES, type AuthRuntimeConfig } from "@repo/auth"
+import {
+  DEFAULT_ALLOWED_COUNTRIES,
+  type AuthRuntimeConfig,
+  type CloudflareEmailSender,
+  type EmailMode
+} from "@repo/auth"
 
 type DeploymentEnvironment = "localnet" | "staging" | "production"
 
@@ -80,6 +85,25 @@ function parseDeploymentEnv(raw: string | undefined, publicAppUrl: string): Depl
   return "localnet"
 }
 
+export error ConfigFailure { message: string }
+
+export function missingRequiredSecrets(config: AppServerConfig): ReadonlyArray<string> {
+  if (config.deploymentEnv === "localnet") return []
+  const missing: Array<string> = []
+  if (config.auth.digestKey.trim() === "") missing.push("AUTH_DIGEST_KEY")
+  if (config.auth.oauthSigningSecret.trim() === "") missing.push("OAUTH_SIGNING_SECRET")
+  return missing
+}
+
+export effect function assertAppServerConfig(config: AppServerConfig): void!ConfigFailure {
+  const missing = missingRequiredSecrets(config)
+  if (missing.length > 0) {
+    throw new ConfigFailure({
+      message: `Missing required server secrets for ${config.deploymentEnv}: ${missing.join(", ")}`
+    })
+  }
+}
+
 export function stringEnvRecord(raw: Readonly<Record<string, unknown>>): Record<string, string | undefined> {
   const record: Record<string, string | undefined> = {}
   for (const [key, value] of Object.entries(raw)) {
@@ -90,9 +114,14 @@ export function stringEnvRecord(raw: Readonly<Record<string, unknown>>): Record<
   return record
 }
 
+export interface AppServerBindings {
+  readonly emailSender?: CloudflareEmailSender | undefined
+}
+
 export function parseAppServerConfig(
   env: Readonly<Record<string, string | undefined>>,
-  fallbackOrigin?: string
+  fallbackOrigin?: string,
+  bindings?: AppServerBindings
 ): AppServerConfig {
   const port = parsePort(env.PORT)
   const host = trimmed(env.HOST) ?? "127.0.0.1"
@@ -108,6 +137,19 @@ export function parseAppServerConfig(
       : deploymentEnv === "localnet"
         ? "loopback"
         : "twilio"
+  const cloudflareEmailSender = bindings?.emailSender
+  const rawEmailMode = trimmed(env.EMAIL_MODE)?.toLowerCase()
+  const emailMode: EmailMode = deploymentEnv !== "localnet" && rawEmailMode === "loopback"
+    ? "disabled"
+    : rawEmailMode === "loopback" || rawEmailMode === "cloudflare" || rawEmailMode === "disabled"
+      ? rawEmailMode
+      : deploymentEnv === "localnet"
+        ? "loopback"
+        : cloudflareEmailSender !== undefined
+          ? "cloudflare"
+          : "disabled"
+  const emailFrom = trimmed(env.EMAIL_FROM) ?? "Feed <login@feed.fun>"
+  const emailPublicOrigin = trimmed(env.EMAIL_PUBLIC_ORIGIN)
   const digestKey = trimmed(env.AUTH_DIGEST_KEY)
     ?? (deploymentEnv === "localnet" ? LOCAL_DEV_DIGEST_KEY : "")
   const oauthSigningSecret = trimmed(env.OAUTH_SIGNING_SECRET)
@@ -132,6 +174,10 @@ export function parseAppServerConfig(
       digestKey,
       oauthSigningSecret,
       smsMode,
+      emailMode,
+      cloudflareEmailSender,
+      emailFrom,
+      emailPublicOrigin,
       twilioAccountSid: trimmed(env.TWILIO_ACCOUNT_SID),
       twilioAuthToken: trimmed(env.TWILIO_AUTH_TOKEN),
       twilioVerifyServiceSid: trimmed(env.TWILIO_VERIFY_SERVICE_SID),

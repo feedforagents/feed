@@ -33,6 +33,7 @@ export const meta: ComponentMeta<AppShellProps> = {
       await expect(navs.length).toBeGreaterThan(0);
       for (const nav of navs) {
         await expect(within(nav).queryByRole("button", { name: /Markets/ })).toBeNull();
+        await expect(within(nav).queryByRole("button", { name: /Wallet/ })).toBeNull();
         await expect(within(nav).queryByRole("button", { name: /Leaderboard/ })).toBeNull();
       }
     },

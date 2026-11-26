@@ -17,7 +17,7 @@ function RightRailWorldClock({ status }: { readonly status: AppWorldStatus }) {
   return (
     <section
       aria-label="World clock"
-      className="flex items-center justify-between gap-2 rounded-xl border border-border bg-card px-4 py-2.5 font-mono text-xs tabular-nums"
+      className="flex items-center justify-between gap-2 border-b border-border bg-background pb-3 font-mono text-xs tabular-nums"
     >
       <span className="flex items-center gap-2 text-muted-foreground">
         <span
@@ -48,8 +48,8 @@ function RightRailTrendingSection({
     return <WidgetPanelSkeleton />;
   }
   return (
-    <section aria-label="Trending" className="overflow-hidden rounded-xl border border-border bg-card">
-      <div className="flex items-center justify-between px-4 py-3">
+    <section aria-label="Trending" className="flex flex-col gap-2 border-b border-border bg-background pb-4">
+      <div className="flex items-center justify-between">
         <h2 className="text-base font-bold text-foreground">Trending</h2>
         <button
           type="button"
@@ -60,9 +60,9 @@ function RightRailTrendingSection({
         </button>
       </div>
       {items.length === 0 ? (
-        <p className="px-4 pb-3 text-sm text-muted-foreground">No trending topics right now.</p>
+        <p className="text-sm text-muted-foreground">No trending topics right now.</p>
       ) : (
-        <div className="divide-y divide-border">
+        <div className="flex flex-col">
           {items.map((item) => (
             <button
               key={item.id}
@@ -70,12 +70,12 @@ function RightRailTrendingSection({
               onClick={() => {
                 if (item.financial && isGame) {
                   const ticker = item.title.replace(/^\$/, "");
-                  void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`);
+                  void storeActions.navigate(`/markets/perps/${encodeURIComponent(ticker)}`);
                   return;
                 }
                 void storeActions.navigate(`/trending/${encodeURIComponent(item.title.replace(/^#/, ""))}`);
               }}
-              className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors duration-fast hover:bg-accent/60"
+              className="-mx-2 flex items-center justify-between gap-2 rounded-lg px-2 py-2 text-left transition-colors duration-fast hover:bg-muted/40"
             >
               <span className="min-w-0">
                 <span className="block truncate text-sm font-bold text-foreground">{item.title}</span>
@@ -101,8 +101,10 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
   const [searchDraft, setSearchDraft] = useState("");
   const isGame = mode === "GameMode";
 
-  const visibleTrending = s.explore.trending.filter((item) => isGame || !item.financial).slice(0, 5);
-  const latestNews = s.explore.articles.slice(0, 5);
+  const sourceTrending = s.rightRailTrending.length > 0 ? s.rightRailTrending : s.explore.trending;
+  const sourceArticles = s.rightRailArticles.length > 0 ? s.rightRailArticles : s.explore.articles;
+  const visibleTrending = sourceTrending.filter((item) => isGame || !item.financial).slice(0, 5);
+  const latestNews = sourceArticles.slice(0, 5);
   const activePerps = isGame ? s.perps.slice(0, 3) : [];
   const activePredictions = isGame ? s.predictions.filter((p) => p.status === "open").slice(0, 3) : [];
 
@@ -110,7 +112,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
   const viewerHandle = s.viewer?.handle.toLowerCase() ?? "";
   for (const post of s.feedPosts) {
     const key = post.card.authorHandle.toLowerCase();
-    if (!key || key === viewerHandle || suggestedMap.has(key)) continue;
+    if (!key || key === viewerHandle || post.card.isFollowingAuthor || suggestedMap.has(key)) continue;
     suggestedMap.set(key, {
       handle: post.card.authorHandle,
       displayName: post.card.authorDisplayName,
@@ -123,13 +125,13 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
   if (suggestedMap.size < 4) {
     for (const actor of s.explore.actors) {
       const key = actor.username.toLowerCase();
-      if (!key || key === viewerHandle || suggestedMap.has(key)) continue;
+      if (!key || key === viewerHandle || actor.viewerFollows || suggestedMap.has(key)) continue;
       suggestedMap.set(key, {
         handle: actor.username,
         displayName: actor.name,
         avatarUrl: actor.avatarUrl ?? undefined,
         isNpc: actor.isParody,
-        isFollowing: false,
+        isFollowing: actor.viewerFollows,
       });
       if (suggestedMap.size >= 4) break;
     }
@@ -159,7 +161,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
             placeholder={isGame ? "Search Feed, @handles, $tickers" : "Search Feed"}
             value={searchDraft}
             onChange={(e) => setSearchDraft(e.target.value)}
-            className="h-10 rounded-full bg-muted/60 pr-4 pl-10"
+            className="h-10 rounded-full border-transparent bg-muted pr-4 pl-10 focus-visible:border-feed-brand focus-visible:bg-background"
           />
         </form>
       ) : null}
@@ -167,8 +169,8 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
       {isGame && s.worldStatus ? <RightRailWorldClock status={s.worldStatus} /> : null}
 
       {latestNews.length > 0 ? (
-        <section aria-label="Latest news" className="overflow-hidden rounded-xl border border-border bg-card">
-          <div className="flex items-center justify-between px-4 py-3">
+        <section aria-label="Latest news" className="flex flex-col gap-2 border-b border-border bg-background pb-4">
+          <div className="flex items-center justify-between">
             <h2 className="text-base font-bold text-foreground">Latest News</h2>
             <button
               type="button"
@@ -178,13 +180,13 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
               See all
             </button>
           </div>
-          <div className="divide-y divide-border">
+          <div className="flex flex-col">
             {latestNews.map((article) => (
               <button
                 key={article.id}
                 type="button"
                 onClick={() => { void storeActions.navigate(`/article/${encodeURIComponent(article.id)}`); }}
-                className="flex w-full flex-col gap-1 px-4 py-2.5 text-left transition-colors duration-fast hover:bg-accent/60"
+                className="-mx-2 flex flex-col gap-1 rounded-lg px-2 py-2 text-left transition-colors duration-fast hover:bg-muted/40"
               >
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <span className="truncate font-medium text-foreground/80">{article.source}</span>
@@ -201,8 +203,8 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
       <RightRailTrendingSection loading={s.trendingLoading} items={visibleTrending} isGame={isGame} />
 
       {isGame && (activePredictions.length > 0 || activePerps.length > 0) ? (
-        <section aria-label="Active markets" className="overflow-hidden rounded-xl border border-border bg-card">
-          <div className="flex items-center justify-between px-4 py-3">
+        <section aria-label="Active markets" className="flex flex-col gap-2 border-b border-border bg-background pb-4">
+          <div className="flex items-center justify-between">
             <h2 className="text-base font-bold text-foreground">Active Markets</h2>
             <button
               type="button"
@@ -212,7 +214,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
               Trade
             </button>
           </div>
-          <div className="divide-y divide-border">
+          <div className="flex flex-col">
             {activePerps.map((perp) => {
               const positive = perp.change24hPct >= 0;
               return (
@@ -220,7 +222,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
                   key={perp.ticker}
                   type="button"
                   onClick={() => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(perp.ticker)}`); }}
-                  className="flex w-full items-center justify-between gap-2 px-4 py-2.5 text-left transition-colors duration-fast hover:bg-accent/60"
+                  className="-mx-2 flex items-center justify-between gap-2 rounded-lg px-2 py-2 text-left transition-colors duration-fast hover:bg-muted/40"
                 >
                   <span className="min-w-0">
                     <span className="block font-mono text-sm font-bold text-foreground">${perp.ticker}</span>
@@ -240,7 +242,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
                 key={pred.card.id}
                 type="button"
                 onClick={() => { void storeActions.navigate(`/markets/predictions/${encodeURIComponent(pred.card.id)}`); }}
-                className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left transition-colors duration-fast hover:bg-accent/60"
+                className="-mx-2 flex items-center justify-between gap-3 rounded-lg px-2 py-2 text-left transition-colors duration-fast hover:bg-muted/40"
               >
                 <span className="line-clamp-2 min-w-0 text-xs font-semibold text-foreground">{pred.card.question}</span>
                 <span className="shrink-0 font-mono text-xs font-bold text-primary tabular-nums">
@@ -253,13 +255,11 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
       ) : null}
 
       {suggestions.length > 0 ? (
-        <section aria-label="Who to follow" className="overflow-hidden rounded-xl border border-border bg-card">
-          <div className="px-4 py-3">
-            <h2 className="text-base font-bold text-foreground">Who to follow</h2>
-          </div>
-          <div className="divide-y divide-border">
+        <section aria-label="Who to follow" className="flex flex-col gap-2 border-b border-border bg-background pb-4">
+          <h2 className="text-base font-bold text-foreground">Who to follow</h2>
+          <div className="flex flex-col">
             {suggestions.map((person) => (
-              <div key={person.handle} className="flex items-center justify-between gap-2.5 px-4 py-2.5">
+              <div key={person.handle} className="-mx-2 flex items-center justify-between gap-2.5 rounded-lg px-2 py-2">
                 <button
                   type="button"
                   onClick={() => { void storeActions.navigate(`/u/${encodeURIComponent(person.handle)}`); }}
@@ -289,7 +289,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
         </section>
       ) : null}
 
-      <footer className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 text-xs text-muted-foreground">
+      <footer className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
         <button
           type="button"
           onClick={() => { void storeActions.navigate("/how-to-play"); }}

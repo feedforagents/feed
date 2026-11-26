@@ -166,6 +166,40 @@ pure def completePhoneSignUp(
     nav: Nav::signInNav(s.nav, false),
   }
 
+pure def canRequestEmailLink(s: AppShellState, emailValid: bool): bool =
+  Onb::canRequestEmailMagicLink(s.onb, emailValid)
+
+pure def requestEmailLink(s: AppShellState, emailValid: bool): AppShellState =
+  { ...s, onb: Onb::requestEmailMagicLink(s.onb, emailValid) }
+
+pure def canVerifyEmailLink(s: AppShellState, tokenValid: bool, isNewAccount: bool): bool =
+  Onb::canVerifyEmailMagicLink(s.onb, tokenValid, isNewAccount)
+
+pure def verifyEmailLink(s: AppShellState, tokenValid: bool, isNewAccount: bool): AppShellState =
+  val nextOnb = Onb::verifyEmailMagicLink(s.onb, tokenValid, isNewAccount)
+  val nextNav = if (nextOnb.signedIn and not(s.nav.signedIn)) Nav::signInNav(s.nav, false) else s.nav
+  { ...s, onb: nextOnb, nav: nextNav }
+
+pure def canCompleteEmailSignUp(
+  s: AppShellState,
+  usernameValid: bool,
+  age18Plus: bool,
+  acceptedTerms: bool
+): bool =
+  Onb::canCompleteNewEmailProfile(s.onb, usernameValid, age18Plus, acceptedTerms)
+
+pure def completeEmailSignUp(
+  s: AppShellState,
+  usernameValid: bool,
+  age18Plus: bool,
+  acceptedTerms: bool
+): AppShellState =
+  {
+    ...s,
+    onb: Onb::completeNewEmailProfile(s.onb, usernameValid, age18Plus, acceptedTerms),
+    nav: Nav::signInNav(s.nav, false),
+  }
+
 pure def canLaunchAgentSkillDoor(s: AppShellState): bool =
   Onb::canLaunchAgentDoor(s.onb)
 
@@ -177,6 +211,12 @@ pure def canSwitchAgentToPhone(s: AppShellState): bool =
 
 pure def switchAgentToPhone(s: AppShellState): AppShellState =
   { ...s, onb: Onb::proceedToPhoneFromAgent(s.onb) }
+
+pure def canSwitchAgentToEmail(s: AppShellState): bool =
+  Onb::canProceedToEmailFromAgent(s.onb)
+
+pure def switchAgentToEmail(s: AppShellState): AppShellState =
+  { ...s, onb: Onb::proceedToEmailFromAgent(s.onb) }
 
 pure def canOpenReviewerSignIn(s: AppShellState): bool =
   Onb::canOpenReviewerDoor(s.onb)

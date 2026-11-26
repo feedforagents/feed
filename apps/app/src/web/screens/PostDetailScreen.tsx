@@ -23,6 +23,7 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
   const thread = s.activeThread;
   const [replyText, setReplyText] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
+  const threadMatches = Boolean(thread && (!s.activePostId || thread.post.card.id === s.activePostId));
 
   const submitReply = async (text: string) => {
     if (!thread) return;
@@ -35,10 +36,11 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
   return (
     <div className="flex flex-col">
       <BackHeader fallbackPath="/">
-        <h1 className="text-base font-bold text-foreground">Post</h1>
+        <h1 className="hidden text-base font-bold text-foreground md:block">Post</h1>
+        <span className="text-sm font-medium text-muted-foreground md:hidden">Back</span>
       </BackHeader>
 
-      {s.threadLoading && !thread ? (
+      {s.threadLoading && !threadMatches ? (
         <div className="flex flex-col gap-3 p-4">
           <Skeleton className="h-28" />
           <Skeleton className="h-16" />
@@ -46,7 +48,7 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
         </div>
       ) : !thread ? (
         <EmptyState title="Post not found">
-          <Button variant="outline" shape="pill" onClick={() => { void storeActions.navigate("/"); }}>
+          <Button variant="outline" onClick={() => { void storeActions.navigate("/"); }}>
             Back to Home
           </Button>
         </EmptyState>
@@ -91,6 +93,7 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
           </div>
 
           <PostComposer
+            textareaId="thread-reply-composer"
             value={replyText}
             onValueChange={setReplyText}
             onSubmit={(text) => { void submitReply(text); }}
@@ -104,18 +107,21 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
 
           <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2.5">
             <span className="text-xs font-semibold text-muted-foreground">Replies</span>
-            <div className="flex items-center gap-1.5">
+            <div role="group" aria-label="Reply sort" className="inline-flex items-center gap-0.5 rounded-md border border-border bg-muted p-0.5">
               {SORT_OPTIONS.map((opt) => (
-                <Button
+                <button
                   key={opt.id}
-                  size="sm"
-                  shape="pill"
-                  variant={s.threadSort === opt.id ? "primary" : "ghost"}
+                  type="button"
+                  aria-pressed={s.threadSort === opt.id}
                   onClick={() => { void storeActions.openThread(thread.post.card.id, opt.id); }}
-                  className="h-7 px-3 text-xs"
+                  className={`rounded-sm px-2.5 py-1 text-xs font-medium transition-colors duration-fast ${
+                    s.threadSort === opt.id
+                      ? "bg-background text-foreground shadow-sm ring-1 ring-border"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
                 >
                   {opt.label}
-                </Button>
+                </button>
               ))}
             </div>
           </div>

@@ -187,6 +187,7 @@ jobs:
               console.log(`R2 bucket ready: ${bucketName}`);
             }
           '
+          pnpm --filter @repo/app exec wrangler email sending enable feed.fun || true
           pnpm --filter @repo/app exec wrangler secret delete GAME_START --config "wrangler.${TARGET_ENV}.jsonc" --force || true
           pnpm --filter @repo/app exec wrangler deploy \
             --config "wrangler.${TARGET_ENV}.jsonc" \

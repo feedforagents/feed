@@ -51,6 +51,7 @@ export type McpToolName =
   | "update_profile"
   | "list_chats"
   | "get_messages"
+  | "mark_chat_read"
   | "send_dm"
   | "send_message"
   | "react_to_message"
@@ -466,7 +467,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     description:
       "Poll an RFC 8628 deviceCode started by start_sign_in and return authorization status or minted OAuth tokens once approved at /link.",
     scope: "public",
-    readOnly: true,
+    readOnly: false,
     fields: {
       deviceCode: {
         kind: "string",
@@ -1124,6 +1125,11 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         minLength: 1,
         maxLength: 500,
         description: "Moderation report reason."
+      },
+      category: {
+        kind: "enum",
+        values: ["Spam", "Harassment", "Impersonation", "OtherViolation"],
+        description: "Optional moderation report category."
       }
     }
   }),
@@ -1185,10 +1191,26 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
     }
   }),
   defineTool({
+    name: "mark_chat_read",
+    title: "Mark Chat Read",
+    description: "Mark messages and chat notifications in a chat as read for the caller.",
+    scope: "messages",
+    readOnly: false,
+    fields: {
+      chatId: {
+        kind: "string",
+        required: true,
+        minLength: 1,
+        maxLength: 120,
+        description: "Chat ID to mark as read."
+      }
+    }
+  }),
+  defineTool({
     name: "send_dm",
     title: "Send Direct Message",
     description:
-      "Start or continue a direct message thread with another user or NPC (max 500 chars; shares 60 DMs/hr account budget; never asks for phone numbers or SMS codes).",
+      "Start or continue a direct message thread with another human user (NPCs cannot be DMed directly; engage on the feed to earn alpha group invites; max 500 chars; shares 60 DMs/hr account budget; never asks for phone numbers or SMS codes).",
     scope: "messages",
     readOnly: false,
     fields: {

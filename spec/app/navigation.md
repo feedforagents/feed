@@ -25,6 +25,7 @@ type AppRoute =
   | HowToPlay
   | Link
   | OAuthConsent
+  | AuthEmail
   | Admin
 
 type FeedTab = TabForYou | TabFollowing | TabLatest
@@ -189,7 +190,7 @@ pure def canSignOutNav(s: NavState): bool = s.signedIn
 pure def signOutNav(s: NavState): NavState =
   val nextRoute =
     if (s.route == Chats or s.route == Notifications or s.route == Settings
-      or s.route == OAuthConsent or s.route == Admin)
+      or s.route == OAuthConsent or s.route == AuthEmail or s.route == Admin)
       Home
     else s.route
   { ...s, signedIn: false, isAdmin: false, feedTab: TabLatest, route: nextRoute }

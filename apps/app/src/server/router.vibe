@@ -6,6 +6,9 @@ import {
   approveDeviceAuthorization,
   authenticateSessionCookie,
   checkAndConsumeRateLimit,
+  checkOAuthEndpointRateLimit,
+  completeEmailOnboarding,
+  completeOnboarding,
   completePhoneOnboarding,
   confirmPhoneChange,
   createAuthorizationCode,
@@ -15,10 +18,15 @@ import {
   getAccountProfile,
   getActiveAgentGrant,
   getLoopbackCode,
+  getLoopbackMagicLink,
+  lookupDeviceCodeForUser,
+  maskEmail,
+  normalizeEmail,
   oauthAuthorizationServerMetadata,
   oauthProtectedResourceMetadata,
+  redirectUriMatchesRegistered,
   registerDynamicClient,
-  requestPhoneChange,
+  resolveEmailMode,
   revokeActiveAgentGrant,
   revokeOAuthToken,
   revokeSession,
@@ -26,7 +34,11 @@ import {
   signInReviewerPassword,
   signOutEverywhere,
   startDeviceAuthorization,
+  startEmailLink,
+  startEmailMagicLink,
+  startPhoneLink,
   startPhoneVerification,
+  verifyEmailMagicLink,
   verifyPhoneCode,
   type PlayMode,
   type SessionIdentity
@@ -71,7 +83,6 @@ import {
   listClosedPositions,
   listPerpMarkets,
   listPredictionMarkets,
-  listUserClosedPositions,
   listUserTrades,
   openPerpPosition,
   parseClosedOutcomeFilter,
@@ -83,7 +94,8 @@ import {
   previewPredictionSell,
   sellPredictionShares,
   type LeaderboardMetric,
-  type LeaderboardScope
+  type LeaderboardScope,
+  type PerpOrderMode
 } from "@repo/markets"
 import {
   McpFailure,
@@ -105,6 +117,7 @@ import {
   deletePost,
   followAccount,
   getArticle,
+  getChat,
   getChatMessages,
   getPostThread,
   getProfile,
@@ -122,7 +135,9 @@ import {
   listMutedAccounts,
   listNotifications,
   listPendingGroupInvites,
+  listPostsByTag,
   listTrending,
+  listUserLikedPosts,
   markChatRead,
   markNotificationsRead,
   muteAccount,
@@ -144,6 +159,7 @@ import {
   unreactToMessage,
   unrepostPost,
   updateProfile,
+  validateProfileImageUrl,
   type FeedPostFilter,
   type FeedTab,
   type GroupInviteFilterKind,
@@ -225,6 +241,36 @@ function clearCookieHeaders(publicAppUrl: string): ReadonlyArray<string> {
   return headers
 }
 
+function buildSlidingSessionCookieHeader(
+  request: Request,
+  session: SessionIdentity,
+  config: AppServerConfig,
+  now: number
+): string | undefined {
+  const cookieHeader = request.headers.get("cookie")
+  if (cookieHeader === null || cookieHeader.trim() === "") return undefined
+  const isHttps = config.publicAppUrl.startsWith("https://")
+  const cookieName = isHttps ? "__Host-feed-session" : "feed-session"
+  const pairs = cookieHeader.split(";").map((part) => part.trim())
+  const names = isHttps ? ["__Host-feed-session"] : ["__Host-feed-session", "feed-session"]
+  let token: string | undefined
+  for (const name of names) {
+    const prefix = `${name}=`
+    const found = pairs.find((part) => part.startsWith(prefix))
+    if (found !== undefined) {
+      const candidate = found.slice(prefix.length).trim()
+      if (candidate.length >= 20) {
+        token = candidate
+        break
+      }
+    }
+  }
+  if (token === undefined) return undefined
+  const maxAgeSeconds = Math.max(1, Math.floor((session.expiresAt - now) / 1000))
+  const secure = isHttps ? "; Secure" : ""
+  return `${cookieName}=${token}; Path=/; HttpOnly${secure}; SameSite=Lax; Max-Age=${maxAgeSeconds}`
+}
+
 function requestOrigin(request: Request, config: AppServerConfig): string {
   if (config.publicAppUrl !== "") {
     return config.publicAppUrl
@@ -239,6 +285,8 @@ function requestOrigin(request: Request, config: AppServerConfig): string {
 function clientIp(request: Request): string | undefined {
   const cfIp = request.headers.get("cf-connecting-ip")?.trim()
   if (cfIp !== undefined && cfIp !== "") return cfIp
+  const realIp = request.headers.get("x-real-ip")?.trim()
+  if (realIp !== undefined && realIp !== "") return realIp
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
   return forwarded !== undefined && forwarded !== "" ? forwarded : undefined
 }
@@ -388,9 +436,19 @@ function marketFailureStatus(code: string): number {
 function socialFailureStatus(code: string): number {
   if (code === "NotFound") return 404
   if (code === "Blocked" || code === "Forbidden" || code === "NpcDmDisallowed") return 403
-  if (code === "RateLimited") return 429
+  if (code === "RateLimited" || code === "CooldownActive") return 429
   if (code === "Conflict" || code === "TeamChatRetired" || code === "AlphaLimitReached") return 409
   return 400
+}
+
+function isPgUniqueViolation(cause: unknown): boolean {
+  if (typeof cause === "object" && cause !== null) {
+    const rec = cause as { readonly code?: unknown; readonly message?: unknown }
+    if (rec.code === "23505") return true
+    if (typeof rec.message === "string" && rec.message.toLowerCase().includes("duplicate key")) return true
+  }
+  if (cause instanceof Error && cause.message.toLowerCase().includes("duplicate key")) return true
+  return false
 }
 
 function mapDomainError(err: unknown): Response {
@@ -426,7 +484,19 @@ function mapDomainError(err: unknown): Response {
     return jsonResponse({ error: err.code, code: err.code, message: err.message }, marketFailureStatus(err.code))
   }
   if (err instanceof SocialFailure) {
-    return jsonResponse({ error: err.code, code: err.code, message: err.message }, socialFailureStatus(err.code))
+    const extraHeaders: Record<string, string> = err.code === "RateLimited" && err.retryAfterSeconds !== undefined
+      ? { "retry-after": String(err.retryAfterSeconds) }
+      : {}
+    return jsonResponse(
+      {
+        error: err.code,
+        code: err.code,
+        message: err.message,
+        ...(err.retryAfterSeconds !== undefined ? { retryAfterSeconds: err.retryAfterSeconds } : {})
+      },
+      socialFailureStatus(err.code),
+      extraHeaders
+    )
   }
   if (err instanceof EngineFailure) {
     const status = err.code === "NOT_FOUND" ? 404 : err.code === "BUDGET_EXCEEDED" ? 429 : 400
@@ -447,8 +517,11 @@ function mapDomainError(err: unknown): Response {
   return jsonResponse({ error: "internal_error", code: "internal_error", message: "Unexpected server failure." }, 500)
 }
 
-function appendRedirectParams(baseUri: string, params: Readonly<Record<string, string>>): string {
-  const url = new URL(baseUri)
+effect function appendRedirectParams(baseUri: string, params: Readonly<Record<string, string>>): string!HttpRequestError {
+  const url = try Effect.try({
+    try: () => new URL(baseUri),
+    catch: () => new HttpRequestError({ status: 400, code: "invalid_redirect_uri", message: "Invalid redirect_uri." })
+  })
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value)
   }
@@ -499,7 +572,7 @@ effect function inspectOAuthConsent(
   const scopeRaw = params.get("scope")?.trim() || "read social:write messages trade"
   const scopes = scopeRaw.split(/\s+/).filter((token) => token !== "")
   const client = try resolveOAuthClientRow(clientId)
-  if (!client.redirectUris.includes(redirectUri)) {
+  if (!redirectUriMatchesRegistered(client.redirectUris, redirectUri)) {
     throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
   }
   if (responseType !== "code" || codeChallengeMethod !== "S256" || codeChallenge === "" || state === "") {
@@ -537,17 +610,21 @@ effect function submitOAuthDecision(
   const codeChallenge = try reqStr(body, "codeChallenge", "codeChallenge", "code_challenge")
   const codeChallengeMethod = strField(body, "codeChallengeMethod", "code_challenge_method")?.trim() || "S256"
   const responseType = strField(body, "responseType", "response_type")?.trim() || "code"
+  const hasExplicitScopes = Object.prototype.hasOwnProperty.call(body, "scopes") || Object.prototype.hasOwnProperty.call(body, "scope")
   const scopesList = strArrayField(body, "scopes", "scope")
-  const scope = scopesList !== undefined && scopesList.length > 0 ? scopesList.join(" ") : "read social:write messages trade"
   const deny = body.approved === false || body.approved === "false" || body.deny === true || body.deny === "true" || body.decision === "deny"
   const client = try resolveOAuthClientRow(clientId)
-  if (!client.redirectUris.includes(redirectUri)) {
+  if (!redirectUriMatchesRegistered(client.redirectUris, redirectUri)) {
     throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
   }
   if (deny) {
-    const redirectTo = appendRedirectParams(redirectUri, { error: "access_denied", state })
+    const redirectTo = try appendRedirectParams(redirectUri, { error: "access_denied", state })
     return parsed.isForm ? makeResponse(null, { status: 302, headers: { location: redirectTo } }) : jsonResponse({ denied: true, redirectTo })
   }
+  if (hasExplicitScopes && (scopesList === undefined || scopesList.length === 0)) {
+    return try badRequest("invalid_scope", "Select at least one permission scope.")
+  }
+  const scope = scopesList !== undefined && scopesList.length > 0 ? scopesList.join(" ") : "read social:write messages trade"
   const issued = try createAuthorizationCode({
     accountId: session.accountId,
     clientId: client.clientId,
@@ -561,7 +638,7 @@ effect function submitOAuthDecision(
     resource,
     origin
   })
-  const redirectTo = appendRedirectParams(issued.redirectUri, { code: issued.code, state: issued.state, iss: issued.iss })
+  const redirectTo = try appendRedirectParams(issued.redirectUri, { code: issued.code, state: issued.state, iss: issued.iss })
   return parsed.isForm ? makeResponse(null, { status: 302, headers: { location: redirectTo } }) : jsonResponse({ ...issued, redirectTo })
 }
 
@@ -570,7 +647,7 @@ effect function handleOAuthRoute(
   url: URL,
   origin: string,
   config: AppServerConfig
-): (Response | undefined)!(AuthFailure | StoreFailure | HttpRequestError)!Store {
+): (Response | undefined)!(AuthFailure | RateLimited | StoreFailure | HttpRequestError)!Store {
   const path = url.pathname
   const method = request.method.toUpperCase()
   if (method === "OPTIONS" && (path.startsWith("/.well-known/oauth") || path.startsWith("/oauth/"))) {
@@ -583,6 +660,14 @@ effect function handleOAuthRoute(
     return jsonResponse(oauthProtectedResourceMetadata(origin), 200, PUBLIC_CORS_HEADERS)
   }
   if (method === "POST" && path === "/oauth/register") {
+    const ipAddress = clientIp(request)
+    if (ipAddress !== undefined && config.auth.digestKey !== "") {
+      try checkOAuthEndpointRateLimit({
+        endpoint: "register",
+        ipAddress,
+        digestKey: config.auth.digestKey
+      })
+    }
     const { data } = try readParsedBody(request)
     const clientName = try reqStr(data, "client_name", "client_name", "clientName")
     const redirectUris = strArrayField(data, "redirect_uris", "redirectUris") ?? []
@@ -630,6 +715,14 @@ effect function handleOAuthRoute(
     return jsonResponse(try revokeOAuthToken({ token, config: config.auth }), 200, PUBLIC_CORS_HEADERS)
   }
   if (method === "POST" && (path === "/oauth/device" || path === "/oauth/device/code")) {
+    const ipAddress = clientIp(request)
+    if (ipAddress !== undefined && config.auth.digestKey !== "") {
+      try checkOAuthEndpointRateLimit({
+        endpoint: "device_code",
+        ipAddress,
+        digestKey: config.auth.digestKey
+      })
+    }
     const { data } = try readParsedBody(request)
     const clientId = try reqStr(data, "client_id", "client_id", "clientId")
     let clientName = strField(data, "client_name", "clientName")
@@ -644,6 +737,14 @@ effect function handleOAuthRoute(
       origin
     })
     return jsonResponse(device, 200, PUBLIC_CORS_HEADERS)
+  }
+  if (method === "GET" && path === "/api/oauth/device/lookup") {
+    try requireSession(request, config)
+    const userCode = url.searchParams.get("userCode")?.trim() || url.searchParams.get("user_code")?.trim() || ""
+    if (userCode === "") {
+      return try badRequest("invalid_user_code", "Query parameter userCode is required.")
+    }
+    return jsonResponse(try lookupDeviceCodeForUser(userCode))
   }
   if (method === "POST" && path === "/api/oauth/device/approve") {
     const session = try requireSession(request, config)
@@ -661,12 +762,172 @@ effect function handleOAuthRoute(
 }
 
 function authBootstrapFields(config: AppServerConfig) {
+  const emailMode = resolveEmailMode(config.auth)
   return {
     acceptedCountries: config.auth.allowedCountries,
     publicAppUrl: config.publicAppUrl,
     turnstileSiteKey: config.auth.turnstileSiteKey ?? null,
-    devSmsCodeEnabled: config.auth.smsMode === "loopback"
+    devSmsCodeEnabled: config.auth.smsMode === "loopback",
+    emailAuthEnabled: emailMode !== "disabled",
+    devEmailLinkEnabled: emailMode === "loopback"
   }
+}
+
+effect function handleEmailAuthRoute(
+  request: Request,
+  url: URL,
+  config: AppServerConfig
+): (Response | undefined)!(AuthFailure | RateLimited | StoreFailure | HttpRequestError)!Store {
+  const path = url.pathname
+  const method = request.method.toUpperCase()
+  if (method === "POST" && path === "/api/auth/email/start") {
+    const { data } = try readParsedBody(request)
+    const email = try reqStr(data, "email", "email")
+    const result = try startEmailMagicLink({
+      email,
+      turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
+      redirectTo: strField(data, "redirectTo", "redirect_to"),
+      ipAddress: clientIp(request),
+      config: config.auth
+    })
+    return jsonResponse({
+      ok: true,
+      challengeId: result.challengeId,
+      emailMasked: result.emailMasked,
+      expiresAt: result.expiresAt,
+      expiresAtMs: result.expiresAt,
+      resendAvailableAt: result.resendAvailableAt,
+      resendAvailableAtMs: result.resendAvailableAt,
+      ...(result.devMagicLinkUrl !== undefined ? { devMagicLinkUrl: result.devMagicLinkUrl, devToken: result.devToken } : {})
+    })
+  }
+  if (method === "POST" && path === "/api/auth/email/verify") {
+    const { data } = try readParsedBody(request)
+    const session = try optionalSession(request, config)
+    const result = try verifyEmailMagicLink({
+      token: try reqStr(data, "token", "token"),
+      sessionAccountId: session?.accountId ?? null,
+      config: config.auth
+    })
+    if (result.status === "needs_onboarding") {
+      return jsonResponse({
+        status: "needs_onboarding",
+        needsOnboarding: true,
+        onboardingToken: result.pendingToken,
+        pendingToken: result.pendingToken,
+        emailMasked: result.emailMasked,
+        redirectTo: result.redirectTo
+      })
+    }
+    if (result.status === "email_linked") {
+      return jsonResponse(
+        {
+          status: "email_linked",
+          needsOnboarding: false,
+          emailMasked: result.account.emailMasked,
+          account: result.account,
+          redirectTo: result.redirectTo
+        },
+        200,
+        {},
+        [result.sessionCookieHeader]
+      )
+    }
+    return jsonResponse(
+      {
+        status: "signed_in",
+        needsOnboarding: false,
+        account: result.account,
+        redirectTo: result.redirectTo
+      },
+      200,
+      {},
+      [result.sessionCookieHeader]
+    )
+  }
+  if (method === "POST" && (path === "/api/auth/email/onboard" || path === "/api/auth/onboard")) {
+    const { data } = try readParsedBody(request)
+    const onboardInput = {
+      pendingToken: try reqStr(data, "onboardingToken", "onboardingToken", "pendingToken", "pending_token"),
+      username: try reqStr(data, "username", "username", "handle"),
+      accepted18Plus: boolField(data, false, "ageConfirmed", "accepted18Plus"),
+      acceptedTerms: boolField(data, false, "tosAccepted", "acceptedTerms"),
+      bio: strField(data, "bio"),
+      displayName: strField(data, "displayName"),
+      config: config.auth
+    }
+    const result = path === "/api/auth/email/onboard"
+      ? try completeEmailOnboarding(onboardInput)
+      : try completeOnboarding(onboardInput)
+    return jsonResponse({ ok: true, account: result.account }, 201, {}, [result.sessionCookieHeader])
+  }
+  if (method === "POST" && path === "/api/auth/email/link/start") {
+    const session = try requireSession(request, config)
+    const { data } = try readParsedBody(request)
+    const result = try startEmailLink({
+      accountId: session.accountId,
+      email: try reqStr(data, "email", "email"),
+      authAt: session.authAt,
+      cookieHeader: request.headers.get("cookie") ?? undefined,
+      turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
+      ipAddress: clientIp(request),
+      config: config.auth
+    })
+    return jsonResponse({
+      ok: true,
+      challengeId: result.challengeId,
+      emailMasked: result.emailMasked,
+      expiresAt: result.expiresAt,
+      expiresAtMs: result.expiresAt,
+      resendAvailableAt: result.resendAvailableAt,
+      resendAvailableAtMs: result.resendAvailableAt,
+      ...(result.devMagicLinkUrl !== undefined ? { devMagicLinkUrl: result.devMagicLinkUrl, devToken: result.devToken } : {})
+    })
+  }
+  if (method === "POST" && path === "/api/auth/email/link/verify") {
+    const session = try requireSession(request, config)
+    const { data } = try readParsedBody(request)
+    const result = try verifyEmailMagicLink({
+      token: try reqStr(data, "token", "token"),
+      sessionAccountId: session.accountId,
+      config: config.auth
+    })
+    if (result.status !== "email_linked") {
+      throw new AuthFailure({ code: "invalid_magic_link", message: "Expected an email-linking verification link.", status: 400 })
+    }
+    return jsonResponse(
+      {
+        status: "email_linked",
+        emailMasked: result.account.emailMasked,
+        account: result.account,
+        redirectTo: result.redirectTo
+      },
+      200,
+      {},
+      [result.sessionCookieHeader]
+    )
+  }
+  if (method === "GET" && path === "/api/auth/dev/loopback-email-link") {
+    if (resolveEmailMode(config.auth) !== "loopback") {
+      throw new AuthFailure({
+        code: "loopback_disabled",
+        message: "Loopback email links are only available when EMAIL_MODE=loopback.",
+        status: 403
+      })
+    }
+    const email = url.searchParams.get("email")?.trim() ?? ""
+    if (email === "") return try badRequest("invalid_email", "Query parameter email is required.")
+    const normalized = try normalizeEmail(email)
+    const entry = getLoopbackMagicLink(normalized, config.auth)
+    if (entry === undefined) return jsonResponse({ error: "not_found", code: "not_found", message: "No active loopback email link." }, 404)
+    return jsonResponse({
+      ok: true,
+      emailMasked: maskEmail(normalized),
+      magicLinkUrl: entry.magicLinkUrl,
+      token: entry.token
+    })
+  }
+  return undefined
 }
 
 effect function handleAuthRoute(
@@ -678,6 +939,9 @@ effect function handleAuthRoute(
   const method = request.method.toUpperCase()
   if (!path.startsWith("/api/auth/")) return undefined
 
+  const emailResponse = try handleEmailAuthRoute(request, url, config)
+  if (emailResponse !== undefined) return emailResponse
+
   if (method === "GET" && path === "/api/auth/me") {
     const bootstrap = authBootstrapFields(config)
     const session = try optionalSession(request, config)
@@ -685,6 +949,7 @@ effect function handleAuthRoute(
       return jsonResponse({
         authenticated: false,
         viewer: null,
+        account: null,
         ...bootstrap
       })
     }
@@ -697,6 +962,7 @@ effect function handleAuthRoute(
         {
           authenticated: false,
           viewer: null,
+          account: null,
           ...bootstrap
         },
         200,
@@ -705,25 +971,37 @@ effect function handleAuthRoute(
       )
     }
     const grant = try getActiveAgentGrant(session.accountId)
-    return jsonResponse({
-      authenticated: true,
-      viewer: {
-        accountId: profile.accountId,
-        handle: profile.handle,
-        displayName: profile.displayName,
-        bio: profile.bio,
-        avatarUrl: profile.avatarUrl,
-        bannerUrl: profile.bannerUrl,
-        phoneLast2: profile.phoneLast2,
-        uiMode: profile.uiMode,
-        balanceCents: profile.balanceCents,
-        startingGrantCents: profile.startingGrantCents,
-        isAdmin: profile.isAdmin,
-        isReviewer: profile.isReviewer,
-        agentGrant: grant
+    const now = try Clock.currentTimeMillis
+    const refreshedCookie = buildSlidingSessionCookieHeader(request, session, config, now)
+    const viewer = {
+      accountId: profile.accountId,
+      handle: profile.handle,
+      displayName: profile.displayName,
+      bio: profile.bio,
+      avatarUrl: profile.avatarUrl,
+      bannerUrl: profile.bannerUrl,
+      phoneLast2: profile.phoneLast2,
+      phoneVerifiedAt: profile.phoneVerifiedAt,
+      emailMasked: profile.emailMasked,
+      emailVerifiedAt: profile.emailVerifiedAt,
+      uiMode: profile.uiMode,
+      balanceCents: profile.balanceCents,
+      startingGrantCents: profile.startingGrantCents,
+      isAdmin: profile.isAdmin,
+      isReviewer: profile.isReviewer,
+      agentGrant: grant
+    }
+    return jsonResponse(
+      {
+        authenticated: true,
+        viewer,
+        account: viewer,
+        ...bootstrap
       },
-      ...bootstrap
-    })
+      200,
+      {},
+      refreshedCookie !== undefined ? [refreshedCookie] : []
+    )
   }
   if (method === "POST" && path === "/api/auth/phone/start") {
     const { data } = try readParsedBody(request)
@@ -761,10 +1039,10 @@ effect function handleAuthRoute(
   if (method === "POST" && path === "/api/auth/phone/onboard") {
     const { data } = try readParsedBody(request)
     const result = try completePhoneOnboarding({
-      pendingToken: try reqStr(data, "pendingToken", "pendingToken", "pending_token"),
+      pendingToken: try reqStr(data, "pendingToken", "pendingToken", "onboardingToken", "pending_token"),
       username: try reqStr(data, "username", "username", "handle"),
       accepted18Plus: boolField(data, false, "accepted18Plus", "ageConfirmed"),
-      acceptedTerms: boolField(data, false, "acceptedTerms"),
+      acceptedTerms: boolField(data, false, "acceptedTerms", "tosAccepted"),
       bio: strField(data, "bio"),
       displayName: strField(data, "displayName"),
       config: config.auth
@@ -776,6 +1054,7 @@ effect function handleAuthRoute(
     const result = try signInReviewerPassword({
       usernameOrId: try reqStr(data, "username", "usernameOrId", "username", "identifier"),
       password: try reqStr(data, "password", "password"),
+      ipAddress: clientIp(request),
       config: config.auth
     })
     return jsonResponse({ account: result.account }, 200, {}, [result.sessionCookieHeader])
@@ -812,12 +1091,12 @@ effect function handleAuthRoute(
     const mode: PlayMode = rawMode
     return jsonResponse({ ok: true, ...(try setPlayMode(session.accountId, mode)) })
   }
-  if (method === "POST" && path === "/api/auth/phone/change/start") {
+  if (method === "POST" && (path === "/api/auth/phone/change/start" || path === "/api/auth/phone/link/start")) {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
-    const res = try requestPhoneChange({
+    const res = try startPhoneLink({
       accountId: session.accountId,
-      newPhoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164"),
+      phoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164", "phone"),
       authAt: session.authAt,
       cookieHeader: request.headers.get("cookie") ?? undefined,
       turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
@@ -826,12 +1105,12 @@ effect function handleAuthRoute(
     })
     return jsonResponse({ challengeId: res.challengeId, last2: res.last2, expiresAt: res.expiresAt, resendAvailableAt: res.resendAvailableAt })
   }
-  if (method === "POST" && path === "/api/auth/phone/change/confirm") {
+  if (method === "POST" && (path === "/api/auth/phone/change/confirm" || path === "/api/auth/phone/link/confirm")) {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
     const res = try confirmPhoneChange({
       accountId: session.accountId,
-      newPhoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164"),
+      newPhoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164", "phone"),
       code: try reqStr(data, "code", "code"),
       config: config.auth
     })
@@ -908,7 +1187,7 @@ effect function handleAccountEdge(
 effect function updateOwnAccountProfile(
   accountId: string,
   data: Readonly<Record<string, unknown>>
-): UpdatedAccountProfile!(HttpRequestError | StoreFailure)!Store {
+): UpdatedAccountProfile!(HttpRequestError | SocialFailure | StoreFailure)!Store {
   const hasDisplayName = Object.prototype.hasOwnProperty.call(data, "displayName")
   const hasBio = Object.prototype.hasOwnProperty.call(data, "bio")
   const hasAvatarUrl = Object.prototype.hasOwnProperty.call(data, "avatarUrl")
@@ -947,7 +1226,7 @@ effect function updateOwnAccountProfile(
     if (trimmed.length > 500) {
       return try badRequest("invalid_avatar_url", "avatarUrl must be at most 500 characters.")
     }
-    nextAvatarUrl = trimmed === "" ? null : trimmed
+    nextAvatarUrl = trimmed === "" ? null : try validateProfileImageUrl(trimmed, "avatarUrl")
   }
   let nextBannerUrl: string | null | undefined = undefined
   if (hasBannerUrl) {
@@ -958,7 +1237,7 @@ effect function updateOwnAccountProfile(
     if (trimmed.length > 500) {
       return try badRequest("invalid_banner_url", "bannerUrl must be at most 500 characters.")
     }
-    nextBannerUrl = trimmed === "" ? null : trimmed
+    nextBannerUrl = trimmed === "" ? null : try validateProfileImageUrl(trimmed, "bannerUrl")
   }
   const profile = try updateProfile(accountId, {
     displayName: nextDisplayName ?? undefined,
@@ -1011,7 +1290,7 @@ effect function handleWorldStatusAndUserSearch(
            (SELECT COUNT(*) FROM feed_prediction_markets WHERE status = 'open' AND expires_at > $1)
              + (SELECT COUNT(*) FROM feed_perp_markets) AS active_markets_count,
            (SELECT COUNT(*) FROM feed_posts WHERE deleted_at IS NULL) AS total_posts_count,
-           (SELECT COUNT(*) FROM feed_actors WHERE id NOT LIKE 'test-%') AS active_actors_count`,
+           (SELECT COUNT(*) FROM feed_actors WHERE id NOT LIKE 'test-%' AND id NOT LIKE 'org-%') AS active_actors_count`,
         [now]
       )
       const [world] = worldRows
@@ -1052,6 +1331,7 @@ effect function handleWorldStatusAndUserSearch(
         `SELECT id, username AS handle, name AS display_name, profile_image_url AS avatar_url
          FROM feed_actors
          WHERE id NOT LIKE 'test-%'
+           AND id NOT LIKE 'org-%'
            AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\')
          ORDER BY CASE WHEN username ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, name ASC
          LIMIT $3`,
@@ -1097,7 +1377,11 @@ effect function handleSocialPostsAndUsers(
   if (method === "GET" && (path === "/api/feed" || path === "/api/posts")) {
     const session = try optionalSession(request, config)
     const rawTab = url.searchParams.get("tab") ?? "latest"
-    const tab: FeedTab = rawTab === "following" || rawTab === "top" ? rawTab : "latest"
+    const tab: FeedTab = rawTab === "following"
+      ? "following"
+      : rawTab === "top" || rawTab === "for_you"
+        ? "top"
+        : "latest"
     return jsonResponse(try listFeedPosts({
       tab,
       viewerId: session?.accountId,
@@ -1174,27 +1458,27 @@ effect function handleSocialPostsAndUsers(
     const session = try optionalSession(request, config)
     const mode = resolveMode(session, url)
     const rawTag = decodeSegment(trendingTagMatch[1] ?? "").trim()
-    const cleanTag = rawTag.replace(/^[#$]+/, "").trim()
-    if (cleanTag === "" || (mode === "social" && rawTag.startsWith("$"))) {
-      return jsonResponse({ tag: rawTag, posts: [] })
-    }
-    const lowerTag = cleanTag.toLowerCase()
-    const search = try searchWorld({
-      query: cleanTag,
+    const posts = try listPostsByTag({
+      tag: rawTag,
       mode,
       viewerId: session?.accountId,
       limit: clampIntQuery(url, "limit", 30, 1, 50)
     })
-    const posts = search.posts.filter((post) => {
-      if (post.hashtags.some((h) => h.toLowerCase() === lowerTag)) return true
-      if (mode !== "social") {
-        if (post.cashtags.some((c) => c.toLowerCase() === lowerTag)) return true
-        if (post.ticker !== null && post.ticker.toLowerCase() === lowerTag) return true
-      }
-      const lowerContent = post.content.toLowerCase()
-      return lowerContent.includes(`#${lowerTag}`) || (mode !== "social" && lowerContent.includes(`$${lowerTag}`))
-    })
     return jsonResponse({ tag: rawTag, posts })
+  }
+  const userLikesMatch = /^\/api\/users\/([^/]+)\/likes$/.exec(path)
+  if (method === "GET" && userLikesMatch !== null) {
+    const session = try optionalSession(request, config)
+    const mode = resolveMode(session, url)
+    const handle = decodeSegment(userLikesMatch[1] ?? "")
+    const liked = try listUserLikedPosts({
+      handleOrId: handle,
+      viewerId: session?.accountId,
+      mode,
+      cursor: url.searchParams.get("cursor") ?? undefined,
+      limit: clampIntQuery(url, "limit", 30, 1, 100)
+    })
+    return jsonResponse({ posts: liked.items, nextCursor: liked.nextCursor })
   }
   const userTradesMatch = /^\/api\/users\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && userTradesMatch !== null) {
@@ -1226,6 +1510,26 @@ effect function handleSocialPostsAndUsers(
     const session = try requireSession(request, config)
     return jsonResponse({ items: try listMutedAccounts(session.accountId, clampIntQuery(url, "limit", 50, 1, 200)) })
   }
+  if (method === "GET" && path === "/api/users/me") {
+    const session = try requireSession(request, config)
+    const mode = session.uiMode
+    const profile = try getProfile(session.handle, session.accountId, mode)
+    const feed = try listFeedPosts({
+      tab: "latest",
+      viewerId: session.accountId,
+      mode,
+      authorId: profile.id,
+      cursor: url.searchParams.get("cursor") ?? undefined,
+      limit: clampIntQuery(url, "limit", 30, 1, 100),
+      filter: parseFeedPostFilter(url.searchParams.get("filter")),
+      onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
+      includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
+    })
+    const positions = mode === "game"
+      ? try getUserPositions(profile.id)
+      : { accountId: profile.id, predictionPositions: [], perpPositions: [] }
+    return jsonResponse({ profile, posts: feed.items, nextCursor: feed.nextCursor, positions })
+  }
   if (method === "PATCH" && path === "/api/users/me") {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
@@ -1248,7 +1552,7 @@ effect function handleSocialPostsAndUsers(
       onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
       includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
     })
-    const canViewPositions = profile.kind === "user" && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
+    const canViewPositions = (profile.kind === "user" || profile.kind === "npc") && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
     const positions = canViewPositions
       ? try getUserPositions(profile.id)
       : { accountId: profile.id, predictionPositions: [], perpPositions: [] }
@@ -1276,7 +1580,8 @@ effect function handleSocialPostsAndUsers(
 effect function handleSocialChatsAndNotifications(
   request: Request,
   url: URL,
-  config: AppServerConfig
+  config: AppServerConfig,
+  realtimeStore?: Store.Shape
 ): (Response | undefined)!(AuthFailure | RateLimited | SocialFailure | StoreFailure | HttpRequestError)!(Store | RealtimeBus) {
   const path = url.pathname
   const method = request.method.toUpperCase()
@@ -1285,7 +1590,8 @@ effect function handleSocialChatsAndNotifications(
     return try createSseResponse({
       signal: request.signal,
       keepalive: true,
-      viewerAccountId: session?.accountId ?? null
+      viewerAccountId: session?.accountId ?? null,
+      ...(realtimeStore !== undefined ? { store: realtimeStore } : {})
     })
   }
   if (method === "GET" && path === "/api/notifications") {
@@ -1298,12 +1604,12 @@ effect function handleSocialChatsAndNotifications(
   if (method === "DELETE" && path === "/api/notifications") {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
-    return jsonResponse(try clearNotifications(session.accountId, strArrayField(data, "notificationIds", "ids")))
+    return jsonResponse(try clearNotifications(session.accountId, strArrayField(data, "notificationIds", "ids"), session.uiMode))
   }
   if (method === "POST" && path === "/api/notifications/read") {
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
-    return jsonResponse(try markNotificationsRead(session.accountId, strArrayField(data, "notificationIds", "ids")))
+    return jsonResponse(try markNotificationsRead(session.accountId, strArrayField(data, "notificationIds", "ids"), session.uiMode))
   }
   if (method === "GET" && path === "/api/chats") {
     const session = try requireSession(request, config)
@@ -1342,6 +1648,7 @@ effect function handleSocialChatsAndNotifications(
   }
   const chatReactionMatch = /^\/api\/chats\/([^/]+)\/messages\/([^/]+)\/reactions$/.exec(path)
   const legacyReactMatch = /^\/api\/chats\/messages\/([^/]+)\/react$/.exec(path)
+  const reactionChatId = chatReactionMatch !== null ? decodeSegment(chatReactionMatch[1] ?? "") : undefined
   const reactionMessageId = chatReactionMatch !== null
     ? decodeSegment(chatReactionMatch[2] ?? "")
     : legacyReactMatch !== null
@@ -1353,6 +1660,7 @@ effect function handleSocialChatsAndNotifications(
       const { data } = try readParsedBody(request)
       return jsonResponse(try reactToMessage({
         accountId: session.accountId,
+        ...(reactionChatId !== undefined ? { chatId: reactionChatId } : {}),
         messageId: reactionMessageId,
         emoji: try reqStr(data, "emoji", "emoji")
       }))
@@ -1365,6 +1673,7 @@ effect function handleSocialChatsAndNotifications(
       }
       return jsonResponse(try unreactToMessage({
         accountId: session.accountId,
+        ...(reactionChatId !== undefined ? { chatId: reactionChatId } : {}),
         messageId: reactionMessageId,
         emoji
       }))
@@ -1428,6 +1737,10 @@ effect function handleSocialChatsAndNotifications(
   const chatIdMatch = /^\/api\/chats\/([^/]+)$/.exec(path)
   if (chatIdMatch !== null) {
     const chatId = decodeSegment(chatIdMatch[1] ?? "")
+    if (method === "GET") {
+      const session = try requireSession(request, config)
+      return jsonResponse({ chat: try getChat(session.accountId, chatId) })
+    }
     if (method === "PATCH") {
       const session = try requireSession(request, config)
       const { data } = try readParsedBody(request)
@@ -1491,14 +1804,27 @@ function readHistoryQuery(url: URL) {
 
 effect function parsePerpOrderParams(
   data: Record<string, unknown>
-): { readonly side: "long" | "short"; readonly collateralCents: number; readonly leverage: number }!HttpRequestError {
+): { readonly side: "long" | "short"; readonly collateralCents: number; readonly leverage: number; readonly mode?: PerpOrderMode }!HttpRequestError {
   const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
   if (rawSide !== "long" && rawSide !== "short") {
     return try badRequest("invalid_side", "Side must be long or short.")
   }
   const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
   const leverage = numField(data, "leverage") ?? 1
-  return { side: rawSide, collateralCents: Math.round(collateralCents), leverage }
+  const rawMode = strField(data, "mode")?.trim().toLowerCase()
+  let mode: PerpOrderMode | undefined = undefined
+  if (rawMode !== undefined && rawMode !== "") {
+    if (rawMode !== "open" && rawMode !== "add" && rawMode !== "reduce" && rawMode !== "flip") {
+      return try badRequest("invalid_mode", "Perp order mode must be open, add, reduce, or flip.")
+    }
+    mode = rawMode
+  }
+  return {
+    side: rawSide,
+    collateralCents: Math.round(collateralCents),
+    leverage,
+    ...(mode !== undefined ? { mode } : {})
+  }
 }
 
 function readLeaderboardFilterParams(url: URL) {
@@ -1559,20 +1885,22 @@ effect function handlePredictionMarketRoute(
   const predTradeMatch = /^\/api\/markets\/predictions?\/([^/]+)\/(buy|sell)$/.exec(path)
   if (method === "POST" && predTradeMatch !== null) {
     const session = try requireSession(request, config)
-    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const marketId = decodeSegment(predTradeMatch[1] ?? "")
     const action = predTradeMatch[2]
     const { data } = try readParsedBody(request)
     const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
+    const amountCents = Math.round(numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100))
+    const sharesInput = Math.round(numField(data, "shareUnits", "share_units", "shares") ?? 0)
+    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const receipt = action === "buy"
       ? try buyPredictionShares({
           actorId: session.accountId,
           actorKind: "user",
           marketId,
           side: rawSide,
-          amountCents: Math.round(numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100)),
+          amountCents,
           ...(idempotencyKey === undefined ? {} : { idempotencyKey })
         })
       : try sellPredictionShares({
@@ -1580,7 +1908,7 @@ effect function handlePredictionMarketRoute(
           actorKind: "user",
           marketId,
           side: rawSide,
-          shares: Math.round(numField(data, "shareUnits", "share_units", "shares") ?? 0),
+          shares: sharesInput,
           ...(idempotencyKey === undefined ? {} : { idempotencyKey })
         })
     const { marketId: receiptMarketId, action: receiptAction, side: receiptSide, yesPriceBps, noPriceBps, shares, notionalCents } = receipt
@@ -1610,12 +1938,19 @@ effect function handleLeaderboardAndEconomyRoute(
     const session = try optionalSession(request, config)
     const page = clampIntQuery(url, "page", 1, 1, 10_000)
     const pageSize = parseLeaderboardPageSize(url)
+    const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
     const filterParams = readLeaderboardFilterParams(url)
     if (filterParams !== null) {
-      const result = try getFilteredLeaderboardPage({ ...filterParams, page, pageSize })
+      const result = try getFilteredLeaderboardPage({
+        ...filterParams,
+        metric,
+        page,
+        pageSize,
+        ...(session !== null ? { viewerAccountId: session.accountId } : {})
+      })
       return jsonResponse({
         scope: filterParams.filter === "npcs" ? "characters" : "players",
-        metric: "net_profit",
+        metric: result.metric,
         entries: result.entries,
         leaderboard: result.entries,
         page: result.pagination.page,
@@ -1624,11 +1959,10 @@ effect function handleLeaderboardAndEconomyRoute(
         totalPages: result.pagination.totalPages,
         pagination: result.pagination,
         generatedAt: result.generatedAt,
-        currentUser: null
+        currentUser: result.currentUser
       })
     }
     const scope = parseLeaderboardScope(url.searchParams.get("scope"))
-    const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
     const leaderboardPage = try getLeaderboard({
       scope,
       metric,
@@ -1650,12 +1984,12 @@ effect function handleLeaderboardAndEconomyRoute(
   if (method === "GET" && path === "/api/leaderboard/me") {
     const session = try requireSession(request, config)
     const pageSize = parseLeaderboardPageSize(url)
+    const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
     const filterParams = readLeaderboardFilterParams(url)
     if (filterParams !== null) {
-      const viewerRank = try getFilteredLeaderboardViewerRank(session.accountId, { ...filterParams, pageSize })
+      const viewerRank = try getFilteredLeaderboardViewerRank(session.accountId, { ...filterParams, metric, pageSize })
       return jsonResponse({ ...viewerRank, position: viewerRank })
     }
-    const metric = parseLeaderboardMetric(url.searchParams.get("metric"))
     const position = try getAccountLeaderboardRank(session.accountId, metric, pageSize)
     return jsonResponse({
       ...(position !== null
@@ -1712,8 +2046,37 @@ effect function handleMarketRoute(
       page: clampIntQuery(url, "page", 1, 1, 10_000),
       limit: Math.min(limit, 100)
     })
-    const structured = try listUserClosedPositions(session.accountId, limit)
-    return jsonResponse({ ...paged, ...structured })
+    const predictionPositions = paged.items
+      .filter((item) => item.kind === "prediction")
+      .map((item) => ({
+        marketId: item.marketId ?? item.id,
+        question: item.title,
+        side: item.side,
+        shares: item.sharesOrSize,
+        costBasisCents: item.costBasisCents,
+        payoutCents: item.payoutCents,
+        realizedPnlCents: item.realizedPnlCents,
+        settledAt: item.closedAt,
+        status: item.status
+      }))
+    const perpPositions = paged.items
+      .filter((item) => item.kind === "perp")
+      .map((item) => ({
+        id: item.id,
+        ticker: item.ticker ?? "PERP",
+        side: item.side,
+        marginCents: item.costBasisCents,
+        sizeCents: item.sharesOrSize,
+        realizedPnlCents: item.realizedPnlCents,
+        closedAt: item.closedAt,
+        status: item.status
+      }))
+    return jsonResponse({
+      ...paged,
+      accountId: session.accountId,
+      predictionPositions,
+      perpPositions
+    })
   }
   const predictionResponse = try handlePredictionMarketRoute(request, url, config)
   if (predictionResponse !== undefined) return predictionResponse
@@ -1745,11 +2108,11 @@ effect function handleMarketRoute(
   const perpOpenMatch = /^\/api\/markets\/perp\/([^/]+)\/open$/.exec(path)
   if (method === "POST" && perpOpenMatch !== null) {
     const session = try requireSession(request, config)
-    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const ticker = decodeSegment(perpOpenMatch[1] ?? "")
     const { data } = try readParsedBody(request)
     const order = try parsePerpOrderParams(data)
     const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
+    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const opened = try openPerpPosition({
       ownerId: session.accountId,
       ownerKind: "user",
@@ -1759,7 +2122,7 @@ effect function handleMarketRoute(
     })
     try publishFeedEvent({
       type: "market.perp",
-      action: opened.action === "close" ? "close" : "open",
+      action: opened.action,
       actorId: session.accountId,
       ticker: opened.position.ticker,
       side: opened.position.side,
@@ -1773,12 +2136,12 @@ effect function handleMarketRoute(
   const perpCloseMatch = /^\/api\/markets\/perp\/positions\/([^/]+)\/close$/.exec(path)
   if (method === "POST" && perpCloseMatch !== null) {
     const session = try requireSession(request, config)
-    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const { data } = try readParsedBody(request)
     const rawSizePts = numField(data, "sizePts", "size_pts")
     const sizeCents = numField(data, "sizeCents", "size_cents") ?? (rawSizePts !== undefined ? Math.round(rawSizePts * 100) : undefined)
     const closePct = numField(data, "closePct", "close_pct")
     const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
+    try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const closed = try closePerpPosition({
       ownerId: session.accountId,
       positionId: decodeSegment(perpCloseMatch[1] ?? ""),
@@ -1987,13 +2350,18 @@ effect function handleEngineAdminRoute(
       return try badRequest("invalid_status", "Report status must be open, reviewed, resolved, or dismissed.")
     }
     const store = try Store
-    const updated = try store.transaction(effect (tx: Tx) => {
+    const updated = store.transaction(effect (tx: Tx) => {
       const rows = try tx.query(
         "UPDATE feed_reports SET status = 'open' WHERE id = $1 RETURNING id, status",
         [reportId]
       )
       return rows[0]
-    })
+    }) catch effect (err) => {
+      if (err instanceof StoreFailure && isPgUniqueViolation(err.cause)) {
+        return try badRequest("report_conflict", "Another open report already exists for this reporter and target.", 409)
+      }
+      throw err
+    }
     if (updated === undefined) {
       return try badRequest("not_found", "Report not found.", 404)
     }
@@ -2007,14 +2375,14 @@ effect function handleEngineAdminRoute(
     const users = try store.transaction(effect (tx: Tx) => {
       const rows = q === ""
         ? try tx.query(
-            `SELECT account_id, handle, display_name, avatar_url, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, phone_verified_at, created_at
+            `SELECT account_id, handle, display_name, avatar_url, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, phone_verified_at, email_masked, email_verified_at, created_at
              FROM feed_accounts
              ORDER BY created_at DESC
              LIMIT $1`,
             [limit]
           )
         : try tx.query(
-            `SELECT account_id, handle, display_name, avatar_url, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, phone_verified_at, created_at
+            `SELECT account_id, handle, display_name, avatar_url, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, phone_verified_at, email_masked, email_verified_at, created_at
              FROM feed_accounts
              WHERE handle ILIKE $1 ESCAPE '\\' OR display_name ILIKE $1 ESCAPE '\\'
              ORDER BY created_at DESC
@@ -2033,6 +2401,8 @@ effect function handleEngineAdminRoute(
         isAdmin: row.is_admin === true,
         isReviewer: row.is_reviewer === true,
         phoneVerifiedAt: row.phone_verified_at === null ? null : toInt(row.phone_verified_at),
+        emailMasked: toText(row.email_masked) ?? null,
+        emailVerifiedAt: row.email_verified_at === null ? null : toInt(row.email_verified_at),
         createdAt: toInt(row.created_at)
       }))
     })
@@ -2097,9 +2467,14 @@ effect function handleEngineAdminRoute(
   return undefined
 }
 
+export interface RouteRequestOptions {
+  readonly realtimeStore?: Store.Shape | undefined
+}
+
 effect function routeOptionalResponse(
   request: Request,
-  config: AppServerConfig
+  config: AppServerConfig,
+  options?: RouteRequestOptions
 ): (Response | undefined)!(
   AuthFailure
   | RateLimited
@@ -2128,6 +2503,7 @@ effect function routeOptionalResponse(
       version: manifest.version,
       deploymentEnv: config.deploymentEnv,
       smsMode: config.auth.smsMode,
+      emailMode: resolveEmailMode(config.auth),
       gameStart: config.gameStart,
       ...(config.commitSha !== undefined ? { commit: config.commitSha } : {})
     }
@@ -2157,7 +2533,7 @@ effect function routeOptionalResponse(
   const postsUsersResponse = try handleSocialPostsAndUsers(request, url, config)
   if (postsUsersResponse !== undefined) return postsUsersResponse
 
-  const chatNotifyResponse = try handleSocialChatsAndNotifications(request, url, config)
+  const chatNotifyResponse = try handleSocialChatsAndNotifications(request, url, config, options?.realtimeStore)
   if (chatNotifyResponse !== undefined) return chatNotifyResponse
 
   const marketResponse = try handleMarketRoute(request, url, config)
@@ -2166,7 +2542,12 @@ effect function routeOptionalResponse(
   const adminResponse = try handleEngineAdminRoute(request, url, config)
   if (adminResponse !== undefined) return adminResponse
 
-  if (path.startsWith("/api/") || path.startsWith("/oauth/")) {
+  const acceptHeader = request.headers.get("accept")?.toLowerCase() ?? ""
+  const isHtmlOAuthAuthorize = method === "GET"
+    && path === "/oauth/authorize"
+    && acceptHeader.includes("text/html")
+    && url.searchParams.get("format") !== "json"
+  if (!isHtmlOAuthAuthorize && (path.startsWith("/api/") || path.startsWith("/oauth/"))) {
     return jsonResponse({ error: "not_found", code: "not_found", message: `Unknown route: ${path}` }, 404)
   }
   return undefined
@@ -2174,9 +2555,10 @@ effect function routeOptionalResponse(
 
 export effect function resolveOptionalRouteResponse(
   request: Request,
-  config: AppServerConfig
+  config: AppServerConfig,
+  options?: RouteRequestOptions
 ): (Response | undefined)!!(Store | RealtimeBus) {
-  return routeOptionalResponse(request, config) catch (err) => mapDomainError(err)
+  return routeOptionalResponse(request, config, options) catch (err) => mapDomainError(err)
 }
 
 effect function runScheduledJob(
@@ -2193,6 +2575,7 @@ export effect function runScheduledTicks(cycle: number): void!!(Store | Realtime
   try runScheduledJob("minute-tick", () => runMinuteTick())
   try runScheduledJob("markets-tick", () => runMarketsTick())
   try runScheduledJob("markets-recovery", () => runMarketsRecovery())
+  try runScheduledJob("perp-funding-tick", () => runPerpFundingTick())
   if (cycle % 2 === 0) {
     try runScheduledJob("npc-tick", () => runNpcTick())
   }
@@ -2202,9 +2585,6 @@ export effect function runScheduledTicks(cycle: number): void!!(Store | Realtime
   }
   if (cycle % 30 === 0) {
     try runScheduledJob("article-tick", () => runArticleTick())
-  }
-  if (cycle % 480 === 0) {
-    try runScheduledJob("perp-funding-tick", () => runPerpFundingTick())
   }
   if (cycle % 720 === 0) {
     try runScheduledJob("world-facts-tick", () => runWorldFactsTick())

@@ -15,7 +15,6 @@ import {
 } from "./AlertDialog.tsx";
 import { Badge } from "./Badge.tsx";
 import { Button } from "./Button.tsx";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "./Card.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
 import { CommandBlock } from "./CommandBlock.tsx";
 
@@ -136,7 +135,7 @@ function McpSetupSection({
       </div>
       {onOpenLink ? (
         <div className="flex justify-end">
-          <Button variant="outline" size="sm" shape="pill" disabled={blocked} onClick={() => !blocked && onOpenLink()}>
+          <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onOpenLink()}>
             <Link2 aria-hidden className="size-4" />
             Pair via /link code
           </Button>
@@ -172,8 +171,8 @@ export function AgentConnectCard({
   if (grant) {
     const activeScopes = scopeEntries.filter(([key]) => grant.scopes[key]);
     return (
-      <Card className={cn("gap-4 rounded-xl", className)} {...props}>
-        <CardHeader className="flex-row items-start justify-between gap-3">
+      <div className={cn("flex flex-col gap-4 rounded-lg border border-border bg-background p-4 text-foreground", className)} {...props}>
+        <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             {grant.agentMark ? (
               <div className="flex size-10 items-center justify-center rounded-xl border border-border bg-muted text-foreground">
@@ -185,14 +184,14 @@ export function AgentConnectCard({
               </div>
             )}
             <div className="flex flex-col gap-0.5">
-              <CardTitle>{grant.clientName}</CardTitle>
-              <CardDescription>Connected {grant.connectedAt} · Last used {grant.lastUsedAt}</CardDescription>
+              <h3 className="text-base leading-none font-semibold">{grant.clientName}</h3>
+              <p className="text-sm text-muted-foreground">Connected {grant.connectedAt} · Last used {grant.lastUsedAt}</p>
             </div>
           </div>
           <Badge variant="ok">Active</Badge>
-        </CardHeader>
+        </div>
 
-        <CardContent className="gap-3">
+        <div className="flex flex-col gap-3">
           <div role="group" aria-label="Granted scopes" className="flex flex-wrap gap-1.5">
             {activeScopes.map(([, label]) => (
               <Badge key={label} variant="outline" className="font-mono">
@@ -237,11 +236,11 @@ export function AgentConnectCard({
               />
             ) : null}
           </div>
-        </CardContent>
+        </div>
 
-        <CardFooter className="justify-between gap-2">
+        <div className="flex items-center justify-between gap-2 pt-1">
           {onOpenLink ? (
-            <Button variant="outline" size="sm" shape="pill" disabled={blocked} onClick={() => !blocked && onOpenLink()}>
+            <Button variant="outline" size="sm" disabled={blocked} onClick={() => !blocked && onOpenLink()}>
               <Link2 aria-hidden className="size-4" />
               Pair via /link
             </Button>
@@ -250,7 +249,7 @@ export function AgentConnectCard({
           )}
           <AlertDialog>
             <AlertDialogTrigger asChild>
-              <Button variant="destructive" size="sm" shape="pill" loading={revoking || loading} disabled={blocked}>
+              <Button variant="destructive" size="sm" loading={revoking || loading} disabled={blocked}>
                 <Unplug aria-hidden className="size-4" />
                 Revoke grant
               </Button>
@@ -262,7 +261,7 @@ export function AgentConnectCard({
               </AlertDialogDescription>
               <AlertDialogFooter>
                 <AlertDialogCancel asChild>
-                  <Button variant="outline" size="sm" shape="pill">
+                  <Button variant="outline" size="sm">
                     Cancel
                   </Button>
                 </AlertDialogCancel>
@@ -270,7 +269,6 @@ export function AgentConnectCard({
                   <Button
                     variant="destructive"
                     size="sm"
-                    shape="pill"
                     disabled={blocked}
                     onClick={() => {
                       if (!blocked) onRevoke?.(grant.grantId);
@@ -282,28 +280,26 @@ export function AgentConnectCard({
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
-        </CardFooter>
-      </Card>
+        </div>
+      </div>
     );
   }
 
   return (
-    <Card className={cn("gap-4 rounded-xl", className)} {...props}>
-      <CardHeader>
-        <CardTitle>Connect an AI agent</CardTitle>
-        <CardDescription>Link one AI agent to post, chat, and trade from your Feed account.</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <McpSetupSection
-          launchers={launchers}
-          skillPrompt={skillPrompt}
-          mcpUrl={mcpUrl}
-          blocked={blocked}
-          onSelectHost={onSelectHost}
-          onCopyPrompt={onCopyPrompt}
-          onOpenLink={onOpenLink}
-        />
-      </CardContent>
-    </Card>
+    <div className={cn("flex flex-col gap-4 rounded-lg border border-border bg-background p-4 text-foreground", className)} {...props}>
+      <div className="flex flex-col gap-1">
+        <h3 className="text-base leading-none font-semibold">Connect an AI agent</h3>
+        <p className="text-sm text-muted-foreground">Link one AI agent to post, chat, and trade from your Feed account.</p>
+      </div>
+      <McpSetupSection
+        launchers={launchers}
+        skillPrompt={skillPrompt}
+        mcpUrl={mcpUrl}
+        blocked={blocked}
+        onSelectHost={onSelectHost}
+        onCopyPrompt={onCopyPrompt}
+        onOpenLink={onOpenLink}
+      />
+    </div>
   );
 }

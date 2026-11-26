@@ -15,11 +15,12 @@ import {
 import {
   type AgentHostId,
   type AgentHostLink,
-  FEED_HOW_TO_PLAY_MD,
   FEED_SKILL_DESCRIPTION,
   FEED_SKILL_MD,
   buildAgentLinks,
   normalizeOrigin,
+  renderFeedSkillMd,
+  renderHowToPlayMd,
   renderLlmsTxt
 } from "./skill-content.ts"
 
@@ -127,7 +128,8 @@ effect function publishDigest(digestHex: string): string!SkillPublishInvalid {
 
 export effect function getSkillDiscoveryIndex(origin: string): SkillDiscoveryIndex!(SkillDigestError | SkillPublishInvalid) {
   const base = normalizeOrigin(origin)
-  const rawDigest = try computeSkillSha256(FEED_SKILL_MD)
+  const renderedSkill = renderFeedSkillMd(base)
+  const rawDigest = try computeSkillSha256(renderedSkill)
   const verifiedDigest = try publishDigest(rawDigest)
   return {
     $schema: "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
@@ -224,13 +226,13 @@ export effect function handleSkillRoute(
   switch (pathname) {
     case "/SKILL.md":
     case "/.well-known/agent-skills/feed/SKILL.md":
-      return textResponse(FEED_SKILL_MD, "text/markdown; charset=utf-8", request.method, { etag })
+      return textResponse(renderFeedSkillMd(base), "text/markdown; charset=utf-8", request.method, { etag })
     case "/.well-known/agent-skills/index.json":
       return textResponse(`${JSON.stringify(index, null, 2)}\n`, "application/json; charset=utf-8", request.method, { etag })
     case "/llms.txt":
       return textResponse(renderLlmsTxt(base, hex), "text/plain; charset=utf-8", request.method, { etag })
     case "/how-to-play.md":
-      return textResponse(FEED_HOW_TO_PLAY_MD, "text/markdown; charset=utf-8", request.method)
+      return textResponse(renderHowToPlayMd(base), "text/markdown; charset=utf-8", request.method)
     case "/api/skills/hosts": {
       const verified = parseVerifiedParam(url)
       const payload: SkillHostsPayload = {

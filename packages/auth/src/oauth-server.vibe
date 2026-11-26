@@ -47,17 +47,19 @@ import {
 } from "./agent-grant.vibe"
 import {
   constantTimeEqual,
+  hmacSha256Hex,
   hmacSigningKeyBytes,
   newUuid,
   randomBase64Url,
-  randomFourDigits,
+  randomDeviceUserCode,
   randomHex,
   sha256Base64Url,
   sha256Hex
 } from "./crypto.vibe"
-import { AuthFailure, UnauthorizedError } from "./errors.vibe"
+import { AuthFailure, RateLimited, UnauthorizedError } from "./errors.vibe"
 import { executeHttpJson } from "./http.vibe"
-import type { AuthRuntimeConfig, PlayMode } from "./phone-auth.vibe"
+import { normalizeIpPrefix, type AuthRuntimeConfig, type PlayMode } from "./phone-auth.vibe"
+import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
 
 export interface VerifiedAccessToken {
   readonly accountId: string
@@ -128,7 +130,19 @@ export interface DeviceApprovalResult {
   readonly scopes?: ReadonlyArray<AgentScope>
 }
 
+export interface DeviceCodeLookupResult {
+  readonly userCode: string
+  readonly clientId: string
+  readonly clientName: string
+  readonly scopes: ReadonlyArray<AgentScope>
+  readonly status: "pending"
+  readonly expiresAt: number
+}
+
 const AUTH_CODE_LIFETIME_MS = 10 * 60_000
+const OAUTH_RATE_WINDOW_MS = 3_600_000
+const DEVICE_CODE_IP_HOURLY_LIMIT = 30
+const REGISTER_IP_HOURLY_LIMIT = 20
 const PKCE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/
 const PKCE_VERIFIER_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/
 const SUPPORTED_GRANTS = [
@@ -170,27 +184,119 @@ function isAllowedResource(rawResource: string, origin?: string): boolean {
   return false
 }
 
-function isDisallowedRemoteHost(hostname: string): boolean {
-  const host = hostname.toLowerCase()
+function isDisallowedIpv4(host: string): boolean {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (match === null) return false
+  const a = Number(match[1])
+  const b = Number(match[2])
+  const c = Number(match[3])
+  const d = Number(match[4])
+  if (a > 255 || b > 255 || c > 255 || d > 255) return true
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 198 && (b === 18 || b === 19)) return true
+  return false
+}
+
+export function isDisallowedRemoteHost(hostname: string): boolean {
+  const raw = hostname.trim().toLowerCase()
+  const host = raw.startsWith("[") && raw.endsWith("]") ? raw.slice(1, -1) : raw
   if (
+    host === "" ||
     host === "localhost" ||
     host === "::1" ||
-    host === "[::1]" ||
-    !host.includes(".") ||
+    host === "::" ||
+    host === "0.0.0.0" ||
     host.endsWith(".local") ||
-    host.endsWith(".internal")
+    host.endsWith(".internal") ||
+    host.endsWith(".localhost")
   ) {
     return true
   }
-  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) {
-    return true
+  if (host.includes(":")) {
+    if (
+      /^::1$/.test(host) ||
+      /^::$/.test(host) ||
+      /^::ffff:/i.test(host) ||
+      /^0*:0*:0*:0*:0*:ffff:/i.test(host) ||
+      /^f[cd][0-9a-f]{2}:/i.test(host) ||
+      /^fe[89ab][0-9a-f]:/i.test(host) ||
+      /^ff[0-9a-f]{2}:/i.test(host) ||
+      /^100::/i.test(host) ||
+      /^2001:db8:/i.test(host)
+    ) {
+      return true
+    }
+    return false
   }
-  const match172 = /^172\.(\d+)\./.exec(host)
-  if (match172 !== null) {
-    const second = Number(match172[1])
-    if (second >= 16 && second <= 31) return true
+  if (!host.includes(".")) return true
+  return isDisallowedIpv4(host)
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1"
+}
+
+export function redirectUriMatchesRegistered(registeredUris: ReadonlyArray<string>, requestedUri: string): boolean {
+  if (registeredUris.includes(requestedUri)) return true
+  let reqUrl: URL
+  try {
+    reqUrl = new URL(requestedUri)
+  } catch {
+    return false
+  }
+  if (reqUrl.protocol !== "http:" || !isLoopbackHostname(reqUrl.hostname) || reqUrl.hash !== "") {
+    return false
+  }
+  const reqHost = reqUrl.hostname.toLowerCase()
+  for (const registered of registeredUris) {
+    let regUrl: URL
+    try {
+      regUrl = new URL(registered)
+    } catch {
+      continue
+    }
+    if (
+      regUrl.protocol === "http:" &&
+      isLoopbackHostname(regUrl.hostname) &&
+      regUrl.hostname.toLowerCase() === reqHost &&
+      regUrl.pathname === reqUrl.pathname &&
+      regUrl.search === reqUrl.search &&
+      regUrl.hash === ""
+    ) {
+      return true
+    }
   }
   return false
+}
+
+export effect function checkOAuthEndpointRateLimit(input: {
+  readonly endpoint: "device_code" | "register"
+  readonly ipAddress: string
+  readonly digestKey: string
+}): void!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const trimmedIp = input.ipAddress.trim()
+  if (trimmedIp === "") return
+  const ipHash = try hmacSha256Hex(input.digestKey, normalizeIpPrefix(trimmedIp))
+  const limit = input.endpoint === "device_code" ? DEVICE_CODE_IP_HOURLY_LIMIT : REGISTER_IP_HOURLY_LIMIT
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  try store.transaction((tx: Tx) =>
+    consumeRateLimitWindowInTx(tx, {
+      scopeKey: `oauth_${input.endpoint}_ip:${ipHash}`,
+      limit,
+      windowMs: OAUTH_RATE_WINDOW_MS,
+      action: `oauth_${input.endpoint}`,
+      message: input.endpoint === "device_code"
+        ? "Too many device authorization requests from this IP address."
+        : "Too many client registration requests from this IP address.",
+      now
+    })
+  )
 }
 
 function classifyRedirectUri(rawUri: string): RedirectKind {
@@ -275,7 +381,7 @@ effect function buildActiveTokenState(
 
 effect function ensureEligibleAccountInTx(tx: Tx, accountId: string): void!(AuthFailure | StoreFailure) {
   const accountRows = try tx.query(
-    `SELECT fa.account_id, fa.phone_verified_at, fa.is_reviewer, a.status
+    `SELECT fa.account_id, fa.phone_verified_at, fa.email_verified_at, fa.is_reviewer, a.status
      FROM feed_accounts fa
      JOIN accounts a ON a.key = fa.account_id
      WHERE fa.account_id = $1`,
@@ -284,7 +390,7 @@ effect function ensureEligibleAccountInTx(tx: Tx, accountId: string): void!(Auth
   const accountRow = accountRows[0]
   const accountEligible = accountRow !== undefined &&
     toText(accountRow.status) === "active" &&
-    (accountRow.phone_verified_at !== null || accountRow.is_reviewer === true)
+    (accountRow.phone_verified_at !== null || accountRow.email_verified_at !== null || accountRow.is_reviewer === true)
   if (!accountEligible) {
     throw new AuthFailure({ code: "access_denied", message: "Account must be active and verified.", status: 403 })
   }
@@ -451,7 +557,21 @@ export effect function registerDynamicClient(input: {
   readonly grantTypes?: ReadonlyArray<string> | undefined
   readonly responseTypes?: ReadonlyArray<string> | undefined
   readonly scope?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly digestKey?: string | undefined
 }): RegisteredOAuthClient!(AuthFailure | StoreFailure)!Store {
+  if (input.ipAddress !== undefined && input.digestKey !== undefined && input.digestKey.trim() !== "") {
+    checkOAuthEndpointRateLimit({
+      endpoint: "register",
+      ipAddress: input.ipAddress,
+      digestKey: input.digestKey
+    }) catch effect (err) => {
+      if (err instanceof RateLimited) {
+        throw new AuthFailure({ code: "rate_limited", message: err.message, status: 429 })
+      }
+      throw err
+    }
+  }
   const clientName = input.clientName.trim()
   if (clientName.length === 0 || clientName.length > 128) {
     throw new AuthFailure({ code: "invalid_client_metadata", message: "client_name must be 1-128 characters.", status: 400 })
@@ -565,7 +685,7 @@ export effect function createAuthorizationCode(input: {
   if (!redirectAllowed(redirectKind)) {
     throw new AuthFailure({ code: "invalid_redirect_uri", message: "Redirect URI is not allowed.", status: 400 })
   }
-  const { scopeSet, scopeString } = try parseAgentScopes(input.scope, true)
+  const { scopeSet, scopeString } = try parseAgentScopes(input.scope, input.scope === undefined)
   const store = try Store
   const now = try Clock.currentTimeMillis
   const code = `feed_code_${randomBase64Url(32)}`
@@ -582,7 +702,7 @@ export effect function createAuthorizationCode(input: {
     }
     const rawUris = Effect.try(() => JSON.parse(toText(clientRow.redirect_uris) ?? "[]") as unknown) catch () => []
     const allowedUris = Option.getOrUndefined(Schema.decodeUnknownOption(RedirectUrisSchema)(rawUris)) ?? []
-    if (!allowedUris.includes(input.redirectUri)) {
+    if (!redirectUriMatchesRegistered(allowedUris, input.redirectUri)) {
       throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
     }
     try ensureEligibleAccountInTx(tx, input.accountId)
@@ -803,10 +923,9 @@ effect function exchangeRefreshTokenInTx(
     grantExpiresAt,
     now
   })
-  const stateWithStatus: OAuthState = row.revoked_at !== null || toText(row.grant_status) !== "active"
-    ? { ...oauthState, tokenFamily: { ...oauthState.tokenFamily, familyStatus: "FamilyRevoked" } }
-    : oauthState
-  const reuseDetected = row.spent_at !== null || row.revoked_at !== null || isRefreshReuse(stateWithStatus.tokenFamily, grantId, presentedGen, now)
+  const isRevokedOrInactive = row.revoked_at !== null || toText(row.grant_status) !== "active"
+  const reuseDetected = row.spent_at !== null
+    || (!isRevokedOrInactive && isRefreshReuse(oauthState.tokenFamily, grantId, presentedGen, now))
   if (reuseDetected) {
     try revokeTokenFamilyAndGrantInTx(tx, familyId, grantId, now)
     return {
@@ -814,14 +933,14 @@ effect function exchangeRefreshTokenInTx(
       failure: new AuthFailure({ code: "reused_revoked", message: "Refresh token reuse detected; agent grant revoked.", status: 400 })
     }
   }
-  if (toText(row.account_status) !== "active" || toText(row.grant_status) !== "active" || now >= grantExpiresAt) {
+  if (isRevokedOrInactive || toText(row.account_status) !== "active" || now >= grantExpiresAt) {
     try revokeTokenFamilyAndGrantInTx(tx, familyId, grantId, now)
     return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Grant expired or revoked.", status: 400 }) }
   }
-  if (!canRefreshOAuthToken(stateWithStatus, grantId, presentedGen)) {
+  if (!canRefreshOAuthToken(oauthState, grantId, presentedGen)) {
     return { ok: false, failure: new AuthFailure({ code: "invalid_grant", message: "Refresh token cannot be rotated.", status: 400 }) }
   }
-  const stepped = refreshOAuthToken(stateWithStatus, grantId, presentedGen)
+  const stepped = refreshOAuthToken(oauthState, grantId, presentedGen)
   try tx.query("UPDATE feed_oauth_tokens SET spent_at = $2 WHERE token_hash = $1", [tokenHash, now])
   try tx.query("UPDATE feed_agent_grants SET last_used_at = $2 WHERE grant_id = $1", [grantId, now])
   const tokenResp = try mintOAuthTokenPairInTx(tx, {
@@ -1057,7 +1176,21 @@ export effect function startDeviceAuthorization(input: {
   readonly scope?: string | undefined
   readonly resource?: string | undefined
   readonly origin: string
+  readonly ipAddress?: string | undefined
+  readonly digestKey?: string | undefined
 }): DeviceAuthorizationResponse!(AuthFailure | StoreFailure)!Store {
+  if (input.ipAddress !== undefined && input.digestKey !== undefined && input.digestKey.trim() !== "") {
+    checkOAuthEndpointRateLimit({
+      endpoint: "device_code",
+      ipAddress: input.ipAddress,
+      digestKey: input.digestKey
+    }) catch effect (err) => {
+      if (err instanceof RateLimited) {
+        throw new AuthFailure({ code: "rate_limited", message: err.message, status: 429 })
+      }
+      throw err
+    }
+  }
   const clientId = input.clientId.trim()
   if (clientId === "") {
     throw new AuthFailure({ code: "invalid_client", message: "client_id is required.", status: 400 })
@@ -1067,7 +1200,7 @@ export effect function startDeviceAuthorization(input: {
   if (!isAllowedResource(resource, baseOrigin)) {
     throw new AuthFailure({ code: "invalid_target", message: "Resource must match this MCP server.", status: 400 })
   }
-  const { scopeSet, scopeString } = try parseAgentScopes(input.scope, true)
+  const { scopeSet, scopeString } = try parseAgentScopes(input.scope, input.scope === undefined)
   const store = try Store
   const now = try Clock.currentTimeMillis
   const deviceCode = `feed_dev_${randomBase64Url(24)}`
@@ -1075,6 +1208,10 @@ export effect function startDeviceAuthorization(input: {
   const verificationUri = `${baseOrigin}/link`
   const expiresAt = now + deviceCodeLifetimeMs
   return try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      "DELETE FROM feed_device_codes WHERE expires_at <= $1 OR status IN ('consumed', 'denied')",
+      [now]
+    )
     const clientRows = try tx.query(
       "SELECT client_id, client_name FROM feed_oauth_clients WHERE client_id = $1",
       [clientId]
@@ -1086,7 +1223,7 @@ export effect function startDeviceAuthorization(input: {
     let userCode = ""
     let inserted = false
     for (let attempt = 0; attempt < 5; attempt++) {
-      const candidate = `FEED-${randomFourDigits()}`
+      const candidate = randomDeviceUserCode()
       const oauthState: OAuthState = {
         ...initial,
         now,
@@ -1106,7 +1243,7 @@ export effect function startDeviceAuthorization(input: {
         `INSERT INTO feed_device_codes
            (device_code_hash, user_code, client_id, client_name, scope, status, account_id, expires_at, interval_sec)
          VALUES ($1, $2, $3, $4, $5, 'pending', NULL, $6, 5)
-         ON CONFLICT (user_code) DO NOTHING
+         ON CONFLICT (user_code) WHERE status = 'pending' DO NOTHING
          RETURNING user_code`,
         [deviceCodeHash, candidate, clientId, clientName, scopeString, expiresAt]
       )
@@ -1130,6 +1267,45 @@ export effect function startDeviceAuthorization(input: {
   })
 }
 
+export effect function lookupDeviceCodeForUser(userCodeRaw: string): DeviceCodeLookupResult!(AuthFailure | StoreFailure)!Store {
+  const userCode = userCodeRaw.trim().toUpperCase()
+  if (userCode === "") {
+    throw new AuthFailure({ code: "invalid_user_code", message: "Enter a valid pairing code.", status: 400 })
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT user_code, client_id, client_name, scope, status, expires_at
+       FROM feed_device_codes
+       WHERE user_code = $1
+       ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, expires_at DESC
+       LIMIT 1`,
+      [userCode]
+    )
+    const row = rows[0]
+    if (row === undefined) {
+      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code not found.", status: 404 })
+    }
+    const expiresAt = toInt(row.expires_at)
+    if (now >= expiresAt) {
+      throw new AuthFailure({ code: "expired_token", message: "Pairing code expired.", status: 400 })
+    }
+    if (toText(row.status) !== "pending") {
+      throw new AuthFailure({ code: "invalid_user_code", message: "Pairing code has already been used.", status: 400 })
+    }
+    const { scopes } = try parseAgentScopes(toText(row.scope) ?? "", false)
+    return {
+      userCode: toText(row.user_code) ?? userCode,
+      clientId: toText(row.client_id) ?? "",
+      clientName: toText(row.client_name) ?? "",
+      scopes,
+      status: "pending" as const,
+      expiresAt
+    }
+  })
+}
+
 export effect function approveDeviceAuthorization(input: {
   readonly accountId: string
   readonly userCode: string
@@ -1144,7 +1320,11 @@ export effect function approveDeviceAuthorization(input: {
   const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
-      "SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at FROM feed_device_codes WHERE user_code = $1 FOR UPDATE",
+      `SELECT device_code_hash, user_code, client_id, client_name, scope, status, expires_at
+       FROM feed_device_codes
+       WHERE user_code = $1
+       ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE 1 END, expires_at DESC
+       LIMIT 1 FOR UPDATE`,
       [userCode]
     )
     const row = rows[0]
@@ -1168,7 +1348,10 @@ export effect function approveDeviceAuthorization(input: {
       return { approved: false, userCode, clientId, clientName }
     }
     try ensureEligibleAccountInTx(tx, input.accountId)
-    const { scopes, scopeSet, scopeString } = try parseAgentScopes(input.scopes ?? (toText(row.scope) ?? ""), true)
+    const { scopes, scopeSet, scopeString } = try parseAgentScopes(
+      input.scopes !== undefined ? input.scopes : (toText(row.scope) ?? ""),
+      false
+    )
     const oauthState: OAuthState = {
       ...initial,
       now,
