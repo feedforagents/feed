@@ -1,4 +1,4 @@
-// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
+// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { hydrateAuth } from "../src/web/store-auth.ts";
+import type { ViewerSession } from "../src/web/types.ts";
 
 const opened: Root[] = [];
 const predictionBuyBodies: string[] = [];
@@ -16,6 +17,26 @@ const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
 const liveEventSources: EventTarget[] = [];
 let profileShouldFail = false;
 let profileShould404 = false;
+let explorePosts: typeof SAMPLE_POSTS = [];
+const fetchPaths: string[] = [];
+const POST_DELETED_VIEWER: ViewerSession = {
+  accountId: "ailon-musk",
+  handle: "ailonmusk",
+  displayName: "AIlon Musk",
+  bio: "",
+  avatarUrl: null,
+  bannerUrl: null,
+  phoneLast2: null,
+  phoneVerifiedAt: null,
+  emailMasked: null,
+  emailVerifiedAt: null,
+  uiMode: "game",
+  balanceCents: 0,
+  startingGrantCents: 0,
+  isAdmin: false,
+  isReviewer: false,
+  agentGrant: null,
+};
 
 const SAMPLE_POSTS = [
   {
@@ -271,6 +292,8 @@ function installMockNetwork(
   const requestedReplies = new Set<string>();
   profileShouldFail = false;
   profileShould404 = false;
+  explorePosts = [];
+  fetchPaths.length = 0;
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -284,8 +307,8 @@ function installMockNetwork(
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
+    fetchPaths.push(path);
     if (path === "/api/auth/logout") {
-      signedIn = false;
       return json({ ok: true });
     }
     if (path === "/api/auth/reviewer/login") {
@@ -537,7 +560,14 @@ function installMockNetwork(
         ],
       });
     }
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+    if (path === "/api/explore") {
+      const query = url.searchParams.get("q") ?? "";
+      return json({
+        trending: [],
+        articles: [],
+        search: { posts: query === "" ? [] : explorePosts, accounts: [], actors: [], organizations: [], tags: [] },
+      });
+    }
     if (path === "/api/leaderboard") {
       const isChars = url.searchParams.get("scope") === "characters" || url.searchParams.get("filter") === "npcs";
       const scope = isChars ? "characters" : "players";
@@ -1526,4 +1556,70 @@ it('Stale notifications response is dropped after mark all read', async () => {
   expect(getStoreSnapshot().unreadNotifications).toBe(0);
   expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([true]);
   expect(getStoreSnapshot().notificationsLoading).toBe(false);
+});
+
+it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  installMockNetwork();
+  explorePosts = [SAMPLE_POSTS[0]];
+  await renderApp();
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+  const dispatchPostDeletedAndExpectGone = async () => {
+    liveEventSources[0].dispatchEvent(
+      new MessageEvent("post.deleted", {
+        data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
+      }),
+    );
+    await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+  };
+  const feedFetchesBefore = fetchPaths.filter((path) => path === "/api/feed").length;
+  await dispatchPostDeletedAndExpectGone();
+  expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedFetchesBefore);
+  await act(async () => {
+    await storeActions.navigate("/explore");
+    await storeActions.loadExplore("XTRPC");
+  });
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+
+  act(() => {
+    setStoreState({ viewer: POST_DELETED_VIEWER, profileHandle: "ailonmusk" });
+  });
+  await act(async () => {
+    await storeActions.loadProfile("ailonmusk");
+  });
+  const loaded = getStoreSnapshot().profileBundle;
+  expect(loaded?.posts?.length).toBe(1);
+  expect(loaded?.posts[0]?.card.id).toBe(SAMPLE_POSTS[0].id);
+  const firstPost = loaded?.posts[0];
+  if (firstPost !== undefined) {
+    const secondPost = { ...firstPost, card: { ...firstPost.card, id: "browser-post-2" } };
+    act(() => {
+      const bundle = getStoreSnapshot().profileBundle;
+      if (bundle !== null) {
+        setStoreState({ profileBundle: { ...bundle, posts: [...bundle.posts, secondPost] } });
+      }
+    });
+  }
+  expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(2);
+
+  const fetchCallsBefore = fetchPaths.length;
+  await dispatchPostDeletedAndExpectGone();
+  expect(getStoreSnapshot().profileBundle).not.toBeNull();
+  expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
+  expect(fetchPaths.length).toBe(fetchCallsBefore);
+
+  liveEventSources[0].dispatchEvent(
+    new MessageEvent("post.created", {
+      data: JSON.stringify({
+        type: "post.created",
+        postId: "browser-post-2",
+        authorId: "ailonmusk",
+        authorKind: "npc",
+        replyToPostId: null,
+        quotePostId: null,
+        createdAt: Date.now(),
+      }),
+    }),
+  );
+  expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
+  expect(fetchPaths.length).toBe(fetchCallsBefore);
 });
