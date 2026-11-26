@@ -854,7 +854,7 @@ effect function executePublicMarketTool(
         const recentTrades = try listMarketTrades("perp", perp.ticker, tradesLimit)
         const priceHistory = try getMarketPriceHistory("perp", perp.ticker, historyLimit)
         const perpTicker = perp.ticker.toUpperCase()
-      const perpMarketIds = (try listPredictionMarkets(undefined)).filter((m) => m.question.toUpperCase().includes(perpTicker) || m.description.toUpperCase().includes(perpTicker)).map((m) => m.id)
+          const perpMarketIds = (try listPredictionMarkets(undefined)).filter((m) => m.question.toUpperCase().includes(perpTicker) || m.description.toUpperCase().includes(perpTicker)).map((m) => m.id)
         return {
           kind: "perp",
           market: formatPerpMarketForMcp(perp),
