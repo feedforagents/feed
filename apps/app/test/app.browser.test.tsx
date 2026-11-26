@@ -202,12 +202,23 @@ const SAMPLE_TRADES = [
   },
 ];
 
-function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
+function profilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?: string } = {}) {
   const heldHistory = new Map<string, Array<() => void>>();
   const requestedHistoryRanges = new Set<string>();
   const heldMarkets: Array<() => void> = [];
   let marketsHeld = false;
   let marketsRequestedCount = 0;
+  const heldTrades = new Map<string, Array<(items: unknown[]) => void>>();
+  const requestedTrades = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -361,8 +372,21 @@ function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
       return json({ posts: SAMPLE_POSTS, nextCursor: null });
     }
     if (path.endsWith("/trades")) {
+      if (path.startsWith("/api/users/")) {
+        const handle = decodeURIComponent(path.slice("/api/users/".length, path.length - "/trades".length));
+        if (options.holdTradesFor === handle) {
+          requestedTrades.add(handle);
+          return new Promise<Response>((resolve) => {
+            const pending = heldTrades.get(handle) ?? [];
+            pending.push((items) => resolve(Response.json({ trades: items })));
+            heldTrades.set(handle, pending);
+          });
+        }
+      }
       return json({ trades: SAMPLE_TRADES });
     }
+    if (path === "/api/users/alice") return json(profilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
     if (path.startsWith("/api/users/")) {
       const handle = decodeURIComponent(path.slice("/api/users/".length));
       return json({
@@ -465,6 +489,10 @@ function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
       if (!source) throw new Error("no EventSource created yet");
       source.dispatchEvent(new MessageEvent(type, { data }));
     },
+    tradesRequested: (handle: string) => requestedTrades.has(handle),
+    releaseTrades: (handle: string, items: unknown[]) => {
+      for (const release of heldTrades.get(handle)?.splice(0) ?? []) release(items);
+    },
   };
 }
 
@@ -507,7 +535,6 @@ async function signInAsReviewer() {
   await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
 }
-
 it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   await mountApp();
 
@@ -705,4 +732,30 @@ it('Market refresh in flight loads the newly selected market (spec/markets/predi
   await act(() => Promise.resolve());
   expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(3333);
   expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+});
+
+it('Late trades never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdTradesFor: "alice" });
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => Promise.resolve());
+  expect(network.tradesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.tradesRequested("bob")).toBe(false);
+
+  network.releaseTrades("alice", [{ ...SAMPLE_TRADES[0], id: "alice-trade-1" }]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileTrades).toEqual([]);
+  expect(getStoreSnapshot().profileTradesLoading).toBe(false);
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileTrades.map((t) => t.id)).toEqual(["trade-1"]);
 });
