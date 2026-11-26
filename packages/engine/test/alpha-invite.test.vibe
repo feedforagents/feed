@@ -1,0 +1,148 @@
+// spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/npcLoop.md, "Human social engagement unlocks eligibility for private alpha-group invites"; spec/engine/npcLoop.md, "Only NPC actors execute spot trades (moving the index price) and alpha invites"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/social/messaging.md, "Group and NPC alpha-group invites require active membership and exclude blocked or already-invited targets"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import {
+  createPost,
+  deletePost,
+  leaveGroupChat,
+  likePost,
+  listPendingGroupInvites,
+  repostPost,
+  respondAlphaInvite,
+} from "@repo/social"
+import { TestClock } from "effect/testing"
+import { executeNpcDecision, findEligibleAlphaTarget } from "../src/index.vibe"
+
+effect function insertTestHuman(accountId: string, handle: string, displayName: string, nowMs: number) {
+  const store = try Store
+  try store.transaction((tx: Tx) =>
+    tx.query(
+      `INSERT INTO feed_accounts (account_id, handle, display_name, balance_cents, starting_grant_cents, created_at, updated_at)
+       VALUES ($1, $2, $3, 10000, 10000, $4, $4)`,
+      [accountId, handle, displayName, nowMs],
+    ),
+  )
+}
+
+it.effect('Alpha-invite target selection ignores deleted NPC posts across likes, reposts, and replies, skips direct alpha-chat members, and preserves one-invite-per-NPC history (spec/engine/npcLoop.md, "Human social engagement unlocks eligibility for private alpha-group invites"; spec/engine/npcLoop.md, "Only NPC actors execute spot trades (moving the index price) and alpha invites"; spec/social/messaging.md, "Group and NPC alpha-group invites require active membership and exclude blocked or already-invited targets"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', () => scoped(effect {
+  const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
+  try TestClock.setTime(liveNow)
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    try seedFeedWorld()
+
+    const actorId = "sam-ailtman"
+    const deletedLikesUser = "alpha-1-deleted-likes"
+    const deletedRepostsUser = "alpha-2-deleted-reposts"
+    const deletedRepliesUser = "alpha-3-deleted-replies"
+    const directMemberUser = "alpha-4-direct-member"
+    const firstEligibleUser = "alpha-5-first-eligible"
+    const secondEligibleUser = "alpha-6-second-eligible"
+
+    try insertTestHuman(deletedLikesUser, "dellikes", "Deleted Likes Reader", liveNow)
+    try insertTestHuman(deletedRepostsUser, "delreposts", "Deleted Reposts Reader", liveNow)
+    try insertTestHuman(deletedRepliesUser, "delreplies", "Deleted Replies Reader", liveNow)
+    try insertTestHuman(directMemberUser, "directmember", "Direct Alpha Member", liveNow)
+    try insertTestHuman(firstEligibleUser, "firstelig", "First Eligible Reader", liveNow)
+    try insertTestHuman(secondEligibleUser, "secondelig", "Second Eligible Reader", liveNow)
+
+    const doomedPostA = try createPost({ authorId: actorId, authorKind: "npc", content: "Temporary thesis on $NVDAI supply" })
+    const doomedPostB = try createPost({ authorId: actorId, authorKind: "npc", content: "Temporary note on $OPENAGI demand" })
+
+    try likePost(deletedLikesUser, doomedPostA.id)
+    try likePost(deletedLikesUser, doomedPostB.id)
+
+    try repostPost(deletedRepostsUser, doomedPostA.id)
+    try repostPost(deletedRepostsUser, doomedPostB.id)
+
+    try createPost({
+      authorId: deletedRepliesUser,
+      authorKind: "user",
+      content: "Reply one on temporary thesis",
+      replyToPostId: doomedPostA.id,
+    })
+    try createPost({
+      authorId: deletedRepliesUser,
+      authorKind: "user",
+      content: "Reply two on temporary note",
+      replyToPostId: doomedPostB.id,
+    })
+
+    const beforeParentDelete = try findEligibleAlphaTarget(actorId, liveNow)
+    try deletePost(actorId, doomedPostA.id)
+    try deletePost(actorId, doomedPostB.id)
+    const afterParentDelete = try findEligibleAlphaTarget(actorId, liveNow)
+
+    const livePostA = try createPost({ authorId: actorId, authorKind: "npc", content: "Live desk signal one on $NVDAI" })
+    const livePostB = try createPost({ authorId: actorId, authorKind: "npc", content: "Live desk signal two on $OPENAGI" })
+
+    try likePost(directMemberUser, livePostA.id)
+    try likePost(directMemberUser, livePostB.id)
+    try repostPost(directMemberUser, livePostA.id)
+
+    try likePost(firstEligibleUser, livePostA.id)
+    try likePost(firstEligibleUser, livePostB.id)
+
+    try likePost(secondEligibleUser, livePostA.id)
+    try likePost(secondEligibleUser, livePostB.id)
+
+    const store = try Store
+    const targetAlphaChatId = try store.transaction(effect (tx: Tx) => {
+      const actorTier = toText((try tx.query("SELECT tier FROM feed_actors WHERE id = $1 LIMIT 1", [actorId]))[0]?.tier) ?? null
+      const existing = actorTier === null
+        ? try tx.query("SELECT id FROM feed_chats WHERE kind = 'npc_alpha' AND created_by = $1 ORDER BY created_at ASC LIMIT 1", [actorId])
+        : try tx.query("SELECT id FROM feed_chats WHERE kind = 'npc_alpha' AND created_by = $1 AND tier = $2 ORDER BY created_at ASC LIMIT 1", [actorId, actorTier])
+      const existingId = toText(existing[0]?.id)
+      const chatId = existingId && existingId.length > 0 ? existingId : "seeded-sam-alpha-chat"
+      if (!existingId) {
+        try tx.query(
+          `INSERT INTO feed_chats (id, kind, name, created_by, tier, created_at)
+           VALUES ($1, 'npc_alpha', 'Sam AIltman Alpha', $2, $3, 1)`,
+          [chatId, actorId, actorTier],
+        )
+        try tx.query(
+          `INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at)
+           VALUES ($1, $2, 'npc', 'owner', $3, $3)`,
+          [chatId, actorId, liveNow],
+        )
+      }
+      try tx.query(
+        `INSERT INTO feed_chat_members (chat_id, member_id, member_kind, role, joined_at, last_read_at)
+         VALUES ($1, $2, 'user', 'member', $3, $3)
+         ON CONFLICT (chat_id, member_id) DO NOTHING`,
+        [chatId, directMemberUser, liveNow],
+      )
+      return chatId
+    })
+
+    const skippedDirectTarget = try findEligibleAlphaTarget(actorId, liveNow)
+    const firstInviteAction = try executeNpcDecision(actorId, { kind: "INVITE_ALPHA" }, liveNow)
+    const afterPendingTarget = try findEligibleAlphaTarget(actorId, liveNow)
+    const firstPending = try listPendingGroupInvites(firstEligibleUser, "npc_alpha")
+    const firstInvite = firstPending[0]
+    try Effect.try(() => {
+      assert.isDefined(firstInvite)
+    })
+    try respondAlphaInvite({ inviteId: firstInvite!.id, accountId: firstEligibleUser, accept: true })
+    const leftRes = try leaveGroupChat(firstEligibleUser, firstInvite!.chatId)
+    const afterAcceptedLeaveTarget = try findEligibleAlphaTarget(actorId, liveNow)
+    const secondInviteAction = try executeNpcDecision(actorId, { kind: "INVITE_ALPHA" }, liveNow)
+    const afterSecondInviteTarget = try findEligibleAlphaTarget(actorId, liveNow)
+
+    try Effect.try(() => {
+      assert.strictEqual(firstInvite!.chatId, targetAlphaChatId)
+      assert.strictEqual(beforeParentDelete, deletedLikesUser)
+      assert.isNull(afterParentDelete)
+      assert.strictEqual(skippedDirectTarget, firstEligibleUser)
+      assert.strictEqual(firstInviteAction.success, true)
+      assert.strictEqual(toText((firstInviteAction.data as Record<string, unknown> | undefined)?.targetAccountId), firstEligibleUser)
+      assert.strictEqual(afterPendingTarget, secondEligibleUser)
+      assert.strictEqual(leftRes.left, true)
+      assert.strictEqual(afterAcceptedLeaveTarget, secondEligibleUser)
+      assert.strictEqual(secondInviteAction.success, true)
+      assert.strictEqual(toText((secondInviteAction.data as Record<string, unknown> | undefined)?.targetAccountId), secondEligibleUser)
+      assert.isNull(afterSecondInviteTarget)
+    })
+  }
+}), 180_000)

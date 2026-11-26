@@ -1,4 +1,4 @@
-// spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"
+// spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/npcLoop.md, "Human social engagement unlocks eligibility for private alpha-group invites"; spec/engine/npcLoop.md, "Only NPC actors execute spot trades (moving the index price) and alpha invites"; spec/social/messaging.md, "Group and NPC alpha-group invites require active membership and exclude blocked or already-invited targets"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"
 import {
   AgentRuntime,
   createCharacter,
@@ -428,7 +428,16 @@ function affiliatedKeywordsForActor(actorId: string): ReadonlyArray<string> {
   return [...words]
 }
 
-effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string, nowMs: number): (string | null)!StoreFailure {
+effect function findEligibleAlphaTargetTx(
+  tx: Tx,
+  actorId: string,
+  nowMs: number,
+  tierOverride?: string,
+): (string | null)!StoreFailure {
+  const rawTier = tierOverride !== undefined
+    ? tierOverride
+    : toText((try tx.query("SELECT tier FROM feed_actors WHERE id = $1 LIMIT 1", [actorId]))[0]?.tier)
+  const actorTier = rawTier && rawTier.trim().length > 0 ? rawTier.trim() : null
   const affiliatedTickers = affiliatedTickersForActor(actorId)
   const keywords = affiliatedKeywordsForActor(actorId)
   const matchedMarkets = keywords.length > 0
@@ -446,17 +455,17 @@ effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string, nowMs: number
        SELECT l.account_id AS account_id, 1 AS score
        FROM feed_post_likes l
        JOIN feed_posts p ON p.id = l.post_id
-       WHERE p.author_id = $1 AND p.author_kind = 'npc'
+       WHERE p.author_id = $1 AND p.author_kind = 'npc' AND p.deleted_at IS NULL
        UNION ALL
        SELECT r.account_id AS account_id, 1 AS score
        FROM feed_post_reposts r
        JOIN feed_posts p ON p.id = r.post_id
-       WHERE p.author_id = $1 AND p.author_kind = 'npc'
+       WHERE p.author_id = $1 AND p.author_kind = 'npc' AND p.deleted_at IS NULL
        UNION ALL
        SELECT reply.author_id AS account_id, 1 AS score
        FROM feed_posts reply
        JOIN feed_posts p ON p.id = reply.reply_to_post_id
-       WHERE p.author_id = $1 AND p.author_kind = 'npc' AND reply.author_kind = 'user' AND reply.deleted_at IS NULL
+       WHERE p.author_id = $1 AND p.author_kind = 'npc' AND p.deleted_at IS NULL AND reply.author_kind = 'user' AND reply.deleted_at IS NULL
        UNION ALL
        SELECT t.trader_id AS account_id, 1 AS score
        FROM feed_trades t
@@ -468,6 +477,14 @@ effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string, nowMs: number
      ) eng
      JOIN feed_accounts a ON a.account_id = eng.account_id
      WHERE NOT EXISTS (
+       SELECT 1 FROM feed_chat_members cm
+       JOIN feed_chats c ON c.id = cm.chat_id
+       WHERE c.kind = 'npc_alpha'
+         AND c.created_by = $1
+         AND ($6::text IS NULL OR c.tier = $6)
+         AND cm.member_id = eng.account_id
+     )
+     AND NOT EXISTS (
        SELECT 1 FROM feed_group_invites gi
        WHERE gi.invited_account_id = eng.account_id AND gi.invited_by_id = $1 AND gi.status IN ('pending', 'accepted')
      )
@@ -484,7 +501,7 @@ effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string, nowMs: number
      HAVING SUM(eng.score) >= $2
      ORDER BY engagement_score DESC, eng.account_id ASC
      LIMIT 1`,
-    [actorId, minAlphaEngagement, nowMs, affiliatedTickers, matchedMarkets],
+    [actorId, minAlphaEngagement, nowMs, affiliatedTickers, matchedMarkets, actorTier],
   )
   return rows.length > 0 ? (toText(rows[0]?.account_id) ?? null) : null
 }
@@ -689,7 +706,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
     }),
     wrap("INVITE_ALPHA", "Invite a qualifying engaged human user to NPC alpha group", effect () => {
       const store = try Store
-      const targetAccountId = try store.transaction(effect (tx: Tx) => try findEligibleAlphaTargetTx(tx, actor.id, nowMs))
+      const targetAccountId = try store.transaction(effect (tx: Tx) => try findEligibleAlphaTargetTx(tx, actor.id, nowMs, actor.tier))
       if (!targetAccountId) {
         return { success: false, text: "No human user has reached engagement threshold." }
       }
