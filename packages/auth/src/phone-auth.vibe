@@ -759,7 +759,24 @@ effect function sendPhoneChallenge(input: {
     : undefined
   const store = try Store
   const now = try Clock.currentTimeMillis
+  const challengeId = newUuid()
+  const issuedCode = input.config.smsMode === "loopback" ? randomSixDigitCode() : "000000"
+  const codeDigest = input.config.smsMode === "loopback"
+    ? try hmacSha256Hex(input.config.digestKey, `${challengeId}:${issuedCode}`)
+    : try hmacSha256Hex(input.config.digestKey, `${challengeId}:twilio`)
+  const expiresAt = now + codeLifetimeMs
+  const stateJson = JSON.stringify({
+    purpose: input.purposeKey === "sign-in" ? "feed_phone_signin" : "feed_phone_change",
+    attempts: 0,
+    maxAttempts: maxCodeAttempts,
+    phoneLast2: last2
+  })
   try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:sms-send:${phoneHash}`])
+    try tx.query(
+      "DELETE FROM code_challenges WHERE method = 'sms' AND destination_digest = $1 AND phase = 'unsent' AND expires_at <= $2",
+      [phoneHash, now]
+    )
     const cooldownRows = try tx.query(
       "SELECT expires_at FROM feed_phone_cooldowns WHERE phone_hash = $1",
       [phoneHash]
@@ -840,46 +857,56 @@ effect function sendPhoneChallenge(input: {
         now
       })
     }
-  })
-  if (input.config.smsMode === "twilio") {
-    const lookup = try checkTwilioLookup(normalizedPhone, input.config)
-    if (normalizedPhone.startsWith("+1") && lookup.countryCode !== null && lookup.countryCode !== "US" && lookup.countryCode !== "CA") {
-      throw new AuthFailure({ code: "country_not_allowed", message: "Phone country is not supported yet.", status: 400 })
-    }
-    try sendTwilioVerify(normalizedPhone, input.config)
-  }
-  const challengeId = newUuid()
-  const issuedCode = input.config.smsMode === "loopback" ? randomSixDigitCode() : "000000"
-  const sendNow = try Clock.currentTimeMillis
-  if (input.purposeKey === "feed_phone_change") {
-    requestPhoneChangeCode({ ...initial, status: "AccountActive", phoneHash, now: sendNow }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true, input.oldPhoneVerifiedOrRecovery, true)
-  } else {
-    requestSignInCode({ ...initial, now: sendNow }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true)
-  }
-  const codeDigest = input.config.smsMode === "loopback"
-    ? try hmacSha256Hex(input.config.digestKey, `${challengeId}:${issuedCode}`)
-    : try hmacSha256Hex(input.config.digestKey, `${challengeId}:twilio`)
-  const expiresAt = sendNow + codeLifetimeMs
-  const stateJson = JSON.stringify({
-    purpose: input.purposeKey === "sign-in" ? "feed_phone_signin" : "feed_phone_change",
-    attempts: 0,
-    maxAttempts: maxCodeAttempts,
-    phoneLast2: last2
-  })
-  try store.transaction(effect (tx: Tx) => {
-    try tx.query(
-      "UPDATE code_challenges SET phase = 'superseded', revision = revision + 1 WHERE method = 'sms' AND purpose_key = $1 AND destination_digest = $2 AND phase = 'open'",
-      [input.purposeKey, phoneHash]
-    )
     try tx.query(
       `INSERT INTO code_challenges
          (key, state, revision, method, purpose_key, user_id, client_id, destination_digest, code_digest, code_challenge, phase, sent_at, expires_at)
-       VALUES ($1, $2::jsonb, 1, 'sms', $3, $4, 'feed-web', $5, $6, '', 'open', $7, $8)`,
-      [challengeId, stateJson, input.purposeKey, input.accountId, phoneHash, codeDigest, sendNow, expiresAt]
+       VALUES ($1, $2::jsonb, 1, 'sms', $3, $4, 'feed-web', $5, $6, '', 'unsent', $7, $8)`,
+      [challengeId, stateJson, input.purposeKey, input.accountId, phoneHash, codeDigest, now, expiresAt]
     )
   })
+  if (input.config.smsMode === "twilio") {
+    effect {
+      const lookup = try checkTwilioLookup(normalizedPhone, input.config)
+      if (normalizedPhone.startsWith("+1") && lookup.countryCode !== null && lookup.countryCode !== "US" && lookup.countryCode !== "CA") {
+        throw new AuthFailure({ code: "country_not_allowed", message: "Phone country is not supported yet.", status: 400 })
+      }
+      try sendTwilioVerify(normalizedPhone, input.config)
+    } catch effect (err) => {
+      store.transaction((tx: Tx) =>
+        tx.query("DELETE FROM code_challenges WHERE key = $1 AND phase = 'unsent'", [challengeId])
+      ) catch effect (_deleteError) => {
+        return undefined
+      }
+      throw err
+    }
+  }
+  if (input.purposeKey === "feed_phone_change") {
+    requestPhoneChangeCode({ ...initial, status: "AccountActive", phoneHash, now }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true, input.oldPhoneVerifiedOrRecovery, true)
+  } else {
+    requestSignInCode({ ...initial, now }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true)
+  }
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:sms-send:${phoneHash}`])
+    try tx.query(
+      "UPDATE code_challenges SET phase = 'superseded', revision = revision + 1 WHERE method = 'sms' AND purpose_key = $1 AND destination_digest = $2 AND phase = 'open' AND key <> $3 AND sent_at <= $4",
+      [input.purposeKey, phoneHash, challengeId, now]
+    )
+    const flipped = try tx.query(
+      `UPDATE code_challenges SET phase = 'open', revision = revision + 1
+       WHERE key = $1 AND phase = 'unsent'
+         AND NOT EXISTS (
+           SELECT 1 FROM code_challenges newer
+           WHERE newer.method = 'sms' AND newer.purpose_key = $2 AND newer.destination_digest = $3
+             AND newer.key <> $1 AND newer.sent_at > $4 AND newer.phase IN ('open', 'unsent')
+         ) RETURNING key`,
+      [challengeId, input.purposeKey, phoneHash, now]
+    )
+    if (flipped.length === 0) {
+      throw new AuthFailure({ code: "challenge_not_found", message: "Verification challenge is no longer active.", status: 401 })
+    }
+  })
   if (input.config.smsMode === "loopback") {
-    pruneLoopbackCodes(sendNow)
+    pruneLoopbackCodes(now)
     loopbackCodes.set(normalizedPhone, { code: issuedCode, expiresAt })
   }
   return {
@@ -887,7 +914,7 @@ effect function sendPhoneChallenge(input: {
     phoneHash,
     last2,
     expiresAt,
-    resendAvailableAt: sendNow + resendGapMs
+    resendAvailableAt: now + resendGapMs
   }
 }
 
