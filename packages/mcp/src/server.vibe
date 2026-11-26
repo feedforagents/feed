@@ -853,13 +853,15 @@ effect function executePublicMarketTool(
         const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perp.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
         const recentTrades = try listMarketTrades("perp", perp.ticker, tradesLimit)
         const priceHistory = try getMarketPriceHistory("perp", perp.ticker, historyLimit)
+        const perpTicker = perp.ticker.toUpperCase()
+      const perpMarketIds = (try listPredictionMarkets(undefined)).filter((m) => m.question.toUpperCase().includes(perpTicker) || m.description.toUpperCase().includes(perpTicker)).map((m) => m.id)
         return {
           kind: "perp",
           market: formatPerpMarketForMcp(perp),
           recentTrades: recentTrades.map(formatMarketTradeForMcp),
           priceHistory: priceHistory.map(formatPriceHistoryPointForMcp),
           relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
-          relatedArticles: []
+          relatedArticles: articles.filter((a) => a.relatedMarketId !== null && perpMarketIds.includes(a.relatedMarketId)),
         }
       }
       const maybePred = getPredictionMarket(marketId) catch effect (err) => {
@@ -890,13 +892,15 @@ effect function executePublicMarketTool(
       const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perpFallback.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
       const recentTrades = try listMarketTrades("perp", perpFallback.ticker, tradesLimit)
       const priceHistory = try getMarketPriceHistory("perp", perpFallback.ticker, historyLimit)
+      const perpFallbackTicker = perpFallback.ticker.toUpperCase()
+      const perpFallbackMarketIds = (try listPredictionMarkets(undefined)).filter((m) => m.question.toUpperCase().includes(perpFallbackTicker) || m.description.toUpperCase().includes(perpFallbackTicker)).map((m) => m.id)
       return {
         kind: "perp",
         market: formatPerpMarketForMcp(perpFallback),
         recentTrades: recentTrades.map(formatMarketTradeForMcp),
         priceHistory: priceHistory.map(formatPriceHistoryPointForMcp),
         relatedPosts: relatedPosts.items.map((p) => formatPostForMcp(p, viewer.playMode)),
-        relatedArticles: []
+        relatedArticles: articles.filter((a) => a.relatedMarketId !== null && perpFallbackMarketIds.includes(a.relatedMarketId)),
       }
     }
     case "get_leaderboard": {
