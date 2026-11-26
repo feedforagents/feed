@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { AtSign, CheckCircle2, Heart, MessageSquare, TrendingUp, UserPlus, Users } from "lucide-react";
+import { AtSign, CheckCircle2, Heart, MessageCircle, TrendingUp, UserPlus, Users } from "lucide-react";
 import { cn, focusRing, inactive } from "../lib/cn.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Button } from "./Button.tsx";
@@ -52,16 +52,16 @@ export type NotificationRowProps = Omit<ComponentProps<"div">, "children"> & {
 };
 
 const iconMap: Record<NotificationKind, { Icon: typeof Heart; tone: string }> = {
-  SocialReply: { Icon: MessageSquare, tone: "text-primary" },
+  SocialReply: { Icon: MessageCircle, tone: "text-primary" },
   SocialMention: { Icon: AtSign, tone: "text-primary" },
   SocialLike: { Icon: Heart, tone: "text-destructive" },
-  SocialFollow: { Icon: UserPlus, tone: "text-info" },
-  GroupInvite: { Icon: Users, tone: "text-info" },
+  SocialFollow: { Icon: UserPlus, tone: "text-primary" },
+  GroupInvite: { Icon: Users, tone: "text-primary" },
   MarketResolved: { Icon: CheckCircle2, tone: "text-ok" },
   PnLDigest: { Icon: TrendingUp, tone: "text-ok" },
 };
 
-/** Single in-app notification row supporting social events, group invites, and market settlement alerts. */
+/** Flat hairline notification row supporting actor avatars, social events, group invites, and market settlement alerts. */
 export function NotificationRow({
   notification,
   onOpen,
@@ -74,24 +74,32 @@ export function NotificationRow({
 }: NotificationRowProps) {
   const { Icon, tone } = iconMap[notification.kind];
   const blocked = disabled || loading;
+  const hasActor = Boolean(notification.actorAvatarUrl || notification.actorName);
 
   return (
     <div
       className={cn(
-        "flex items-start gap-3 border-b border-border bg-card px-4 py-3.5 text-card-foreground",
-        !notification.read && "bg-accent/30",
+        "flex items-start gap-3 border-b border-border bg-background px-4 py-3.5 text-foreground transition-colors duration-fast hover:bg-muted/30",
+        !notification.read && "bg-feed-brand/5",
         className,
       )}
       {...props}
     >
-      <div className={cn("mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-muted", tone)}>
+      <div className={cn("mt-1 flex size-8 shrink-0 items-center justify-center rounded-full bg-muted", tone)}>
         <Icon aria-hidden className="size-4" />
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
-            {notification.actorName ? <Avatar name={notification.actorName} src={notification.actorAvatarUrl} size="xs" /> : null}
+          <div className="flex min-w-0 items-center gap-2.5">
+            {hasActor ? (
+              <Avatar
+                name={notification.actorName ?? notification.title}
+                src={notification.actorAvatarUrl}
+                seed={notification.actorHandle ?? notification.actorName}
+                size="sm"
+              />
+            ) : null}
             {onOpen ? (
               <button
                 type="button"
@@ -109,14 +117,14 @@ export function NotificationRow({
             <span className="text-xs text-muted-foreground">{notification.timestamp}</span>
             {!notification.read ? (
               <>
-                <span aria-hidden className="size-2 rounded-full bg-primary" />
+                <span aria-hidden className="size-2 rounded-full bg-feed-brand" />
                 <span className="sr-only">Unread</span>
               </>
             ) : null}
           </div>
         </div>
 
-        {notification.detail ? <p className="text-xs text-muted-foreground">{notification.detail}</p> : null}
+        {notification.detail ? <p className="text-sm text-muted-foreground">{notification.detail}</p> : null}
 
         {notification.kind === "GroupInvite" && notification.invitePending ? (
           <div className="flex items-center gap-2 pt-1">

@@ -118,6 +118,10 @@ pure val perpSizeCentsValues = Set(0, 1000, 5000, 10000)
 pure val leverageValues = Set(0, 1, 5, 20, 21)
 pure val deltaHoursValues = Set(-1, 1, 8, 16)
 pure val periodValues = Set(0, 1, 2, 3)
+pure val indexCentsValues = Set(100, 1000, 10000)
+pure val longOIValues = Set(0, 1000, 10000)
+pure val shortOIValues = Set(0, 1000, 10000)
+pure val mktValues = Set(initial)
 ```
 
 ### Account, margin, equity, and funding helpers
@@ -254,6 +258,8 @@ pure val eval_refuse_canTradeSpot = { spotSide: SpotBuy, spotAmount: 1000, by: P
 
 ### Opening a perp enforces the 20x leverage cap and updates only the mark premium
 
+Opening a perpetual adds the position's open interest first and fills the entry at the resulting `postOpenMark` price (adverse to the opener), so opening a position never generates instant unrealized profit from its own open-interest impact.
+
 ```quint
 pure def canOpenPerp(
   m: SpotPerpMarket,
@@ -287,6 +293,7 @@ pure def openPerp(
   val fee = canonicalTradingFee(perpSizeCents)
   val newLong = if (perpSide == Long) m.longOICents + perpSizeCents else m.longOICents
   val newShort = if (perpSide == Short) m.shortOICents + perpSizeCents else m.shortOICents
+  val postOpenMark = computeMarkPriceCents(m.indexPriceCents, newLong, newShort)
   val newPosId = m.nextPosId + 1
   val newPos: PerpPosition = {
     posId: newPosId,
@@ -295,7 +302,7 @@ pure def openPerp(
     sizeCents: perpSizeCents,
     leverage: leverage,
     marginCents: margin,
-    entryPriceCents: m.markPriceCents,
+    entryPriceCents: postOpenMark,
     openedPeriod: m.currentPeriod,
     lastFundingPeriod: m.currentPeriod,
     fundingPaidCents: 0,
@@ -305,7 +312,7 @@ pure def openPerp(
     nextPosId: newPosId,
     longOICents: newLong,
     shortOICents: newShort,
-    markPriceCents: computeMarkPriceCents(m.indexPriceCents, newLong, newShort),
+    markPriceCents: postOpenMark,
     feeLedgerCents: m.feeLedgerCents + fee,
     positions: m.positions.append(newPos),
     accounts: creditBalance(m.accounts, traderId, 0 - (margin + fee)),
@@ -322,7 +329,7 @@ pure val eval_refuse_canOpenPerp = {
 
 ### Closing a perp settles equity and canonical fees at mark price without touching spot
 
-Equity is computed at the mark price. The canonical fee is computed on the position size and collected up to the amount of positive equity.
+Closing removes the position's open interest first and settles equity at the resulting `postCloseMark` price (adverse to the closer), preventing a trader from harvesting their own open-interest premium. The canonical fee is computed on the position size and collected up to the amount of positive equity.
 
 ```quint
 pure def canClosePerp(m: SpotPerpMarket, traderId: str, by: Sender): bool =
@@ -330,18 +337,19 @@ pure def canClosePerp(m: SpotPerpMarket, traderId: str, by: Sender): bool =
 
 pure def closePerp(m: SpotPerpMarket, traderId: str, by: Sender): SpotPerpMarket =
   val pos = positionFor(m, traderId)
-  val gross = clampMin0(positionEquityAtMark(pos, m.markPriceCents))
-  val fee = canonicalTradingFee(pos.sizeCents)
-  val collectedFee = minInt(fee, gross)
-  val netCredit = clampMin0(gross - fee)
   val remaining = m.positions.select(p => p.owner != traderId)
   val newLong = sumLongOI(remaining)
   val newShort = sumShortOI(remaining)
+  val postCloseMark = computeMarkPriceCents(m.indexPriceCents, newLong, newShort)
+  val gross = clampMin0(positionEquityAtMark(pos, postCloseMark))
+  val fee = canonicalTradingFee(pos.sizeCents)
+  val collectedFee = minInt(fee, gross)
+  val netCredit = clampMin0(gross - fee)
   {
     ...m,
     longOICents: newLong,
     shortOICents: newShort,
-    markPriceCents: computeMarkPriceCents(m.indexPriceCents, newLong, newShort),
+    markPriceCents: postCloseMark,
     feeLedgerCents: m.feeLedgerCents + collectedFee,
     positions: remaining,
     accounts: creditBalance(m.accounts, traderId, netCredit),
@@ -395,15 +403,16 @@ pure def canLiquidate(m: SpotPerpMarket, traderId: str): bool =
 
 pure def liquidate(m: SpotPerpMarket, traderId: str): SpotPerpMarket =
   val pos = positionFor(m, traderId)
-  val payout = clampMin0(positionEquityAtMark(pos, m.markPriceCents))
   val remaining = m.positions.select(p => p.owner != traderId)
   val newLong = sumLongOI(remaining)
   val newShort = sumShortOI(remaining)
+  val postLiqMark = computeMarkPriceCents(m.indexPriceCents, newLong, newShort)
+  val payout = clampMin0(positionEquityAtMark(pos, postLiqMark))
   {
     ...m,
     longOICents: newLong,
     shortOICents: newShort,
-    markPriceCents: computeMarkPriceCents(m.indexPriceCents, newLong, newShort),
+    markPriceCents: postLiqMark,
     liquidationCount: m.liquidationCount + 1,
     positions: remaining,
     accounts: creditBalance(m.accounts, traderId, payout),
@@ -493,6 +502,66 @@ pure def stepFundingPeriodMonotonicAndCutoverGuarded(before: SpotPerpMarket, via
     q.posId == p.posId implies p.lastFundingPeriod >= q.lastFundingPeriod))
     and ((via == "accrueFunding" and after.lastFundingReqPeriod < after.cutoverPeriod) implies
       (after.positions == before.positions and after.fundingClaims == before.fundingClaims))
+
+pure def stepOpenFillsAtPostImpactMark(before: SpotPerpMarket, via: str, after: SpotPerpMarket): bool =
+  via == "openPerp" implies
+    after.positions.every(p => p.posId == after.nextPosId implies p.entryPriceCents == after.markPriceCents)
+```
+
+### Zero-time open and close round-trips on an unchanged index price strictly decrease trader cash
+
+Opening at the post-open mark and closing at the post-close mark ensures self-impact is always adverse, so a zero-time open-and-close round-trip on an unchanged spot index price cannot create risk-free profit and strictly reduces trader cash due to fees and adverse OI impact.
+
+```quint
+pure def lawPerpRoundTripStrictlyDecreasesCash(
+  indexCents: Cents,
+  longOI: Cents,
+  shortOI: Cents,
+  perpSide: PerpSide,
+  perpSizeCents: Cents,
+  leverage: int
+): bool =
+  val openLong = if (perpSide == Long) longOI + perpSizeCents else longOI
+  val openShort = if (perpSide == Short) shortOI + perpSizeCents else shortOI
+  val entryPrice = computeMarkPriceCents(indexCents, openLong, openShort)
+  val exitPrice = computeMarkPriceCents(indexCents, longOI, shortOI)
+  val margin = ceilDiv(perpSizeCents, leverage)
+  val openFee = canonicalTradingFee(perpSizeCents)
+  val pos: PerpPosition = {
+    posId: 1,
+    owner: "alice",
+    perpSide: perpSide,
+    sizeCents: perpSizeCents,
+    leverage: leverage,
+    marginCents: margin,
+    entryPriceCents: entryPrice,
+    openedPeriod: 0,
+    lastFundingPeriod: 0,
+    fundingPaidCents: 0,
+  }
+  val gross = clampMin0(positionEquityAtMark(pos, exitPrice))
+  val closeFee = canonicalTradingFee(perpSizeCents)
+  val netCredit = clampMin0(gross - closeFee)
+  (indexCents > 0 and longOI >= 0 and shortOI >= 0
+    and perpSizeCents >= MIN_ORDER_SIZE_CENTS
+    and leverage >= 1 and leverage <= MAX_LEVERAGE) implies
+    (netCredit < margin + openFee)
+
+pure def lawPerpMarketRoundTripStrictlyDecreasesCash(
+  mkt: SpotPerpMarket,
+  traderId: str,
+  perpSide: PerpSide,
+  perpSizeCents: Cents,
+  leverage: int,
+  by: Sender
+): bool =
+  val afterOpen = openPerp(mkt, traderId, perpSide, perpSizeCents, leverage, by)
+  val afterClose = closePerp(afterOpen, traderId, by)
+  (alwaysSpotAndPricesConsistent(mkt)
+    and alwaysOpenInterestMatchesPositions(mkt)
+    and alwaysPositionsWithin20xAndUnique(mkt)
+    and canOpenPerp(mkt, traderId, perpSide, perpSizeCents, leverage, by)) implies
+    (spotBalanceFor(afterClose, traderId) < spotBalanceFor(mkt, traderId))
 ```
 
 ### Reachable journeys cover NPC spot moving index, 20x player perps, 8h funding accrual, and mark-price liquidation

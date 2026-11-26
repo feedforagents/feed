@@ -1,20 +1,29 @@
 // spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/app/navigation.md, "Story: Browse public world content without a login wall"
-import { useId } from "react";
+import { useState } from "react";
 import {
-  Alert,
   AppShell,
-  Badge,
+  Avatar,
   Button,
-  Card,
-  CardContent,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+  FeedFullLogo,
+  FeedIcon,
   JoinSheet,
-  Label,
-  Switch,
+  ModeToggle,
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+  SheetTrigger,
+  ToastBanner,
+  ToastViewport,
+  type AppNavRoute,
   type UiMode,
   formatPts,
 } from "@repo/ui";
-import { initial as appInitial } from "../../gen/app.ts";
-import { useMachine as useAppMachine } from "../../gen/app.react.ts";
 import {
   type NavState,
   initial as navInitial,
@@ -22,20 +31,67 @@ import {
   visibleSurfaces,
 } from "../../gen/app__navigation.ts";
 import { useMachine as useNavMachine } from "../../gen/app__navigation.react.ts";
-import { initial as onboardingInitial } from "../../gen/app__onboarding.ts";
-import { useMachine as useOnboardingMachine } from "../../gen/app__onboarding.react.ts";
+import { GlobalDialogs } from "./GlobalDialogs.tsx";
+import {
+  HelpIcon,
+  LogOutIcon,
+  MonitorIcon,
+  MoonIcon,
+  MoreHorizontalIcon,
+  PenIcon,
+  SettingsIcon,
+  ShieldIcon,
+  SunIcon,
+  TrophyIcon,
+  UserIcon,
+  WalletIcon,
+  XIcon,
+} from "./icons.tsx";
+import { RightRail } from "./RightRail.tsx";
 import { toAppNavRoute } from "./routes.ts";
-import { AdminScreen, LinkScreen, OAuthConsentScreen } from "./screens/AuthScreens.tsx";
+import { ArticleDetailScreen } from "./screens/ArticleDetailScreen.tsx";
+import { AdminScreen, EmailMagicLinkScreen, LinkScreen, OAuthConsentScreen } from "./screens/AuthScreens.tsx";
 import { ChatsScreen } from "./screens/ChatsScreen.tsx";
 import { ExploreScreen } from "./screens/ExploreScreen.tsx";
 import { HomeScreen } from "./screens/HomeScreen.tsx";
 import { HowToPlayScreen } from "./screens/HowToPlayScreen.tsx";
+import { LeaderboardScreen, WalletScreen } from "./screens/GameScreens.tsx";
 import { MarketsScreen } from "./screens/MarketsScreen.tsx";
 import { NotificationsScreen } from "./screens/NotificationsScreen.tsx";
+import { PostDetailScreen } from "./screens/PostDetailScreen.tsx";
 import { ProfileScreen } from "./screens/ProfileScreen.tsx";
 import { SettingsScreen } from "./screens/SettingsScreen.tsx";
-import { currentUiMode, toSpecTab } from "./store-core.ts";
-import { appRuntime, navRuntime, onboardingRuntime, storeActions, useAppStore } from "./store.ts";
+import { currentUiMode, hasAtRiskOpenPositions, toSpecTab } from "./store-core.ts";
+import { navRuntime, storeActions, useAppStore } from "./store.ts";
+import type { ThemePreference } from "./types.ts";
+
+function ThemeIcon({ theme, className }: { readonly theme: ThemePreference; readonly className?: string }) {
+  if (theme === "light") return <SunIcon className={className} />;
+  if (theme === "system") return <MonitorIcon className={className} />;
+  return <MoonIcon className={className} />;
+}
+
+function themeLabel(theme: ThemePreference): string {
+  if (theme === "light") return "Light";
+  if (theme === "system") return "System";
+  return "Dark";
+}
+
+function RailComposeAction() {
+  return (
+    <div className="flex flex-col items-center lg:items-stretch">
+      <Button
+        shape="pill"
+        onClick={() => storeActions.openComposeDialog(null)}
+        aria-label="Post"
+        className="mt-1 h-11 w-11 p-0 font-bold lg:w-full lg:px-4"
+      >
+        <PenIcon className="size-5 lg:hidden" />
+        <span className="hidden lg:inline">Post</span>
+      </Button>
+    </div>
+  );
+}
 
 function RailModeControl({
   mode,
@@ -44,84 +100,279 @@ function RailModeControl({
   readonly mode: UiMode;
   readonly showAtRiskNotice: boolean;
 }) {
-  const switchId = useId();
-  const isSocial = mode === "SocialMode";
-
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border bg-card px-3 py-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <Label htmlFor={switchId} className="text-xs font-medium">
-          Social mode
-        </Label>
-        <Switch
-          id={switchId}
-          checked={isSocial}
-          onCheckedChange={(checked) => {
-            storeActions.toggleUiModeFromControl(checked ? "SocialMode" : "GameMode");
-          }}
-        />
-      </div>
+    <div className="flex flex-col gap-2">
+      <ModeToggle
+        compact
+        mode={mode}
+        hasAtRiskOpenPositions={showAtRiskNotice}
+        onModeChange={storeActions.toggleUiModeFromControl}
+      />
       {showAtRiskNotice ? (
-        <div className="flex items-center justify-between gap-2 border-t border-border pt-2 text-xs text-warn">
-          <span>Open positions at risk</span>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => storeActions.toggleUiModeFromControl("GameMode")}
-          >
-            Game
-          </Button>
-        </div>
+        <button
+          type="button"
+          onClick={() => storeActions.toggleUiModeFromControl("GameMode")}
+          className="flex items-center justify-between gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-1.5 text-left text-xs font-medium text-warn transition-colors hover:bg-warn/15"
+        >
+          <span>Open positions active</span>
+          <span className="font-semibold underline">Game</span>
+        </button>
       ) : null}
     </div>
   );
 }
 
-function HeaderActions({
+function RailUserMenu({
   mode,
-  handle,
-  isAdmin,
+  balancePts,
 }: {
   readonly mode: UiMode;
-  readonly handle: string | null;
-  readonly isAdmin: boolean;
+  readonly balancePts?: string;
 }) {
-  const nextMode: UiMode = mode === "SocialMode" ? "GameMode" : "SocialMode";
+  const s = useAppStore();
+  if (!s.viewer) return null;
 
   return (
-    <div className="flex items-center gap-2">
-      <Button
-        size="sm"
-        variant="ghost"
-        className="md:hidden"
-        onClick={() => storeActions.toggleUiModeFromControl(nextMode)}
-      >
-        {mode === "SocialMode" ? "Social" : "Game"}
-      </Button>
-      {handle ? (
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="Account menu"
+          className="flex w-full items-center justify-center gap-3 rounded-full p-2 text-left transition-colors duration-fast hover:bg-accent lg:justify-between lg:px-3"
         >
-          @{handle}
-        </Button>
-      ) : (
-        <Button
-          size="sm"
-          className="md:hidden"
-          onClick={() => storeActions.openJoinSheet("phone")}
+          <span className="flex min-w-0 items-center gap-2.5">
+            <Avatar
+              name={s.viewer.displayName}
+              src={s.viewer.avatarUrl ?? undefined}
+              seed={s.viewer.handle}
+              size="sm"
+            />
+            <span className="hidden min-w-0 flex-col lg:flex">
+              <span className="truncate text-sm font-bold text-foreground">{s.viewer.displayName}</span>
+              <span className="truncate text-xs text-muted-foreground">
+                @{s.viewer.handle}
+                {mode === "GameMode" && balancePts ? ` · ${balancePts}` : ""}
+              </span>
+            </span>
+          </span>
+          <MoreHorizontalIcon className="hidden size-4 shrink-0 text-muted-foreground lg:block" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="top" className="w-60">
+        <DropdownMenuItem onSelect={() => { void storeActions.navigate(`/u/${encodeURIComponent(s.viewer?.handle ?? "")}`); }}>
+          <UserIcon className="size-4" />
+          Profile (@{s.viewer.handle})
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => { void storeActions.navigate("/settings"); }}>
+          <SettingsIcon className="size-4" />
+          Settings
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => { void storeActions.navigate("/how-to-play"); }}>
+          <HelpIcon className="size-4" />
+          How to Play
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => storeActions.cycleTheme()}>
+          <ThemeIcon theme={s.theme} className="size-4" />
+          Theme: {themeLabel(s.theme)}
+        </DropdownMenuItem>
+        {s.viewer.isAdmin ? (
+          <DropdownMenuItem onSelect={() => { void storeActions.navigate("/admin"); }}>
+            <ShieldIcon className="size-4" />
+            Admin console
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem destructive onSelect={() => { void storeActions.logout(); }}>
+          <LogOutIcon className="size-4" />
+          Sign out @{s.viewer.handle}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function MobileDrawer({
+  mode,
+  balancePts,
+}: {
+  readonly mode: UiMode;
+  readonly balancePts?: string;
+}) {
+  const s = useAppStore();
+  const [open, setOpen] = useState(false);
+
+  const go = (path: string) => {
+    setOpen(false);
+    void storeActions.navigate(path);
+  };
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <button
+          type="button"
+          aria-label="Open navigation menu"
+          className="inline-flex items-center justify-center rounded-full focus-visible:outline-2 focus-visible:outline-ring"
         >
+          {s.viewer ? (
+            <Avatar
+              name={s.viewer.displayName}
+              src={s.viewer.avatarUrl ?? undefined}
+              seed={s.viewer.handle}
+              size="sm"
+            />
+          ) : (
+            <FeedIcon className="size-7 text-feed-brand" />
+          )}
+        </button>
+      </SheetTrigger>
+      <SheetContent side="left" className="gap-5 p-5">
+        <div className="flex flex-col gap-2">
+          <SheetTitle className="flex items-center gap-2.5">
+            {s.viewer ? (
+              <Avatar
+                name={s.viewer.displayName}
+                src={s.viewer.avatarUrl ?? undefined}
+                seed={s.viewer.handle}
+                size="md"
+              />
+            ) : (
+              <FeedFullLogo className="h-6 w-auto text-foreground" />
+            )}
+            {s.viewer ? (
+              <span className="min-w-0">
+                <span className="block truncate text-base font-bold">{s.viewer.displayName}</span>
+                <span className="block truncate text-xs font-normal text-muted-foreground">@{s.viewer.handle}</span>
+              </span>
+            ) : null}
+          </SheetTitle>
+          <SheetDescription className="sr-only">Account and navigation drawer</SheetDescription>
+          {s.viewer && mode === "GameMode" && balancePts ? (
+            <p className="font-mono text-sm font-semibold text-foreground tabular-nums">{balancePts}</p>
+          ) : null}
+        </div>
+
+        <nav aria-label="Account navigation" className="flex flex-col gap-1">
+          {s.viewer ? (
+            <button
+              type="button"
+              onClick={() => go(`/u/${encodeURIComponent(s.viewer?.handle ?? "")}`)}
+              className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-foreground hover:bg-accent"
+            >
+              <UserIcon className="size-4" />
+              Profile
+            </button>
+          ) : null}
+          {mode === "GameMode" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => go("/leaderboard")}
+                className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-foreground hover:bg-accent"
+              >
+                <TrophyIcon className="size-4" />
+                Leaderboard
+              </button>
+              <button
+                type="button"
+                onClick={() => go("/wallet")}
+                className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-foreground hover:bg-accent"
+              >
+                <WalletIcon className="size-4" />
+                Wallet
+              </button>
+            </>
+          ) : null}
+          {s.viewer ? (
+            <button
+              type="button"
+              onClick={() => go("/settings")}
+              className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-foreground hover:bg-accent"
+            >
+              <SettingsIcon className="size-4" />
+              Settings
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => go("/how-to-play")}
+            className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-foreground hover:bg-accent"
+          >
+            <HelpIcon className="size-4" />
+            How to Play
+          </button>
+          {s.viewer?.isAdmin ? (
+            <button
+              type="button"
+              onClick={() => go("/admin")}
+              className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-foreground hover:bg-accent"
+            >
+              <ShieldIcon className="size-4" />
+              Admin console
+            </button>
+          ) : null}
+        </nav>
+
+        <div className="flex flex-col gap-2 border-t border-border pt-4">
+          <span className="text-xs font-semibold text-muted-foreground">Appearance</span>
+          <div className="grid grid-cols-3 gap-1.5">
+            {(["dark", "light", "system"] as const).map((pref) => (
+              <Button
+                key={pref}
+                size="sm"
+                variant={s.theme === pref ? "primary" : "outline"}
+                onClick={() => storeActions.setTheme(pref)}
+              >
+                {themeLabel(pref)}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-auto border-t border-border pt-4">
+          {s.viewer ? (
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={() => {
+                setOpen(false);
+                void storeActions.logout();
+              }}
+            >
+              <LogOutIcon className="size-4" />
+              Sign out
+            </Button>
+          ) : (
+            <Button
+              shape="pill"
+              className="w-full"
+              onClick={() => {
+                setOpen(false);
+                storeActions.openJoinSheet();
+              }}
+            >
+              Sign in
+            </Button>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function MobileHeaderActions({
+  mode,
+  signedIn,
+}: {
+  readonly mode: UiMode;
+  readonly signedIn: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2 md:hidden">
+      <ModeToggle compact mode={mode} onModeChange={storeActions.toggleUiModeFromControl} />
+      {!signedIn ? (
+        <Button size="sm" shape="pill" onClick={() => storeActions.openJoinSheet()}>
           Sign in
-        </Button>
-      )}
-      {isAdmin ? (
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => { void storeActions.navigate("/admin"); }}
-        >
-          Admin
         </Button>
       ) : null}
     </div>
@@ -130,112 +381,121 @@ function HeaderActions({
 
 function VisitorBanner() {
   return (
-    <Card className="border-primary/40 bg-card/95 shadow-md backdrop-blur-sm">
-      <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-semibold text-foreground">Join Feed with 100 virtual pts</span>
-          <span className="text-xs text-muted-foreground">
-            Sign in with your phone or connect one AI agent from SKILL.md. Virtual points have no cash value.
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => storeActions.openJoinSheet("agent")}>
-            Connect Agent
-          </Button>
-          <Button size="sm" onClick={() => storeActions.openJoinSheet("phone")}>
-            Sign in
-          </Button>
-          <Button size="sm" variant="ghost" onClick={storeActions.dismissBottomBanner}>
-            Dismiss
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function NoticeStrip({
-  statusMessage,
-  errorMessage,
-  hostActionNote,
-}: {
-  readonly statusMessage: string | null;
-  readonly errorMessage: string | null;
-  readonly hostActionNote: string | null;
-}) {
-  if (!statusMessage && !errorMessage && !hostActionNote) return null;
-
-  return (
-    <div className="flex flex-col gap-2 border-b border-border px-4 py-2">
-      {errorMessage ? (
-        <Alert
-          variant="destructive"
-          action={<Button size="sm" variant="ghost" onClick={storeActions.clearNotices}>Dismiss</Button>}
+    <div className="-mx-3 -mb-3 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background/95 px-4 py-3 text-foreground backdrop-blur-md">
+      <div className="flex min-w-0 flex-col">
+        <span className="text-sm font-bold text-foreground">Don&apos;t miss what&apos;s happening</span>
+        <span className="text-xs text-muted-foreground">Join Feed to post, follow, and trade live.</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          shape="pill"
+          onClick={() => storeActions.openJoinSheet()}
         >
-          {errorMessage}
-        </Alert>
-      ) : null}
-      {statusMessage ? (
-        <Alert
-          variant="ok"
-          action={<Button size="sm" variant="ghost" onClick={storeActions.clearNotices}>Dismiss</Button>}
+          Sign in
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => storeActions.openJoinSheet("agent")}
         >
-          {statusMessage}
-        </Alert>
-      ) : null}
-      {hostActionNote ? <Alert variant="info">{hostActionNote}</Alert> : null}
+          Connect AI
+        </Button>
+        <button
+          type="button"
+          aria-label="Dismiss sign-in banner"
+          onClick={storeActions.dismissBottomBanner}
+          className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <XIcon className="size-4" />
+        </button>
+      </div>
     </div>
   );
 }
 
-function ActiveRouteScreen({
-  mode,
-  explainerVisible,
-}: {
-  readonly mode: UiMode;
-  readonly explainerVisible: boolean;
-}) {
+function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
   const s = useAppStore();
 
   switch (s.route) {
     case "Home":
-      return <HomeScreen mode={mode} explainerVisible={explainerVisible} />;
+      return <HomeScreen mode={mode} />;
+    case "PostDetail":
+      return <PostDetailScreen mode={mode} />;
     case "Explore":
-      return <ExploreScreen mode={mode} />;
+      return s.activeArticleId ? (
+        <ArticleDetailScreen mode={mode} />
+      ) : (
+        <ExploreScreen mode={mode} />
+      );
     case "Markets":
-      return mode === "SocialMode"
-        ? <HomeScreen mode={mode} explainerVisible={explainerVisible} />
-        : <MarketsScreen />;
+      if (mode === "SocialMode") return <HomeScreen mode={mode} />;
+      return s.walletView ? <WalletScreen /> : <MarketsScreen />;
+    case "Leaderboard":
+      return mode === "SocialMode" ? <HomeScreen mode={mode} /> : <LeaderboardScreen />;
     case "Chats":
       return <ChatsScreen />;
     case "Notifications":
       return <NotificationsScreen mode={mode} />;
     case "Profile":
-      return <ProfileScreen mode={mode} />;
+      return <ProfileScreen key={s.profileHandle ?? s.viewer?.handle ?? "self"} mode={mode} />;
     case "Settings":
       return <SettingsScreen mode={mode} />;
     case "HowToPlay":
-      return <HowToPlayScreen />;
+      return <HowToPlayScreen mode={mode} />;
     case "Link":
       return <LinkScreen />;
     case "OAuthConsent":
       return <OAuthConsentScreen />;
+    case "AuthEmail":
+      return <EmailMagicLinkScreen />;
     case "Admin":
       return <AdminScreen />;
   }
 }
 
+function computeHeaderTitle(s: ReturnType<typeof useAppStore>): string | undefined {
+  if (s.walletView) return "Wallet";
+  if (s.activeArticleId) return "Article";
+  switch (s.route) {
+    case "PostDetail":
+      return "Post";
+    case "Link":
+      return "Pair AI Agent";
+    case "OAuthConsent":
+      return "Authorize Agent";
+    case "AuthEmail":
+      return "Sign in";
+    case "Admin":
+      return "Admin Console";
+    default:
+      return undefined;
+  }
+}
+
+function computeActiveNavRoute(s: ReturnType<typeof useAppStore>): AppNavRoute | null | undefined {
+  if (s.activeArticleId) return null;
+  if (s.route === "PostDetail" || s.route === "Admin" || s.route === "Link" || s.route === "OAuthConsent" || s.route === "AuthEmail") {
+    return null;
+  }
+  if (
+    s.route === "Profile" &&
+    s.profileHandle &&
+    s.viewer?.handle.toLowerCase() !== s.profileHandle.toLowerCase()
+  ) {
+    return null;
+  }
+  return undefined;
+}
+
 export function App() {
   const s = useAppStore();
-  const appMachine = useAppMachine(appRuntime);
-  const navMachine = useNavMachine(navRuntime);
-  const onboardingMachine = useOnboardingMachine(onboardingRuntime);
+  useNavMachine(navRuntime);
 
   const mode = currentUiMode(s);
-  const hasAtRiskOpenPositions = s.positions.some((p) => !p.isClosed);
-  const baseNav = navMachine.state ?? navInitial;
+  const atRisk = hasAtRiskOpenPositions(s);
   const effectiveNavState: NavState = {
-    ...baseNav,
+    ...navInitial,
     route: s.route,
     feedTab: toSpecTab(s.feedTab),
     uiMode: mode,
@@ -244,85 +504,127 @@ export function App() {
     scrolledDeep: s.scrolledDeep,
     itemsViewed: s.itemsViewed,
     bannerDismissed: s.bannerDismissed,
-    hasAtRiskOpenPositions,
+    hasAtRiskOpenPositions: atRisk,
   };
   const surfaces = visibleSurfaces(effectiveNavState);
   const bannerVisible = showBottomBanner(effectiveNavState);
-  const appSnap = appMachine.state ?? appInitial;
-  const onbSnap = onboardingMachine.state ?? onboardingInitial;
-  const explainerVisible = !s.explainerDismissed && onbSnap.explainerCardVisible && appSnap.onb.explainerCardVisible;
   const unreadChats = s.chats.reduce((acc, c) => acc + c.unreadCount, 0) + s.alphaInvites.length;
   const balancePts = s.viewer && surfaces.showBalances ? formatPts(s.viewer.balanceCents / 100) : undefined;
-
-  const handleSelectTrending = (id: string) => {
-    const found = s.explore.trending.find((item) => item.id === id);
-    if (found?.financial && mode === "GameMode") {
-      const ticker = found.title.replace(/^\$/, "");
-      void storeActions.navigate(`/markets?ticker=${encodeURIComponent(ticker)}`);
-      return;
-    }
-    void storeActions.loadExplore(found?.title ?? "");
-    void storeActions.navigate("/explore");
-  };
+  const isWideRoute = s.route === "Markets" || s.route === "Chats" || s.route === "Leaderboard" || s.route === "Admin";
 
   return (
     <>
       <AppShell
-        route={toAppNavRoute(s.route)}
+        route={toAppNavRoute(s.route, { walletView: s.walletView })}
+        activeRoute={computeActiveNavRoute(s)}
+        headerTitle={computeHeaderTitle(s)}
         mode={mode}
+        layout={isWideRoute ? "wide" : "social"}
+        hideDesktopHeader
         signedIn={s.viewer !== null}
         unreadNotifications={s.unreadNotifications}
         unreadChats={unreadChats}
         balancePts={balancePts}
-        trendingItems={[...s.explore.trending]}
-        onSelectTrending={handleSelectTrending}
         onNavigate={storeActions.navigateRoute}
-        onSignInClick={() => storeActions.openJoinSheet("phone")}
+        onSignInClick={() => storeActions.openJoinSheet()}
         brand={
           <button
             type="button"
+            aria-label="Feed Home"
             onClick={() => { void storeActions.navigate("/"); }}
-            className="flex items-center gap-2 text-left text-xl font-bold tracking-tight text-foreground"
+            className="inline-flex items-center rounded-full p-1 transition-opacity hover:opacity-85"
           >
-            <span>Feed</span>
-            <Badge variant="outline" className="text-xs font-medium">
-              {mode === "SocialMode" ? "Social" : "Markets"}
-            </Badge>
+            <FeedIcon className="size-8 text-feed-brand lg:hidden" />
+            <FeedFullLogo className="hidden h-7 w-auto text-foreground lg:block" />
           </button>
         }
+        composeAction={<RailComposeAction />}
         modeControl={<RailModeControl mode={mode} showAtRiskNotice={surfaces.showAtRiskPositionsNotice} />}
-        headerActions={
-          <HeaderActions
-            mode={mode}
-            handle={s.viewer?.handle ?? null}
-            isAdmin={s.viewer?.isAdmin ?? false}
-          />
+        accountMenu={<RailUserMenu mode={mode} balancePts={balancePts} />}
+        mobileDrawer={<MobileDrawer mode={mode} balancePts={balancePts} />}
+        headerActions={<MobileHeaderActions mode={mode} signedIn={s.viewer !== null} />}
+        rightRailSlot={<RightRail mode={mode} />}
+        mobileFab={
+          s.route === "Home" ? (
+            <Button
+              size="icon"
+              shape="pill"
+              aria-label="Compose post"
+              onClick={() => storeActions.openComposeDialog(null)}
+              className="size-13 shadow-lg"
+            >
+              <PenIcon className="size-5" />
+            </Button>
+          ) : undefined
         }
         bottomBanner={bannerVisible ? <VisitorBanner /> : undefined}
       >
-        <NoticeStrip
-          statusMessage={s.statusMessage}
-          errorMessage={s.errorMessage}
-          hostActionNote={s.joinSheetOpen ? null : s.hostActionNote}
-        />
-        <ActiveRouteScreen mode={mode} explainerVisible={explainerVisible} />
+        <ActiveRouteScreen mode={mode} />
       </AppShell>
+
+      <ToastViewport>
+        {s.toasts.length > 0
+          ? s.toasts.map((toast) => (
+              <ToastBanner
+                key={toast.id}
+                message={toast.message}
+                description={toast.description}
+                tone={toast.tone}
+                onDismiss={() => storeActions.dismissToast(toast.id)}
+              />
+            ))
+          : null}
+      </ToastViewport>
+
+      <GlobalDialogs />
 
       <JoinSheet
         open={s.joinSheetOpen}
         onOpenChange={storeActions.setJoinSheetOpen}
         trigger={<button type="button" hidden aria-hidden="true" tabIndex={-1} />}
+        emailAuthEnabled={s.emailAuthEnabled}
         activeTab={s.joinTab}
         onTabChange={storeActions.setJoinTab}
+        emailStep={s.joinEmailStep}
+        onEmailStepChange={storeActions.setJoinEmailStep}
+        pendingEmail={s.pendingEmail || undefined}
+        pendingEmailMasked={s.pendingEmailMasked || undefined}
+        devEmailLinkEnabled={s.devEmailLinkEnabled}
+        devEmailMagicLinkUrl={s.devEmailMagicLinkUrl ?? undefined}
+        onOpenDevMagicLink={(url) => {
+          const target = url ?? s.devEmailMagicLinkUrl;
+          if (!target) return;
+          storeActions.setJoinSheetOpen(false);
+          try {
+            const parsed = new URL(target, typeof window !== "undefined" ? window.location.origin : "https://feed.local");
+            void storeActions.navigate(`${parsed.pathname}${parsed.search}`);
+          } catch {
+            void storeActions.navigate(target);
+          }
+        }}
+        onRequestEmailMagicLink={({ email, turnstileToken }) => storeActions.requestEmailMagicLink(email, turnstileToken)}
+        onResendEmailMagicLink={() => storeActions.resendEmailMagicLink()}
         phoneStep={s.joinPhoneStep}
+        onPhoneStepChange={storeActions.setJoinPhoneStep}
         pendingActionLabel={s.pendingAction?.label}
         skillPrompt={s.skills.prompt}
         launchers={s.skills.hosts.map((h) => h.launcher)}
         turnstileSiteKey={s.turnstileSiteKey ?? undefined}
-        onRequestSmsCode={({ country, phone, turnstileToken }) => { void storeActions.requestSmsCode(country, phone, turnstileToken); }}
-        onVerifySmsCode={(code) => { void storeActions.verifySmsCode(code); }}
+        devSmsCodeEnabled={s.devSmsCodeEnabled}
+        onFillDevCode={(rawPhone) => {
+          const phoneE164 = s.pendingPhoneE164 || storeActions.formatPhoneToE164("US", rawPhone);
+          return storeActions.fetchLoopbackCode(phoneE164);
+        }}
+        onRequestSmsCode={({ country, phone, turnstileToken }) => storeActions.requestSmsCode(country, phone, turnstileToken)}
+        onVerifySmsCode={(code) => storeActions.verifySmsCode(code)}
         onResendSmsCode={() => { void storeActions.resendSmsCode(); }}
-        onCompleteProfile={(payload) => { void storeActions.completePhoneOnboard(payload); }}
+        onCompleteProfile={(payload) => {
+          if (s.joinTab === "email") {
+            void storeActions.completeEmailOnboard(payload);
+            return;
+          }
+          void storeActions.completePhoneOnboard(payload);
+        }}
         onLaunchHost={storeActions.launchAgentHost}
         onCopySkillPrompt={storeActions.copySkillPrompt}
         onSubmitReviewer={(payload) => { void storeActions.submitReviewerLogin(payload); }}

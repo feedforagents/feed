@@ -10,50 +10,50 @@
       ],
       "Domain / Navigation routes, feed tabs, and UI mode": [
         "e94af45be6d8",
-        "0f9daa035d3b"
+        "1f1219a44535"
       ],
       "Domain / Surface visibility and delayed visitor banner derivation": [
-        "48d6ffaf79fd",
-        "bcdba1239c54",
-        "3b1ffeb6bbd8"
+        "0f20211b0397",
+        "fd05ecd18e4a",
+        "67caf6fa8fe7"
       ],
       "## Story: Browse public world content without a login wall": [
-        "9c8b9bc33a19"
+        "a776298fbaf0"
       ],
       "Story: Browse public world content without a login wall / Visitors browse public targets and scroll before seeing a delayed sign-in banner": [
         "e3b0c44298fc",
-        "f742fde5cd80",
-        "5980cb0ef24f"
+        "715e9056d294",
+        "d2a787f558e7"
       ],
       "Story: Browse public world content without a login wall / Route navigation respects public visibility, mode hiding, and auth gates": [
         "e3b0c44298fc",
         "8d434e8fc5d8",
-        "5980cb0ef24f"
+        "d2a787f558e7"
       ],
       "## Story: Switch between Game mode and Social mode": [
         "521ed7288af7"
       ],
       "Story: Switch between Game mode and Social mode / Mode switching updates surface visibility and redirects away from Markets": [
-        "e3b0c44298fc",
-        "ac64b2be1c85",
-        "3b1ffeb6bbd8"
+        "1668a03b0a08",
+        "b44902896212",
+        "67caf6fa8fe7"
       ],
       "Story: Switch between Game mode and Social mode / Navigation and mode visibility invariants": [
         "e3b0c44298fc",
-        "770eb97fac18",
-        "5980cb0ef24f"
+        "e6351dcc3b1e",
+        "d2a787f558e7"
       ]
     },
     "spec/app/onboarding.md": {
       "@document": [
-        "564b46ce2199"
+        "88ac22b1a1cb"
       ],
       "## Domain": [
         "e3b0c44298fc"
       ],
       "Domain / Gated actions, JoinSheet doors, and agent hosts": [
         "e3b0c44298fc",
-        "383d12640814"
+        "758c6bbf9881"
       ],
       "## Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer": [
         "f6929e259dc9"
@@ -61,7 +61,7 @@
       "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer / Triggering a gated action opens the JoinSheet while logged out or executes immediately when signed in": [
         "e3b0c44298fc",
         "e2f6638d14c2",
-        "3c189057789d"
+        "3288597fdb67"
       ],
       "## Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link": [
         "b2917968ab1b"
@@ -69,27 +69,32 @@
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Phone door enforces country allowlist, non-VoIP check, 18+ attestation, and one-time 100 pts grant": [
         "e3b0c44298fc",
         "2e475aa582c4",
-        "3c189057789d"
+        "3288597fdb67"
       ],
-      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / AI Agent door launches SKILL.md prompt and hands off to phone verification": [
-        "2def154a56ec",
-        "43a422904858",
-        "3c189057789d"
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Email magic link door verifies a single-use token, enforces 18+ attestation, and awards 100 pts once": [
+        "e3b0c44298fc",
+        "43ed1ae2cc8b",
+        "3288597fdb67"
+      ],
+      "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / AI Agent door launches SKILL.md prompt and hands off to phone or email verification": [
+        "5c615f174905",
+        "9af18c13ffcd",
+        "3288597fdb67"
       ],
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Reviewer sign-in link allows password auth strictly for operator-flagged reviewer accounts": [
         "e3b0c44298fc",
         "2012f42f2471",
-        "3c189057789d"
+        "3288597fdb67"
       ],
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Onboarding invariants and reachability checks": [
         "e3b0c44298fc",
-        "9425d1612119",
-        "3c189057789d"
+        "688dd7a966ae",
+        "3288597fdb67"
       ],
       "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link / Discovered by the proof: Pending gated action has a positive target": [
         "44402cc18753",
         "33d163779ae8",
-        "3c189057789d"
+        "3288597fdb67"
       ]
     },
     "spec/engine/spendBudget.md": {
@@ -139,19 +144,19 @@
     },
     "spec/engine/narrativeArc.md": {
       "@document": [
-        "cb87d69a3a18"
+        "65366cf7f68b"
       ],
       "## Domain": [
         "e3b0c44298fc"
       ],
       "Domain / Secret outcome, market slots, and phases": [
         "129d0d67199c",
-        "d5dec32cea1b"
+        "a174e4ab52ea"
       ],
       "Domain / Phase helpers and secret proof preparation": [
-        "f5a1927fcb4d",
-        "882a7e88d4ed",
-        "f5025674d79c"
+        "a0dd7abdbe0a",
+        "38b1fdcfd71b",
+        "370d12cf9bb0"
       ],
       "## Story: Advance rolling arcs and publish phase-aware clues": [
         "09de8799a2c1"
@@ -159,12 +164,12 @@
       "Story: Advance rolling arcs and publish phase-aware clues / Advancing a slot moves through active phases and closes trading immediately on expiry": [
         "e3b0c44298fc",
         "df3d6050212f",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ],
       "Story: Advance rolling arcs and publish phase-aware clues / Clues require a matching active phase and a persisted unique clue key": [
         "d5345e2140d1",
         "19fcf21b9b2b",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ],
       "## Story: Prepare private proofs and settle expired markets safely": [
         "09abd13211e7"
@@ -172,27 +177,27 @@
       "Story: Prepare private proofs and settle expired markets safely / Expired markets prepare a private draft proof or enter manual review hold": [
         "433ba4f74fac",
         "b041a1d277db",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ],
       "Story: Prepare private proofs and settle expired markets safely / Settlement declassifies the stored secret outcome only after proof preparation": [
         "e3b0c44298fc",
         "33d196d1b479",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ],
       "Story: Prepare private proofs and settle expired markets safely / Only admins may approve or resolve markets on manual hold": [
         "e3b0c44298fc",
         "f35e0a888774",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ],
       "Story: Prepare private proofs and settle expired markets safely / Resolved slots are replaced independently with a fresh market epoch": [
         "d7515b64dc6d",
         "ccfa8956080c",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ],
       "Story: Prepare private proofs and settle expired markets safely / Inductive invariants for 10 slots, unique clues, and secret isolation": [
         "8d281a533ee8",
         "c705f13a7ac3",
-        "c9ff34e5c98c"
+        "dbe5d04de3d8"
       ]
     },
     "spec/engine/npcLoop.md": {
@@ -204,7 +209,7 @@
       ],
       "Domain / NPC roles, tick phases, and actions": [
         "e3b0c44298fc",
-        "c008eb2e98c2"
+        "c241b97d774f"
       ],
       "## Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds": [
         "3e4dfe130515"
@@ -212,68 +217,68 @@
       "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Human social engagement unlocks eligibility for private alpha-group invites": [
         "e3b0c44298fc",
         "d8d3ccd17890",
-        "150d286f4454"
+        "28e5b6f547a0"
       ],
       "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Each NPC tick starts with a budget-enforced step cap and loops ObserveFeed -> Decide -> Act": [
         "e3b0c44298fc",
         "343d721104d5",
-        "150d286f4454"
+        "28e5b6f547a0"
       ],
       "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Only NPC actors execute spot trades (moving the index price) and alpha invites": [
         "e3b0c44298fc",
-        "4041ecf3bc97",
-        "150d286f4454"
+        "d45d7e72a094",
+        "28e5b6f547a0"
       ],
       "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds / Bounded ticks, NPC-only actors, spot-only index movement, and engagement-gated invites": [
         "e3b0c44298fc",
         "dddd84f15484",
-        "150d286f4454"
+        "28e5b6f547a0"
       ]
     },
     "spec/app/gameplayJourney.md": {
       "@document": [
-        "4549a2755da8"
+        "7b4a3982d6a6"
       ],
       "## Domain": [
         "e3b0c44298fc"
       ],
       "Domain / Journey state across web navigation, onboarding, economy, and world engine": [
         "e3b0c44298fc",
-        "d537cb7204ca",
-        "191e9b6d03d4"
+        "898cfa1ee84b",
+        "140f70b106c8"
       ],
       "Domain / Equity and profit leaderboard calculation": [
-        "c2493f54d380",
-        "a3ecc281ad7c",
-        "5b7698a4e532"
+        "51c5ad54e5ab",
+        "c7e07fabc186",
+        "007356ab73e7"
       ],
       "## Story: Walk the full Feed gameplay loop from visitor to settlement": [
-        "c5f9db91b300"
+        "ebc0ef3872f6"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Visitor browses, hits a gated action, verifies phone, and receives 100 pts": [
         "e3b0c44298fc",
         "829776bd57ce",
-        "1771bdc8691b"
+        "dc0dbe344006"
       ],
-      "Story: Walk the full Feed gameplay loop from visitor to settlement / Signed-in player connects one AI agent, posts socially, trades predictions and 20x perps, and purchases points": [
-        "36e5cfd92991",
-        "6e34f23ff57f",
-        "de7a385d3f55"
+      "Story: Walk the full Feed gameplay loop from visitor to settlement / Signed-in player connects one AI agent, posts socially, and trades predictions and 20x perps": [
+        "b0a024ef7f70",
+        "7bc577bf90c7",
+        "4239fc2a9816"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Bounded NPC tick moves spot index price and sends alpha invite; market settles 1 pt per winning share": [
         "e3b0c44298fc",
         "92c9e48a52f9",
-        "2859610f107c"
+        "8827baff0700"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / End-to-end journey invariants and witness path": [
         "e3b0c44298fc",
-        "a49942baa679",
-        "b83ad56b47cf"
+        "9dae8028c0c7",
+        "addec263f3bf"
       ],
       "Story: Walk the full Feed gameplay loop from visitor to settlement / Discovered by the proof: Spend budget attempt bounds remain valid": [
         "fb72600468d4",
         "11c922b86a87",
-        "d6d3985b2ada"
+        "8004e978347e"
       ]
     },
     "spec/shared/money.md": {
@@ -332,7 +337,7 @@
       "Domain / Application shell state and single-agent grant tracking": [
         "b99345ef504c",
         "e30a402998e9",
-        "3bc0371839d2"
+        "8bb545cfd29c"
       ],
       "## Story: Browse, switch modes, and sign in through the JoinSheet": [
         "c33fe2a8cb4c"
@@ -340,12 +345,12 @@
       "Story: Browse, switch modes, and sign in through the JoinSheet / Public navigation, feed tabs, mode switching, and visitor banners": [
         "e3b0c44298fc",
         "ac744f4b6620",
-        "0fd370b8906a"
+        "360a0543abd2"
       ],
       "Story: Browse, switch modes, and sign in through the JoinSheet / Deferred gated actions and JoinSheet sign-in stay synchronized with navigation auth state": [
         "e3b0c44298fc",
-        "9f858347fcdb",
-        "40d9c5154a0b"
+        "4a91f0315fbc",
+        "8d21d2664e02"
       ],
       "## Story: Connect and revoke the account's single AI agent": [
         "dcf29e650bd4"
@@ -353,17 +358,17 @@
       "Story: Connect and revoke the account's single AI agent / Connecting a new agent atomically revokes any prior grant": [
         "e3b0c44298fc",
         "853b8fba2e2a",
-        "4fa82075976d"
+        "6232bcd23e6b"
       ],
       "Story: Connect and revoke the account's single AI agent / Root web application invariants and goals": [
         "e3b0c44298fc",
         "05f63b6804d5",
-        "e3c75e8af77a"
+        "d8ff87226ef7"
       ],
       "Story: Connect and revoke the account's single AI agent / Discovered by the proof: Onboarding pending gated action has a positive target": [
         "bf4a7b08ccc9",
         "d6e9f010985c",
-        "aadf47ab0c8c"
+        "252b6d4095d7"
       ]
     },
     "spec/auth/agentGrant.md": {
@@ -403,9 +408,57 @@
         "c9fb74397a60"
       ]
     },
+    "spec/auth/email.md": {
+      "@document": [
+        "e1bbf7f2b637"
+      ],
+      "## Story: Request and consume a single-use email magic link safely": [
+        "dab74afbff13"
+      ],
+      "Story: Request and consume a single-use email magic link safely / Only valid non-disposable emails, Turnstile-verified requests, and rate-limited addresses receive a magic link": [
+        "32f991bffbbd",
+        "9a9f1e14e93e"
+      ],
+      "Story: Request and consume a single-use email magic link safely / Magic links are single-use, expire in 15 minutes, and purge pending secrets on consume or expiry": [
+        "30903f963e46",
+        "f9a8221e6095",
+        "8139ddb5cfd2"
+      ],
+      "## Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown": [
+        "f8b5ed9db36f"
+      ],
+      "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown / Email onboarding requires username, 18+ attestation, and Terms, and issues 100 pts once per verified email": [
+        "b11cd0713c62",
+        "c32fbd2ac2dd",
+        "8139ddb5cfd2"
+      ],
+      "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown / Linking or changing an email requires an active non-reviewer account, an unused address, and recent sign-in or first link": [
+        "e3b0c44298fc",
+        "9b680a21fb26",
+        "8139ddb5cfd2"
+      ],
+      "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown / Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days": [
+        "dd37273d89f5",
+        "44770f2c80ef",
+        "2d086b131cf6"
+      ],
+      "## Story: Enforce inductive email-auth invariants and verify reachable milestones": [
+        "e3b0c44298fc"
+      ],
+      "Story: Enforce inductive email-auth invariants and verify reachable milestones / Active accounts, single-use links, one-time grants, cooldown release, and secret clearing hold inductively": [
+        "e3b0c44298fc",
+        "c4baf8f0c16a",
+        "f57f0003762a"
+      ],
+      "Story: Enforce inductive email-auth invariants and verify reachable milestones / Simulation samples and witness journeys cover onboarding, linking, expiry, deletion cooldown, and sign-out": [
+        "e3b0c44298fc",
+        "50199ad18284",
+        "8139ddb5cfd2"
+      ]
+    },
     "spec/auth/index.md": {
       "@document": [
-        "47d8d8179370"
+        "fab87ed71490"
       ]
     },
     "spec/auth/oauth.md": {
@@ -596,7 +649,7 @@
       "Domain / Combined engine state": [
         "18650fb903d7",
         "b16afd16b6a6",
-        "07c79981c19f"
+        "90f52c84cd1b"
       ],
       "## Story: Run non-blocking minute ticks and D-25 bounded NPC loops": [
         "9689e298f682"
@@ -604,17 +657,17 @@
       "Story: Run non-blocking minute ticks and D-25 bounded NPC loops / Minute ticks advance committed time without calling an LLM or spending budget": [
         "e3b0c44298fc",
         "be0b2d88577d",
-        "4746d81f39c8"
+        "06ecde628a75"
       ],
       "Story: Run non-blocking minute ticks and D-25 bounded NPC loops / Dispatching an NPC tick atomically reserves D-25 budget and applies utilization throttles": [
         "e3b0c44298fc",
         "e95ae10323cd",
-        "aad0cd41164b"
+        "5718efb0590f"
       ],
       "Story: Run non-blocking minute ticks and D-25 bounded NPC loops / NPC ticks observe, decide, act within step bounds, and settle D-25 spend": [
         "e3b0c44298fc",
         "113cd21ebd16",
-        "0beeb137906e"
+        "406e5de15355"
       ],
       "## Story: Coordinate market phase clues, private recovery, and RSS updates": [
         "3186052aca8c"
@@ -622,79 +675,74 @@
       "Story: Coordinate market phase clues, private recovery, and RSS updates / Market arcs, phase clues, private proof prep, settlement, and replacement": [
         "e3b0c44298fc",
         "32951bb98f4d",
-        "ef077604cba5"
+        "7f30df738933"
       ],
       "Story: Coordinate market phase clues, private recovery, and RSS updates / Cross-machine engine invariants and reachability goals": [
         "e3b0c44298fc",
         "96c3a5c76e75",
-        "88962fa5fdc5"
+        "674b2bdd845d"
       ]
     },
     "spec/index.md": {
       "@document": [
-        "99595a32b10c"
+        "5f48e93c2be4"
       ]
     },
     "spec/markets/economy.md": {
       "@document": [
-        "b5cfe9e6da84"
+        "7d85cbaa18a9"
       ],
       "## Domain": [
         "e3b0c44298fc"
       ],
-      "Domain / Currency packs, purchase channels, geolocation, and player ledgers": [
+      "Domain / Fixed virtual capital and player ledgers": [
         "e3b0c44298fc",
-        "f4bc32d16293",
+        "1bda06362964",
         "3af9e9d703dc"
       ],
-      "Domain / Pack pricing, equity, net profit, and leaderboard rank helpers": [
-        "d3a016e8e850",
-        "99d5449682c6",
-        "02a8a04d5d10"
+      "Domain / Equity, net profit, and leaderboard rank helpers": [
+        "003ee332e731",
+        "bccb9a0aa9da",
+        "db6641274182"
       ],
       "## Story: Verify account and claim initial grant once": [
-        "66610b9781d7"
+        "b315b351fce0"
       ],
       "Story: Verify account and claim initial grant once / Unverified accounts receive 100 pts (10000 cents) exactly once at verification": [
         "e3b0c44298fc",
         "c37cac0e9243",
-        "c616caa7e301"
+        "cd6f05bd6207"
       ],
-      "## Story: Buy points on web outside Washington, and play anywhere": [
-        "44b3f9a9efb9"
+      "## Story: Trade with fixed starting capital and rank by net profit": [
+        "0e07376bdd90"
       ],
-      "Story: Buy points on web outside Washington, and play anywhere / Stripe Checkout packs are web-only and strictly blocked for Washington billing addresses or IPs": [
-        "e3b0c44298fc",
-        "e593a4d63df9",
-        "c616caa7e301"
-      ],
-      "Story: Buy points on web outside Washington, and play anywhere / Verified players with positive equity can trade freely in any location, including Washington, and may go broke": [
-        "8fa968af7313",
-        "d685a132b1d0",
-        "c616caa7e301"
+      "Story: Trade with fixed starting capital and rank by net profit / Verified players with positive equity can trade and may go broke with no refill path": [
+        "9ee509f321c7",
+        "ef596134f70e",
+        "cd6f05bd6207"
       ],
       "## Invariants, step rules, and reachability": [
         "e3b0c44298fc"
       ],
-      "Invariants, step rules, and reachability / Initial grants are single-use, balances stay non-negative, and blocked purchases never commit": [
+      "Invariants, step rules, and reachability / Initial grants are fixed at 100 pts, balances stay non-negative, and net profit excludes only the starting grant": [
         "e3b0c44298fc",
-        "88b325f8fe4a",
-        "02a8a04d5d10"
+        "8989ed76b70a",
+        "cd6f05bd6207"
       ],
-      "Invariants, step rules, and reachability / Buying points never changes net profit or leaderboard rank, and broke players receive no free refills": [
+      "Invariants, step rules, and reachability / No purchase, deposit, or refill can restore a broke account or alter a claimed starting grant": [
         "e3b0c44298fc",
-        "d99ca00a09c3",
-        "c616caa7e301"
+        "be5be26f28b8",
+        "cd6f05bd6207"
       ],
-      "Invariants, step rules, and reachability / Reachable journeys cover sign-up grants, web purchases, Washington free play, going broke, and profit ranking": [
+      "Invariants, step rules, and reachability / Reachable journeys cover sign-up grants, going broke with no refill, and profit ranking": [
         "e3b0c44298fc",
-        "bd2b44ee4477",
-        "c616caa7e301"
+        "8942c4482428",
+        "cd6f05bd6207"
       ]
     },
     "spec/markets/index.md": {
       "@document": [
-        "a4f8b6eb2aea"
+        "e6c58a82b483"
       ]
     },
     "spec/shared/time.md": {
@@ -732,14 +780,14 @@
         "e3b0c44298fc"
       ],
       "Domain / Market phases, secrecy, and account state": [
-        "9854941432ec",
-        "3674b10be47e",
+        "aeed57fc1afd",
+        "93faca486687",
         "a2c96047579f"
       ],
       "Domain / CPMM pricing, square-root proceeds, and account helpers": [
-        "9927a5fe1a11",
-        "e834427176c5",
-        "6819dc7a2e31"
+        "fbff5bea9767",
+        "11802d59f752",
+        "1d9d1ca66c3b"
       ],
       "## Story: Open and trade a prediction market": [
         "9d769456d2fe"
@@ -747,17 +795,17 @@
       "Story: Open and trade a prediction market / A market opens with a valid slot schedule and private outcome": [
         "e3b0c44298fc",
         "4d4243d60825",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Story: Open and trade a prediction market / Buying YES or NO shares requires an open non-expired market, sufficient balance, and bounded odds impact": [
         "63d5971241d1",
-        "025148194df7",
-        "e411da0f8da2"
+        "8ca1b0993eb5",
+        "b066b1a00df7"
       ],
       "Story: Open and trade a prediction market / Selling shares floors gross proceeds to whole cents before charging the canonical fee": [
         "59e57ad07cac",
-        "3e602e64c1b7",
-        "e411da0f8da2"
+        "74834c524e44",
+        "b066b1a00df7"
       ],
       "## Story: Close on schedule, review, resolve, or cancel": [
         "1695b5b70de8"
@@ -765,22 +813,22 @@
       "Story: Close on schedule, review, resolve, or cancel / Time advances monotonically, and expiry closes trading into pending proof generation": [
         "e3b0c44298fc",
         "ca7e53904c1e",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Story: Close on schedule, review, resolve, or cancel / Proof generation keeps proofs private and holds low-confidence markets for manual review": [
         "e3b0c44298fc",
         "ec694b383de7",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Story: Close on schedule, review, resolve, or cancel / Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently": [
         "37d34a92190d",
-        "7f528d4cda9f",
-        "028d5bca4b5e"
+        "366efc2c79bd",
+        "da7ea96879f8"
       ],
       "Story: Close on schedule, review, resolve, or cancel / Cancelled markets refund every open position at cost basis without publishing an outcome": [
         "e3b0c44298fc",
         "f8be861ee671",
-        "028d5bca4b5e"
+        "da7ea96879f8"
       ],
       "## Invariants, step properties, and reachability": [
         "e3b0c44298fc"
@@ -788,37 +836,37 @@
       "Invariants, step properties, and reachability / Pool reserves remain strictly positive and satisfy the constant-product bound": [
         "e3b0c44298fc",
         "3c5171d7d1af",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Invariants, step properties, and reachability / Account balances, shares, liquidity, and costs never go negative": [
         "e3b0c44298fc",
         "d12bf6a5b6a3",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Invariants, step properties, and reachability / The fee ledger always equals the exact sum of charged fees": [
         "e3b0c44298fc",
         "57800505ec3e",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Invariants, step properties, and reachability / Hidden outcome and prepared proof are never visible before resolution": [
         "e3b0c44298fc",
         "820d3ce8f04e",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Invariants, step properties, and reachability / Closed and settled states leave zero open shares and prevent duplicate settlement": [
         "3dd089f5c6a4",
         "8083163003b8",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Invariants, step properties, and reachability / Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra": [
         "e3b0c44298fc",
         "297ae7493b97",
-        "6d02330ce451"
+        "5ced9e23960f"
       ],
       "Invariants, step properties, and reachability / Reachable journeys cover buys, sells, 1 pt/share resolution, duplicate safety, manual hold, and cancellation": [
         "e3b0c44298fc",
-        "d537be8cc9fb",
-        "6d02330ce451"
+        "8d952b66878b",
+        "5ced9e23960f"
       ]
     },
     "spec/markets/spotPerp.md": {
@@ -830,13 +878,13 @@
       ],
       "Domain / Spot pools, perpetual positions, and sender roles": [
         "2aa579764f56",
-        "a351820a7335",
+        "08cebe9b8160",
         "3af9e9d703dc"
       ],
       "Domain / Account, margin, equity, and funding helpers": [
         "e3b0c44298fc",
         "05a8885c5296",
-        "6fee8b7ab444"
+        "2460b9a6e4bb"
       ],
       "## Story: NPC spot trades drive the index price": [
         "f92281c362e2"
@@ -844,20 +892,20 @@
       "Story: NPC spot trades drive the index price / Only NPCs may trade the spot CPMM pool, updating the persisted index price": [
         "e3b0c44298fc",
         "31730b0e1a36",
-        "6ce11b29f593"
+        "d78c2f53a015"
       ],
       "## Story: Open and close perpetuals up to 20x leverage": [
         "57e124355e9b"
       ],
       "Story: Open and close perpetuals up to 20x leverage / Opening a perp enforces the 20x leverage cap and updates only the mark premium": [
-        "e3b0c44298fc",
-        "2d989df4a473",
-        "e91224b5c129"
+        "1ff1c59cd70e",
+        "708cefe2c88a",
+        "980a1c61296b"
       ],
       "Story: Open and close perpetuals up to 20x leverage / Closing a perp settles equity and canonical fees at mark price without touching spot": [
-        "f494c2d708f7",
-        "b18985dc013c",
-        "e91224b5c129"
+        "3d6aff5f1425",
+        "92de9e57e91c",
+        "980a1c61296b"
       ],
       "## Story: 8-hour funding accrual and mark-price liquidation": [
         "358413820613"
@@ -865,12 +913,12 @@
       "Story: 8-hour funding accrual and mark-price liquidation / UTC time advances across 8-hour funding boundaries, and funding skips pre-cutover or duplicate periods": [
         "e3b0c44298fc",
         "cb50501182cc",
-        "fcbef0f1b17a"
+        "5793207efd55"
       ],
       "Story: 8-hour funding accrual and mark-price liquidation / A position whose mark-price equity breaches maintenance margin is liquidated": [
         "e3b0c44298fc",
-        "2f2d59593fa9",
-        "6ce11b29f593"
+        "4ea2f07c09df",
+        "d78c2f53a015"
       ],
       "## Invariants, step rules, and reachability": [
         "e3b0c44298fc"
@@ -878,27 +926,32 @@
       "Invariants, step rules, and reachability / Spot reserves and prices stay positive, and open interest is non-negative and matches positions": [
         "e3b0c44298fc",
         "b7abd04b97c8",
-        "6ce11b29f593"
+        "d78c2f53a015"
       ],
       "Invariants, step rules, and reachability / Every position obeys the 20x leverage cap and unique ownership, and all balances are non-negative": [
         "e3b0c44298fc",
         "142da75be8bd",
-        "a6cc3f63e0c3"
+        "f74a66c58d96"
       ],
       "Invariants, step rules, and reachability / Funding claims are post-cutover, bounded by monotonic lastFundingPeriod, and unique per position and period": [
         "e3b0c44298fc",
         "c9c209879521",
-        "8f7f394a6a60"
+        "42024c0c1c10"
       ],
       "Invariants, step rules, and reachability / Only NPCs execute spot trades, perp trades never move spot or index, and funding periods advance monotonically": [
         "e3b0c44298fc",
-        "96585fd6aa8f",
-        "8f7f394a6a60"
+        "666ae057ee7c",
+        "42024c0c1c10"
+      ],
+      "Invariants, step rules, and reachability / Zero-time open and close round-trips on an unchanged index price strictly decrease trader cash": [
+        "3ed99404822b",
+        "37e2206b3875",
+        "2d13f1ac4c4e"
       ],
       "Invariants, step rules, and reachability / Reachable journeys cover NPC spot moving index, 20x player perps, 8h funding accrual, and mark-price liquidation": [
         "e3b0c44298fc",
         "038cd8b34314",
-        "8f7f394a6a60"
+        "42024c0c1c10"
       ]
     },
     "spec/mcp/index.md": {
@@ -918,7 +971,7 @@
         "734f039cd495"
       ],
       "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers / Downloaded skill bytes require HTTPS `feed.fun` origin authority, matching SHA-256 digest, and valid package structure": [
-        "8810812f1855",
+        "7493019eeba8",
         "7f1c41fd080b",
         "406d4504f8aa"
       ],
@@ -945,25 +998,25 @@
       "## Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules": [
         "4e016cbc63d0"
       ],
-      "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / All 49 MVP tools enforce directory annotations, strict schemas, no secrets, and D-30": [
-        "9c746658f5ef",
-        "d7280118b8a4",
+      "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30": [
+        "3abfe23a9a8e",
+        "71a726eb74a8",
         "c9fb74397a60"
       ],
       "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / Public tools succeed unauthenticated; protected tools without a valid token fail with both HTTP 401 `WWW-Authenticate` and `_meta[\"mcp/www_authenticate\"]`": [
         "616d911e27cf",
         "b3a33c59fc16",
-        "2423dd813e8d"
+        "02ba695bc965"
       ],
       "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution": [
         "e3b0c44298fc",
         "cd0a76844f9a",
-        "90a4771a97d2"
+        "3b0d3f659bb2"
       ],
       "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules / Simulation samples and witness journeys verify mixed auth, dual 401, scopes, Social mode, shared rate limits, and D-30": [
         "e3b0c44298fc",
         "667fee639537",
-        "a4472699cebd"
+        "46f1f9d47a89"
       ]
     },
     "spec/shared/index.md": {
@@ -1002,7 +1055,7 @@
     },
     "spec/social/index.md": {
       "@document": [
-        "6f39d6c59f2f"
+        "b4c228df611a"
       ]
     },
     "spec/social/messaging.md": {

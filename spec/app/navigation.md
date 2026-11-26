@@ -16,6 +16,8 @@ type AppRoute =
   | Home
   | Explore
   | Markets
+  | Leaderboard
+  | PostDetail
   | Chats
   | Notifications
   | Profile
@@ -23,6 +25,7 @@ type AppRoute =
   | HowToPlay
   | Link
   | OAuthConsent
+  | AuthEmail
   | Admin
 
 type FeedTab = TabForYou | TabFollowing | TabLatest
@@ -39,7 +42,6 @@ type SurfaceVisibility = {
   showMarketCards: bool,
   showCashtagLinks: bool,
   showPnL: bool,
-  showBuyPoints: bool,
   showNpcPosts: bool,
   showChats: bool,
   showAtRiskPositionsNotice: bool,
@@ -76,11 +78,11 @@ pure val initial: NavState = {
 
 ### Surface visibility and delayed visitor banner derivation
 
-In `SocialMode`, every market, leaderboard, wallet, balance, cashtag link, P&L,
-and buy-points surface is hidden. NPC posts stay visible and signed-in users
-can still open chats. A small notice appears if the user holds open positions
-at risk. A bottom sign-in banner appears for logged-out visitors after they
-scroll deeper into the feed or view at least three public items.
+In `SocialMode`, every market, leaderboard, wallet, balance, cashtag link, and
+P&L surface is hidden. NPC posts stay visible and signed-in users can still
+open chats. A small notice appears if the user holds open positions at risk.
+A bottom sign-in banner appears for logged-out visitors after they scroll
+deeper into the feed or view at least three public items.
 
 ```quint
 pure def surfaceVisibilityFor(mode: UiMode, hasAtRisk: bool): SurfaceVisibility = {
@@ -91,7 +93,6 @@ pure def surfaceVisibilityFor(mode: UiMode, hasAtRisk: bool): SurfaceVisibility 
   showMarketCards: mode == GameMode,
   showCashtagLinks: mode == GameMode,
   showPnL: mode == GameMode,
-  showBuyPoints: mode == GameMode,
   showNpcPosts: true,
   showChats: true,
   showAtRiskPositionsNotice: mode == SocialMode and hasAtRisk,
@@ -104,7 +105,7 @@ pure def showBottomBanner(s: NavState): bool =
   not(s.signedIn) and not(s.bannerDismissed) and (s.scrolledDeep or s.itemsViewed >= 3)
 
 pure def routeAccessible(s: NavState, targetRoute: AppRoute): bool =
-  if (targetRoute == Markets) s.uiMode == GameMode
+  if (targetRoute == Markets or targetRoute == Leaderboard) s.uiMode == GameMode
   else if (targetRoute == Chats or targetRoute == Notifications or targetRoute == Settings or targetRoute == OAuthConsent)
     s.signedIn
   else if (targetRoute == Admin) s.signedIn and s.isAdmin
@@ -114,8 +115,8 @@ pure def routeAccessible(s: NavState, targetRoute: AppRoute): bool =
 ## Story: Browse public world content without a login wall
 
 > As a logged-out visitor, I want to open `feed.fun` directly to the `Latest`
-> feed and inspect public profiles, markets, leaderboards, and `/how-to-play`
-> with no login modal blocking initial load.
+> feed and inspect public profiles, post threads, markets, leaderboards, and
+> `/how-to-play` with no login modal blocking initial load.
 
 ### Visitors browse public targets and scroll before seeing a delayed sign-in banner
 
@@ -127,6 +128,7 @@ pure def viewPublicContent(s: NavState, target: PublicTarget): NavState =
   val nextRoute =
     if (target == ViewProfile) Profile
     else if (target == ViewMarket) Markets
+    else if (target == ViewLeaderboard) Leaderboard
     else if (target == ViewHowToPlay) HowToPlay
     else Home
   { ...s, route: nextRoute, itemsViewed: s.itemsViewed + 1, lastPublicTarget: target }
@@ -166,10 +168,13 @@ pure def selectFeedTab(s: NavState, tab: FeedTab): NavState =
 
 ### Mode switching updates surface visibility and redirects away from Markets
 
+Switching into `SocialMode` hides financial surfaces and redirects away from
+`Markets` and `Leaderboard` back to `Home`.
+
 ```quint
 pure def toggleUiMode(s: NavState): NavState =
   val nextMode = if (s.uiMode == GameMode) SocialMode else GameMode
-  val nextRoute = if (nextMode == SocialMode and s.route == Markets) Home else s.route
+  val nextRoute = if (nextMode == SocialMode and (s.route == Markets or s.route == Leaderboard)) Home else s.route
   { ...s, uiMode: nextMode, route: nextRoute }
 
 pure def setAtRiskPositions(s: NavState, atRisk: bool): NavState =
@@ -185,7 +190,7 @@ pure def canSignOutNav(s: NavState): bool = s.signedIn
 pure def signOutNav(s: NavState): NavState =
   val nextRoute =
     if (s.route == Chats or s.route == Notifications or s.route == Settings
-      or s.route == OAuthConsent or s.route == Admin)
+      or s.route == OAuthConsent or s.route == AuthEmail or s.route == Admin)
       Home
     else s.route
   { ...s, signedIn: false, isAdmin: false, feedTab: TabLatest, route: nextRoute }
@@ -209,7 +214,7 @@ pure def alwaysProtectedRoutesRequireAuth(s: NavState): bool = and {
 }
 
 pure def alwaysSocialModeNeverOnMarkets(s: NavState): bool =
-  s.uiMode == SocialMode implies s.route != Markets
+  s.uiMode == SocialMode implies (s.route != Markets and s.route != Leaderboard)
 
 pure def alwaysNonNegativeViews(s: NavState): bool =
   s.itemsViewed >= 0
@@ -224,7 +229,6 @@ pure def alwaysSocialModeHidesFinancialSurfaces(s: NavState): bool =
     not(vis.showMarketCards),
     not(vis.showCashtagLinks),
     not(vis.showPnL),
-    not(vis.showBuyPoints),
     vis.showNpcPosts,
     vis.showChats,
     vis.showAtRiskPositionsNotice == s.hasAtRiskOpenPositions,
@@ -232,14 +236,17 @@ pure def alwaysSocialModeHidesFinancialSurfaces(s: NavState): bool =
 
 pure def lawSurfaceVisibilityModeContract(mode: UiMode, hasAtRisk: bool): bool =
   val vis = surfaceVisibilityFor(mode, hasAtRisk)
-  (mode == GameMode implies (vis.showMarketsNav and vis.showLeaderboardNav and vis.showWalletNav and vis.showBuyPoints and not(vis.showAtRiskPositionsNotice)))
-    and (mode == SocialMode implies (not(vis.showMarketsNav) and not(vis.showBalances) and vis.showNpcPosts and vis.showChats))
+  (mode == GameMode implies (vis.showMarketsNav and vis.showLeaderboardNav and vis.showWalletNav and not(vis.showAtRiskPositionsNotice)))
+    and (mode == SocialMode implies (not(vis.showMarketsNav) and not(vis.showLeaderboardNav) and not(vis.showBalances) and vis.showNpcPosts and vis.showChats))
 
 pure def sometimesVisitorSeesDelayedBanner(s: NavState): bool =
   showBottomBanner(s)
 
 pure def sometimesSocialModeAtRiskNoticeShown(s: NavState): bool =
   visibleSurfaces(s).showAtRiskPositionsNotice
+
+pure def sometimesViewedLeaderboardLoggedOut(s: NavState): bool =
+  not(s.signedIn) and s.route == Leaderboard
 
 pure def sometimesVisitedAllPublicTargets(s: NavState): bool =
   not(s.signedIn) and s.itemsViewed >= 3 and s.route == HowToPlay

@@ -1,24 +1,40 @@
-// spec/app/onboarding.md, "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"
-import type { AgentHostId, JoinPhoneStep, JoinTab, UiMode } from "@repo/ui";
+// spec/app/onboarding.md, "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link"; spec/app/index.md, "Story: Connect and revoke the account's single AI agent"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
+import type { AgentHostId, JoinEmailStep, JoinPhoneStep, JoinTab, UiMode } from "@repo/ui";
 import { passThrough, requestJson } from "./api.ts";
 import {
   buildHostActionNote,
+  clearPersistedPendingAction,
+  defaultJoinTab,
   getStoreSnapshot,
+  navigateViaHook,
+  notifyAuthChanged,
   persistExplainerDismissed,
+  persistPendingAction,
   pushBrowserRoute,
+  pushToast,
+  readPersistedPendingAction,
   sendApp,
   sendNav,
   sendOnboarding,
+  setErrorNotice,
+  setStatusNotice,
   setStoreState,
 } from "./store-core.ts";
 import {
   createPost,
+  loadArticle,
   loadChats,
+  loadClosedPositions,
+  loadEconomy,
+  loadExplore,
   loadFeed,
+  loadLeaderboard,
   loadMarkets,
   loadNotifications,
+  loadPositionsSilent,
   loadProfile,
   loadTrending,
+  openThread,
   repostPost,
   selectFeedTab,
   startDirectChat,
@@ -29,8 +45,12 @@ import {
 } from "./store-world.ts";
 import {
   type PendingAction,
+  decodeAdminReports,
   decodeAdminStatus,
+  decodeAdminUsers,
+  decodeAdminWorldFacts,
   decodeAuthMe,
+  decodeDeviceLookup,
   decodeOAuthConsent,
   decodeSkillHosts,
   isRecord,
@@ -48,6 +68,15 @@ const COUNTRY_PREFIX: Record<string, string> = {
   NZ: "+64",
   EU: "+",
 };
+
+let syncedMachineUiMode: "game" | "social" = "game";
+
+function syncMachineUiMode(targetMode: "game" | "social"): void {
+  if (syncedMachineUiMode === targetMode) return;
+  syncedMachineUiMode = targetMode;
+  sendNav({ type: "toggleUiMode" });
+  sendApp({ type: "switchUiMode" });
+}
 
 export function formatPhoneToE164(country: string, rawPhone: string): string {
   const cleaned = rawPhone.trim().replace(/[\s\-().]/g, "");
@@ -67,42 +96,58 @@ export async function loadSkillsHosts(): Promise<void> {
 }
 
 export async function hydrateAuth(): Promise<void> {
+  const prevViewerId = getStoreSnapshot().viewer?.accountId ?? null;
   const res = await requestJson("/api/auth/me", { parse: decodeAuthMe });
   if (!res.ok) {
     setStoreState({ authLoaded: true });
     return;
   }
-  const { authenticated, viewer, acceptedCountries, publicAppUrl, turnstileSiteKey, devSmsCodeEnabled } = res.data;
+  const {
+    authenticated,
+    viewer,
+    acceptedCountries,
+    publicAppUrl,
+    turnstileSiteKey,
+    devSmsCodeEnabled,
+    emailAuthEnabled,
+    devEmailLinkEnabled,
+  } = res.data;
   if (authenticated && viewer) {
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
     sendApp({ type: "verifyPhoneSms", codeValid: true, isNewAccount: false });
-    if (viewer.uiMode === "social") {
-      sendNav({ type: "toggleUiMode" });
-      sendApp({ type: "switchUiMode" });
-    }
+    syncMachineUiMode(viewer.uiMode);
     if (viewer.agentGrant) {
       sendApp({ type: "connectSingleAgent", clientName: viewer.agentGrant.clientName });
     }
-    const nextRoute = viewer.uiMode === "social" && getStoreSnapshot().route === "Markets" ? "Home" : getStoreSnapshot().route;
-    if (nextRoute !== getStoreSnapshot().route) {
+    const snap = getStoreSnapshot();
+    const restrictedInSocial = viewer.uiMode === "social" && (snap.route === "Markets" || snap.route === "Leaderboard" || snap.walletView);
+    const nextRoute = restrictedInSocial ? "Home" : snap.route;
+    if (nextRoute !== snap.route || (restrictedInSocial && snap.walletView)) {
       pushBrowserRoute(nextRoute);
     }
     setStoreState({
       authLoaded: true,
       viewer,
-      acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
+      acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : snap.acceptedCountries,
       publicAppUrl,
       turnstileSiteKey,
       devSmsCodeEnabled,
+      emailAuthEnabled,
+      devEmailLinkEnabled,
       route: nextRoute,
+      walletView: restrictedInSocial ? false : snap.walletView,
       localUiMode: viewer.uiMode,
       joinSheetOpen: false,
       joinError: null,
     });
+    if (prevViewerId !== viewer.accountId) {
+      notifyAuthChanged();
+    }
     return;
   }
-  const currentRoute = getStoreSnapshot().route;
+  const snap = getStoreSnapshot();
+  const currentRoute = snap.route;
   const protectedRoute = currentRoute === "Chats" || currentRoute === "Notifications" || currentRoute === "Settings" || currentRoute === "Admin";
   const fallbackRoute = protectedRoute ? "Home" : currentRoute;
   if (fallbackRoute !== currentRoute) {
@@ -111,12 +156,18 @@ export async function hydrateAuth(): Promise<void> {
   setStoreState({
     authLoaded: true,
     viewer: null,
-    acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : getStoreSnapshot().acceptedCountries,
+    acceptedCountries: acceptedCountries.length > 0 ? acceptedCountries : snap.acceptedCountries,
     publicAppUrl,
     turnstileSiteKey,
     devSmsCodeEnabled,
+    emailAuthEnabled,
+    devEmailLinkEnabled,
+    joinTab: !emailAuthEnabled && snap.joinTab === "email" ? "phone" : snap.joinTab,
     route: fallbackRoute,
   });
+  if (prevViewerId !== null) {
+    notifyAuthChanged();
+  }
 }
 
 async function runPendingAction(action: PendingAction | null): Promise<void> {
@@ -141,7 +192,7 @@ async function runPendingAction(action: PendingAction | null): Promise<void> {
       await startDirectChat(action.handle);
       return;
     case "trade_prediction":
-      await submitPredictionOrder(action.marketId, action.action, action.side, action.amountPts);
+      await submitPredictionOrder(action.marketId, action.action, action.side, action.amountPts, action.shareUnits);
       return;
     case "trade_perp":
       await submitPerpOrder(action.ticker, action.side, action.marginPts, action.leverage);
@@ -151,16 +202,23 @@ async function runPendingAction(action: PendingAction | null): Promise<void> {
       return;
     case "switch_tab":
       await selectFeedTab(action.tab);
+      return;
+    case "navigate":
+      await navigateViaHook(action.path);
   }
 }
 
-export function openJoinSheet(tab: JoinTab = "phone"): void {
-  if (getStoreSnapshot().viewer) return;
+export function openJoinSheet(tab?: JoinTab): void {
+  const s = getStoreSnapshot();
+  if (s.viewer) return;
+  const resolvedTab = tab ?? defaultJoinTab(s);
+  const effectiveTab: JoinTab = resolvedTab === "email" && !s.emailAuthEnabled ? "phone" : resolvedTab;
   sendOnboarding({ type: "openJoinSheetDirectly" });
   sendApp({ type: "openJoinSheet" });
   setStoreState({
     joinSheetOpen: true,
-    joinTab: tab,
+    joinTab: effectiveTab,
+    joinEmailStep: "entry",
     joinPhoneStep: "entry",
     joinError: null,
   });
@@ -173,10 +231,15 @@ export function setJoinSheetOpen(open: boolean): void {
   }
   sendOnboarding({ type: "closeJoinSheet" });
   sendApp({ type: "closeJoinSheetModal" });
+  clearPersistedPendingAction();
   setStoreState({
     joinSheetOpen: false,
     joinError: null,
+    joinEmailStep: "entry",
     joinPhoneStep: "entry",
+    pendingEmail: "",
+    pendingEmailMasked: "",
+    devEmailMagicLinkUrl: null,
     pendingAction: null,
   });
 }
@@ -188,15 +251,256 @@ export function setJoinTab(tab: JoinTab): void {
   } else if (tab === "phone") {
     sendOnboarding({ type: "proceedToPhoneFromAgent" });
     sendApp({ type: "switchAgentToPhone" });
+  } else if (tab === "email") {
+    sendOnboarding({ type: "proceedToEmailFromAgent" });
+    sendApp({ type: "switchAgentToEmail" });
   }
   setStoreState({ joinTab: tab, joinError: null });
 }
 
-export function setJoinPhoneStep(step: JoinPhoneStep): void {
-  setStoreState({ joinPhoneStep: step });
+export function setJoinEmailStep(step: JoinEmailStep): void {
+  setStoreState({ joinEmailStep: step, joinError: null });
 }
 
-export async function requestSmsCode(country: string, phone: string, turnstileToken?: string): Promise<void> {
+export function setJoinPhoneStep(step: JoinPhoneStep): void {
+  setStoreState({ joinPhoneStep: step, joinError: null });
+}
+
+function safeCurrentRedirectPath(): string {
+  if (typeof window === "undefined") return "/";
+  const path = `${window.location.pathname}${window.location.search}`;
+  if (!path.startsWith("/") || path.startsWith("/auth/email")) return "/";
+  return path;
+}
+
+export async function requestEmailMagicLink(email: string, turnstileToken?: string): Promise<boolean> {
+  const trimmed = email.trim().toLowerCase();
+  if (!trimmed) {
+    setStoreState({ joinError: "Enter a valid email address." });
+    return false;
+  }
+  const s = getStoreSnapshot();
+  persistPendingAction(s.pendingAction);
+  setStoreState({
+    joinLoading: true,
+    joinError: null,
+    pendingEmail: trimmed,
+    devEmailMagicLinkUrl: null,
+  });
+  const res = await requestJson("/api/auth/email/start", {
+    method: "POST",
+    body: {
+      email: trimmed,
+      redirectTo: safeCurrentRedirectPath(),
+      ...(turnstileToken ? { turnstileToken } : {}),
+    },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    sendOnboarding({ type: "requestEmailMagicLink", emailValid: false });
+    sendApp({ type: "requestEmailLink", emailValid: false });
+    setStoreState({ joinLoading: false, joinEmailStep: "entry", joinError: res.message });
+    return false;
+  }
+  const rec = isRecord(res.data) ? res.data : {};
+  const masked = optStr(rec.emailMasked) ?? trimmed;
+  const devMagicLinkUrl = optStr(rec.devMagicLinkUrl);
+  sendOnboarding({ type: "requestEmailMagicLink", emailValid: true });
+  sendApp({ type: "requestEmailLink", emailValid: true });
+  setStoreState({
+    joinLoading: false,
+    joinEmailStep: "sent",
+    pendingEmail: trimmed,
+    pendingEmailMasked: masked,
+    devEmailMagicLinkUrl: devMagicLinkUrl,
+    joinError: null,
+  });
+  return true;
+}
+
+export async function resendEmailMagicLink(): Promise<boolean> {
+  const s = getStoreSnapshot();
+  if (!s.pendingEmail) return false;
+  if (s.turnstileSiteKey) {
+    setStoreState({ joinEmailStep: "entry", joinError: "Complete security verification to resend the link." });
+    return false;
+  }
+  return requestEmailMagicLink(s.pendingEmail);
+}
+
+export async function verifyEmailMagicLink(token: string | null): Promise<void> {
+  const cleaned = (token ?? "").trim();
+  if (!cleaned) {
+    setStoreState({
+      emailVerifyStatus: "error",
+      emailVerifyError: "This sign-in link is missing a token or has expired.",
+    });
+    return;
+  }
+  setStoreState({
+    emailVerifyStatus: "verifying",
+    emailVerifyError: null,
+    joinSheetOpen: false,
+  });
+  const res = await requestJson("/api/auth/email/verify", {
+    method: "POST",
+    body: { token: cleaned },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setStoreState({
+      emailVerifyStatus: "error",
+      emailVerifyError: res.message,
+    });
+    return;
+  }
+  const rec = isRecord(res.data) ? res.data : {};
+  const status = str(rec.status, "signed_in");
+  const redirectTo = optStr(rec.redirectTo);
+
+  if (status === "email_linked") {
+    setStoreState({
+      emailVerifyStatus: "linked",
+      emailVerifyError: null,
+      devEmailMagicLinkUrl: null,
+    });
+    await hydrateAuth();
+    setStatusNotice("Email address linked.");
+    await navigateViaHook(redirectTo && redirectTo.startsWith("/") ? redirectTo : "/settings?tab=account");
+    return;
+  }
+
+  if (status === "needs_onboarding" || rec.needsOnboarding === true) {
+    const onboardingToken = str(rec.onboardingToken ?? rec.pendingToken, "");
+    const emailMasked = str(rec.emailMasked, getStoreSnapshot().pendingEmailMasked);
+    sendOnboarding({ type: "verifyEmailMagicLink", tokenValid: true, isNewAccount: true });
+    sendApp({ type: "verifyEmailLink", tokenValid: true, isNewAccount: true });
+    setStoreState({
+      emailVerifyStatus: "needs_onboarding",
+      emailVerifyError: null,
+      emailVerifyRedirectTo: redirectTo,
+      pendingOnboardingToken: onboardingToken,
+      pendingEmailMasked: emailMasked,
+      joinEmailStep: "profile",
+      devEmailMagicLinkUrl: null,
+    });
+    return;
+  }
+
+  sendOnboarding({ type: "verifyEmailMagicLink", tokenValid: true, isNewAccount: false });
+  sendApp({ type: "verifyEmailLink", tokenValid: true, isNewAccount: false });
+  const pending = getStoreSnapshot().pendingAction ?? readPersistedPendingAction();
+  clearPersistedPendingAction();
+  setStoreState({
+    emailVerifyStatus: "signed_in",
+    emailVerifyError: null,
+    pendingAction: null,
+    joinSheetOpen: false,
+    joinEmailStep: "entry",
+    devEmailMagicLinkUrl: null,
+  });
+  await hydrateAuth();
+  await runPendingAction(pending);
+  setStatusNotice("Signed in.");
+  const target = redirectTo && redirectTo.startsWith("/") && !redirectTo.startsWith("/auth/email") ? redirectTo : "/";
+  if (pending?.kind !== "navigate") {
+    await navigateViaHook(target);
+  }
+  await refreshViewerSurfaces();
+}
+
+export async function completeEmailOnboard(payload: {
+  readonly username: string;
+  readonly displayName?: string;
+  readonly ageConfirmed: boolean;
+  readonly acceptedTerms: boolean;
+}): Promise<boolean> {
+  const s = getStoreSnapshot();
+  const onboardingToken = s.pendingOnboardingToken;
+  setStoreState({ joinLoading: true, joinError: null, emailVerifyError: null });
+  const res = await requestJson("/api/auth/email/onboard", {
+    method: "POST",
+    body: {
+      onboardingToken,
+      pendingToken: onboardingToken,
+      username: payload.username,
+      ...(payload.displayName?.trim() ? { displayName: payload.displayName.trim() } : {}),
+      ageConfirmed: payload.ageConfirmed,
+      accepted18Plus: payload.ageConfirmed,
+      tosAccepted: payload.acceptedTerms,
+      acceptedTerms: payload.acceptedTerms,
+    },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setStoreState({ joinLoading: false, joinError: res.message, emailVerifyError: res.message });
+    return false;
+  }
+  sendOnboarding({
+    type: "completeNewEmailProfile",
+    usernameValid: true,
+    age18Plus: payload.ageConfirmed,
+    acceptedTerms: payload.acceptedTerms,
+  });
+  sendApp({
+    type: "completeEmailSignUp",
+    usernameValid: true,
+    age18Plus: payload.ageConfirmed,
+    acceptedTerms: payload.acceptedTerms,
+  });
+  const pending = s.pendingAction ?? readPersistedPendingAction();
+  const redirectTo = s.emailVerifyRedirectTo;
+  clearPersistedPendingAction();
+  setStoreState({
+    joinLoading: false,
+    pendingOnboardingToken: "",
+    pendingAction: null,
+    joinSheetOpen: false,
+    joinEmailStep: "entry",
+    emailVerifyStatus: "signed_in",
+    emailVerifyError: null,
+    emailVerifyRedirectTo: null,
+    devEmailMagicLinkUrl: null,
+  });
+  setStatusNotice("Welcome to Feed. 100 pts credited.");
+  await hydrateAuth();
+  await runPendingAction(pending);
+  const target = redirectTo && redirectTo.startsWith("/") && !redirectTo.startsWith("/auth/email") ? redirectTo : "/";
+  if (pending?.kind !== "navigate") {
+    await navigateViaHook(target);
+  }
+  await refreshViewerSurfaces();
+  return true;
+}
+
+export async function startEmailLink(email: string, turnstileToken?: string): Promise<{
+  readonly ok: boolean;
+  readonly emailMasked?: string;
+  readonly devMagicLinkUrl?: string | null;
+}> {
+  const trimmed = email.trim().toLowerCase();
+  if (!trimmed) {
+    setErrorNotice("Enter a valid email address.");
+    return { ok: false };
+  }
+  const res = await requestJson("/api/auth/email/link/start", {
+    method: "POST",
+    body: { email: trimmed, ...(turnstileToken ? { turnstileToken } : {}) },
+    parse: passThrough,
+  });
+  if (!res.ok) {
+    setErrorNotice(res.message);
+    return { ok: false };
+  }
+  const rec = isRecord(res.data) ? res.data : {};
+  const emailMasked = optStr(rec.emailMasked) ?? trimmed;
+  const devMagicLinkUrl = optStr(rec.devMagicLinkUrl);
+  setStoreState({ devEmailMagicLinkUrl: devMagicLinkUrl });
+  setStatusNotice(`Confirmation link sent to ${emailMasked}.`);
+  return { ok: true, emailMasked, devMagicLinkUrl };
+}
+
+export async function requestSmsCode(country: string, phone: string, turnstileToken?: string): Promise<boolean> {
   const phoneE164 = formatPhoneToE164(country, phone);
   setStoreState({ joinLoading: true, joinError: null, pendingPhoneE164: phoneE164 });
   const res = await requestJson("/api/auth/phone/start", {
@@ -208,11 +512,12 @@ export async function requestSmsCode(country: string, phone: string, turnstileTo
     sendOnboarding({ type: "requestSmsCode", phoneAllowed: false, notVoip: false });
     sendApp({ type: "requestPhoneSms", phoneAllowed: false, notVoip: false });
     setStoreState({ joinLoading: false, joinPhoneStep: "entry", joinError: res.message });
-    return;
+    return false;
   }
   sendOnboarding({ type: "requestSmsCode", phoneAllowed: true, notVoip: true });
   sendApp({ type: "requestPhoneSms", phoneAllowed: true, notVoip: true });
   setStoreState({ joinLoading: false, joinPhoneStep: "verify", joinError: null });
+  return true;
 }
 
 export async function resendSmsCode(): Promise<void> {
@@ -225,11 +530,11 @@ export async function resendSmsCode(): Promise<void> {
   await requestSmsCode("EU", s.pendingPhoneE164);
 }
 
-export async function verifySmsCode(code: string): Promise<void> {
+export async function verifySmsCode(code: string): Promise<boolean> {
   const phoneE164 = getStoreSnapshot().pendingPhoneE164;
   if (!phoneE164) {
     setStoreState({ joinPhoneStep: "entry", joinError: "Enter your mobile number first." });
-    return;
+    return false;
   }
   setStoreState({ joinLoading: true, joinError: null });
   const res = await requestJson("/api/auth/phone/verify", {
@@ -239,7 +544,7 @@ export async function verifySmsCode(code: string): Promise<void> {
   });
   if (!res.ok) {
     setStoreState({ joinLoading: false, joinPhoneStep: "verify", joinError: res.message });
-    return;
+    return false;
   }
   const rec = isRecord(res.data) ? res.data : {};
   const status = str(rec.status, "signed_in");
@@ -253,13 +558,14 @@ export async function verifySmsCode(code: string): Promise<void> {
       pendingOnboardingToken: pendingToken,
       joinError: null,
     });
-    return;
+    return true;
   }
   const pending = getStoreSnapshot().pendingAction;
   setStoreState({ joinLoading: false, pendingAction: null, joinSheetOpen: false, joinPhoneStep: "entry" });
   await hydrateAuth();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
+  return true;
 }
 
 export async function completePhoneOnboard(payload: {
@@ -302,8 +608,8 @@ export async function completePhoneOnboard(payload: {
     pendingAction: null,
     joinSheetOpen: false,
     joinPhoneStep: "entry",
-    statusMessage: "Welcome to Feed. 100 virtual pts credited.",
   });
+  setStatusNotice("Welcome to Feed. 100 pts credited.");
   await hydrateAuth();
   await runPendingAction(pending);
   await refreshViewerSurfaces();
@@ -332,10 +638,29 @@ export async function submitReviewerLogin(payload: { readonly identifier: string
 export async function refreshViewerSurfaces(): Promise<void> {
   const s = getStoreSnapshot();
   const tasks: Promise<void>[] = [loadFeed(), loadTrending()];
-  if (s.route === "Markets") tasks.push(loadMarkets());
+  if (s.route === "Explore") {
+    if (s.activeArticleId) {
+      tasks.push(loadArticle(s.activeArticleId));
+    } else {
+      tasks.push(loadExplore(s.exploreQuery));
+    }
+  }
+  if (s.route === "PostDetail" && s.activePostId) {
+    tasks.push(openThread(s.activePostId, s.threadSort));
+  }
+  if (s.route === "Markets") {
+    tasks.push(loadMarkets());
+    if (s.walletView && s.viewer) {
+      tasks.push(loadEconomy(), loadClosedPositions());
+    }
+  }
+  if (s.route === "Leaderboard") tasks.push(loadLeaderboard());
   if (s.viewer) {
     tasks.push(loadNotifications());
     tasks.push(loadChats(s.route === "Chats"));
+    if (s.route !== "Markets") {
+      tasks.push(loadPositionsSilent());
+    }
   }
   if (s.route === "Profile") tasks.push(loadProfile(s.profileHandle));
   if (s.route === "OAuthConsent" && typeof window !== "undefined") tasks.push(loadOAuthConsent(window.location.search));
@@ -346,17 +671,18 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   const s = getStoreSnapshot();
   const prevMode = s.viewer ? s.viewer.uiMode : s.localUiMode;
   if (prevMode === nextMode) return;
-  sendNav({ type: "toggleUiMode" });
-  sendApp({ type: "switchUiMode" });
-  if (nextMode === "social" && s.route === "Markets") {
-    pushBrowserRoute("Home");
-  }
+  const leavingGameRoute = nextMode === "social" && (s.route === "Markets" || s.route === "Leaderboard" || s.walletView);
   if (!s.viewer) {
+    syncMachineUiMode(nextMode);
+    if (leavingGameRoute) {
+      pushBrowserRoute("Home");
+    }
     setStoreState({
       localUiMode: nextMode,
-      route: nextMode === "social" && s.route === "Markets" ? "Home" : s.route,
+      route: leavingGameRoute ? "Home" : s.route,
+      walletView: leavingGameRoute ? false : s.walletView,
     });
-    await loadFeed();
+    await refreshViewerSurfaces();
     return;
   }
   const res = await requestJson("/api/auth/mode", {
@@ -365,17 +691,20 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
     parse: passThrough,
   });
   if (!res.ok) {
-    sendNav({ type: "toggleUiMode" });
-    sendApp({ type: "switchUiMode" });
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
+  }
+  syncMachineUiMode(nextMode);
+  if (leavingGameRoute) {
+    pushBrowserRoute("Home");
   }
   setStoreState({
     localUiMode: nextMode,
     viewer: { ...s.viewer, uiMode: nextMode },
-    route: nextMode === "social" && s.route === "Markets" ? "Home" : s.route,
-    statusMessage: nextMode === "social" ? "Social mode enabled." : "Game mode enabled.",
+    route: leavingGameRoute ? "Home" : s.route,
+    walletView: leavingGameRoute ? false : s.walletView,
   });
+  setStatusNotice(nextMode === "social" ? "Social mode enabled." : "Game mode enabled.");
   await refreshViewerSurfaces();
 }
 
@@ -400,7 +729,9 @@ export async function copySkillPrompt(text: string): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.clipboard) {
     await navigator.clipboard.writeText(text);
   }
-  setStoreState({ hostActionNote: "Copied Feed SKILL.md prompt to clipboard." });
+  const note = "Copied Feed agent prompt to clipboard.";
+  setStoreState({ hostActionNote: note });
+  pushToast(note, "info");
 }
 
 export function launchAgentHost(hostId: AgentHostId): void {
@@ -420,7 +751,9 @@ export function launchAgentHost(hostId: AgentHostId): void {
       window.location.assign(host.launcher.href);
     }
   }
-  setStoreState({ hostActionNote: buildHostActionNote(hostId) });
+  const note = buildHostActionNote(hostId);
+  setStoreState({ hostActionNote: note });
+  pushToast(note, "info");
 }
 
 export async function revokeAgentGrant(): Promise<void> {
@@ -432,14 +765,14 @@ export async function revokeAgentGrant(): Promise<void> {
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
   sendApp({ type: "revokeConnectedAgent" });
   setStoreState({
     viewer: { ...s.viewer, agentGrant: null },
-    statusMessage: "Connected agent grant revoked.",
   });
+  setStatusNotice("Connected agent grant revoked.");
 }
 
 export async function fetchLoopbackCode(phoneE164: string): Promise<string | null> {
@@ -451,30 +784,32 @@ export async function fetchLoopbackCode(phoneE164: string): Promise<string | nul
 }
 
 export async function startPhoneChange(newPhoneE164: string, turnstileToken?: string): Promise<boolean> {
+  const formatted = formatPhoneToE164("US", newPhoneE164);
   const res = await requestJson("/api/auth/phone/change/start", {
     method: "POST",
-    body: { newPhoneE164, ...(turnstileToken ? { turnstileToken } : {}) },
+    body: { newPhoneE164: formatted, ...(turnstileToken ? { turnstileToken } : {}) },
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: "Verification code sent to new number." });
+  setStatusNotice("Verification code sent to new number.");
   return true;
 }
 
 export async function confirmPhoneChange(newPhoneE164: string, code: string): Promise<boolean> {
+  const formatted = formatPhoneToE164("US", newPhoneE164);
   const res = await requestJson("/api/auth/phone/change/confirm", {
     method: "POST",
-    body: { newPhoneE164, code },
+    body: { newPhoneE164: formatted, code },
     parse: passThrough,
   });
   if (!res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return false;
   }
-  setStoreState({ statusMessage: "Phone number updated." });
+  setStatusNotice("Phone number updated.");
   await hydrateAuth();
   return true;
 }
@@ -490,9 +825,10 @@ async function performSignOut({
 }): Promise<void> {
   const res = await requestJson(endpoint, { method: "POST", body: {}, parse: passThrough });
   if (!ignoreFailure && !res.ok) {
-    setStoreState({ errorMessage: res.message });
+    setErrorNotice(res.message);
     return;
   }
+  clearPersistedPendingAction();
   sendNav({ type: "signOutNav" });
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
@@ -500,12 +836,49 @@ async function performSignOut({
   setStoreState({
     viewer: null,
     route: "Home",
+    walletView: false,
     feedTab: "latest",
     chats: [],
+    selectedChatId: null,
+    chatMessages: [],
+    alphaInvites: [],
     notifications: [],
+    unreadNotifications: 0,
     positions: [],
-    statusMessage,
+    closedPositions: [],
+    economy: null,
+    ledger: [],
+    perpPreview: null,
+    leaderboardCurrentUser: null,
+    blockedAccounts: [],
+    mutedAccounts: [],
+    profileHandle: null,
+    profileBundle: null,
+    profileReplies: [],
+    profileLikes: [],
+    profileTrades: [],
+    activeThread: null,
+    activePostId: null,
+    adminStatus: null,
+    adminReports: [],
+    adminUsers: [],
+    adminFacts: [],
+    oauthConsent: null,
+    oauthError: null,
+    deviceLookup: null,
+    linkStatus: null,
+    linkError: null,
+    followListKind: null,
+    followListHandle: null,
+    followListItems: [],
+    emailVerifyStatus: "idle",
+    emailVerifyError: null,
+    emailVerifyRedirectTo: null,
+    devEmailMagicLinkUrl: null,
+    pendingAction: null,
   });
+  setStatusNotice(statusMessage);
+  notifyAuthChanged();
   await loadFeed("latest");
 }
 
@@ -527,7 +900,7 @@ export async function signOutEverywhere(): Promise<void> {
 export async function deleteAccount(): Promise<void> {
   await performSignOut({
     endpoint: "/api/auth/account/delete",
-    statusMessage: "Account deleted. Phone number held in 30-day cooldown.",
+    statusMessage: "Account deleted. Linked credentials held in 30-day cooldown.",
   });
 }
 
@@ -577,6 +950,31 @@ export async function submitOAuthDecision(approved: boolean, scopes: ReadonlyArr
   }
 }
 
+export async function lookupDeviceCode(userCode: string): Promise<void> {
+  const cleaned = userCode.trim().toUpperCase();
+  if (!cleaned) {
+    setStoreState({ deviceLookup: null, deviceLookupLoading: false, linkError: "Enter a pairing code to look up." });
+    return;
+  }
+  setStoreState({ deviceLookupLoading: true, linkError: null, linkStatus: null });
+  const res = await requestJson(`/api/oauth/device/lookup?userCode=${encodeURIComponent(cleaned)}`, {
+    parse: decodeDeviceLookup,
+  });
+  if (!res.ok || !res.data) {
+    setStoreState({
+      deviceLookupLoading: false,
+      deviceLookup: null,
+      linkError: res.ok ? "Pairing code not found or expired." : res.message,
+    });
+    return;
+  }
+  setStoreState({
+    deviceLookupLoading: false,
+    deviceLookup: res.data,
+    linkError: null,
+  });
+}
+
 export async function approveDeviceCode(userCode: string, scopes: ReadonlyArray<string>, deny = false): Promise<void> {
   setStoreState({ linkLoading: true, linkError: null, linkStatus: null });
   const res = await requestJson("/api/oauth/device/approve", {
@@ -589,12 +987,13 @@ export async function approveDeviceCode(userCode: string, scopes: ReadonlyArray<
     return;
   }
   const rec = isRecord(res.data) ? res.data : {};
-  const clientName = optStr(rec.clientName);
+  const clientName = optStr(rec.clientName) ?? getStoreSnapshot().deviceLookup?.clientName ?? null;
   if (!deny && clientName) {
     sendApp({ type: "connectSingleAgent", clientName });
   }
   setStoreState({
     linkLoading: false,
+    deviceLookup: null,
     linkStatus: deny ? "Device authorization denied." : `Approved ${clientName ?? "agent"} (${userCode.trim().toUpperCase()}).`,
   });
   await hydrateAuth();
@@ -605,10 +1004,95 @@ export async function loadAdminStatus(): Promise<void> {
   setStoreState({ adminLoading: true });
   const res = await requestJson("/api/admin/status", { parse: decodeAdminStatus });
   if (!res.ok) {
-    setStoreState({ adminLoading: false, errorMessage: res.message });
+    setStoreState({ adminLoading: false });
+    setErrorNotice(res.message);
     return;
   }
   setStoreState({ adminLoading: false, adminStatus: res.data });
+}
+
+export async function loadAdminReports(status: "all" | "open" | "reviewed" | "dismissed" = "open"): Promise<void> {
+  if (!getStoreSnapshot().viewer?.isAdmin) return;
+  setStoreState({ adminTabLoading: true });
+  const res = await requestJson(`/api/admin/reports?status=${encodeURIComponent(status)}&limit=50`, {
+    parse: decodeAdminReports,
+  });
+  if (!res.ok) {
+    setStoreState({ adminTabLoading: false });
+    setErrorNotice(res.message);
+    return;
+  }
+  setStoreState({ adminTabLoading: false, adminReports: res.data });
+}
+
+export async function adminResolveReport(reportId: string, status: "reviewed" | "dismissed"): Promise<void> {
+  if (!getStoreSnapshot().viewer?.isAdmin) return;
+  setStoreState({ adminLoading: true, adminMessage: null });
+  const res = await requestJson(`/api/admin/reports/${encodeURIComponent(reportId)}/resolve`, {
+    method: "POST",
+    body: { status },
+    parse: passThrough,
+  });
+  const msg = res.ok ? `Marked report ${status}.` : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
+  if (res.ok) await loadAdminReports("open");
+}
+
+export async function loadAdminUsers(query = ""): Promise<void> {
+  if (!getStoreSnapshot().viewer?.isAdmin) return;
+  setStoreState({ adminTabLoading: true });
+  const q = query.trim();
+  const url = q ? `/api/admin/users?q=${encodeURIComponent(q)}&limit=50` : "/api/admin/users?limit=50";
+  const res = await requestJson(url, { parse: decodeAdminUsers });
+  if (!res.ok) {
+    setStoreState({ adminTabLoading: false });
+    setErrorNotice(res.message);
+    return;
+  }
+  setStoreState({ adminTabLoading: false, adminUsers: res.data });
+}
+
+export async function loadAdminWorldFacts(): Promise<void> {
+  if (!getStoreSnapshot().viewer?.isAdmin) return;
+  setStoreState({ adminTabLoading: true });
+  const res = await requestJson("/api/admin/world-facts?limit=100", { parse: decodeAdminWorldFacts });
+  if (!res.ok) {
+    setStoreState({ adminTabLoading: false });
+    setErrorNotice(res.message);
+    return;
+  }
+  setStoreState({ adminTabLoading: false, adminFacts: res.data });
+}
+
+export async function adminCreateWorldFact(factText: string, category: string): Promise<boolean> {
+  if (!getStoreSnapshot().viewer?.isAdmin) return false;
+  const trimmed = factText.trim();
+  if (!trimmed) return false;
+  setStoreState({ adminLoading: true, adminMessage: null });
+  const res = await requestJson("/api/admin/world-facts", {
+    method: "POST",
+    body: { factText: trimmed, category: category.trim() || "markets" },
+    parse: passThrough,
+  });
+  const msg = res.ok ? "World fact added." : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
+  if (res.ok) await loadAdminWorldFacts();
+  return res.ok;
+}
+
+export async function adminDeleteWorldFact(factId: string): Promise<void> {
+  if (!getStoreSnapshot().viewer?.isAdmin) return;
+  setStoreState({ adminLoading: true, adminMessage: null });
+  const res = await requestJson(`/api/admin/world-facts/${encodeURIComponent(factId)}`, {
+    method: "DELETE",
+    parse: passThrough,
+  });
+  const msg = res.ok ? "World fact deleted." : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
+  if (res.ok) await loadAdminWorldFacts();
 }
 
 export async function adminFastForward(minutes: number): Promise<void> {
@@ -618,10 +1102,9 @@ export async function adminFastForward(minutes: number): Promise<void> {
     body: { minutes },
     parse: passThrough,
   });
-  setStoreState({
-    adminLoading: false,
-    adminMessage: res.ok ? `Clock fast-forwarded ${minutes}m.` : res.message,
-  });
+  const msg = res.ok ? `Clock fast-forwarded ${minutes}m.` : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
   if (res.ok) await loadAdminStatus();
 }
 
@@ -632,28 +1115,33 @@ export async function adminRunCron(job: string): Promise<void> {
     body: {},
     parse: passThrough,
   });
-  setStoreState({
-    adminLoading: false,
-    adminMessage: res.ok ? `Executed ${job}.` : res.message,
-  });
+  const msg = res.ok ? `Executed ${job}.` : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
   if (res.ok) await loadAdminStatus();
 }
 
 export async function adminResolveHold(
   marketId: string,
   action: "approve" | "override",
-  outcome: "yes" | "no",
-  reason: string,
+  outcome?: "yes" | "no",
+  reason = "",
 ): Promise<void> {
   setStoreState({ adminLoading: true, adminMessage: null });
   const res = await requestJson(`/api/admin/holds/${encodeURIComponent(marketId)}/${action}`, {
     method: "POST",
-    body: { outcome, ...(reason.trim() ? { reason: reason.trim() } : {}) },
+    body: {
+      ...(outcome ? { outcome } : {}),
+      ...(reason.trim() ? { reason: reason.trim() } : {}),
+    },
     parse: passThrough,
   });
-  setStoreState({
-    adminLoading: false,
-    adminMessage: res.ok ? `Resolved hold ${marketId} as ${outcome.toUpperCase()}.` : res.message,
-  });
+  const msg = res.ok
+    ? outcome
+      ? `Resolved hold ${marketId} as ${outcome.toUpperCase()}.`
+      : `Approved hold ${marketId}.`
+    : res.message;
+  setStoreState({ adminLoading: false, adminMessage: msg });
+  pushToast(msg, res.ok ? "ok" : "destructive");
   if (res.ok) await loadAdminStatus();
 }

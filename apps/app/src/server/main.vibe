@@ -4,7 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices"
 import { localStoreLayer } from "@repo/db/node"
 import { migrateFeedSchema, parseStoreLocation, seedFeedWorld, type Store, type StoreFailure } from "@repo/db"
 import { realtimeBusLayer, type RealtimeBus } from "@repo/social"
-import { parseAppServerConfig, processEnvRecord } from "./config.vibe"
+import { assertAppServerConfig, parseAppServerConfig, processEnvRecord } from "./config.vibe"
 import { resolveOptionalRouteResponse, runScheduledTicks } from "./router.vibe"
 
 const SERVER_DIR = import.meta.dirname
@@ -55,6 +55,14 @@ module node {
     }
   }
 
+  function isStaticAssetPath(cleanPath: string): boolean {
+    return (
+      cleanPath.startsWith("/images/") ||
+      cleanPath.startsWith("/icons/") ||
+      cleanPath.startsWith("/assets/")
+    )
+  }
+
   function tryServeStaticAsset(serverDir: string, method: string, pathname: string): Response | undefined {
     if (method !== "GET" && method !== "HEAD") return undefined
     const distWebRoot = path.resolve(serverDir, "../../dist/web")
@@ -71,14 +79,22 @@ module node {
     if (candidate !== distWebRoot && !candidate.startsWith(allowedPrefix)) {
       return undefined
     }
+    const isImmutableAsset = isStaticAssetPath(cleanPath)
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
       const bytes = method === "HEAD" ? null : fs.readFileSync(candidate)
-      const isImmutable = cleanPath.startsWith("/assets/")
       return new Response(bytes, {
         status: 200,
         headers: {
           "content-type": contentTypeForPath(candidate),
-          "cache-control": isImmutable ? "public, max-age=31536000, immutable" : "no-cache"
+          "cache-control": isImmutableAsset ? "public, max-age=31536000, immutable" : "no-cache"
+        }
+      })
+    }
+    if (isImmutableAsset) {
+      return new Response(null, {
+        status: 404,
+        headers: {
+          "cache-control": "no-cache"
         }
       })
     }
@@ -225,10 +241,10 @@ effect function bootstrapWorld(): void!StoreFailure!Store {
 }
 
 effect function tickDaemonLoop(): void!!(Store | RealtimeBus) {
-  let cycle = 0
   try repeat(
     effect {
-      cycle += 1
+      const now = try Clock.currentTimeMillis
+      const cycle = Math.max(1, Math.floor(now / 60_000))
       try runScheduledTicks(cycle)
     },
     Schedule.spaced("60 seconds")
@@ -237,6 +253,7 @@ effect function tickDaemonLoop(): void!!(Store | RealtimeBus) {
 
 effect function startLocalFeedServer() {
   const config = parseAppServerConfig(processEnvRecord())
+  try assertAppServerConfig(config)
   const location = try parseStoreLocation(config.databaseUrl)
   if (location.kind === "pglite" && location.file !== undefined) {
     ensurePgliteParentDir(location.file)

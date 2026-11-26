@@ -1,6 +1,15 @@
-// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Changing phone requires verifying the old phone or support recovery and an unused new number"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)"
+// spec/auth/phone.md, "Story: Verify a phone number safely without magic links or SMS pumping"; spec/auth/phone.md, "Only allowed countries, non-VoIP lines, Turnstile-verified requests, and rate-limited numbers receive a 6-digit autofill code"; spec/auth/phone.md, "Codes expire in 10 minutes, lock after 5 wrong attempts, and verify without leaking secrets"; spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"; spec/auth/phone.md, "Onboarding requires username, 18+ self-attestation, and Terms, and issues 100 pts once per verified phone"; spec/auth/phone.md, "Changing phone requires verifying the old phone or support recovery and an unused new number"; spec/auth/phone.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the phone hash for 30 days"; spec/auth/phone.md, "Username and password sign-in is admitted solely when `isReviewer` is true (D-29)"; spec/auth/email.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days"
 import type { CloudEnvironment } from "@elizaos/cloud/profile"
-import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
+import {
+  Store,
+  type StoreFailure,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
+  toInt,
+  toText,
+  type Row,
+  type Tx
+} from "@repo/db"
 import { HttpClientRequest } from "effect/http"
 import { SignJWT, jwtVerify } from "jose"
 import {
@@ -35,6 +44,14 @@ import {
   type CountryEligibility,
   type PhoneAuth
 } from "../gen/auth__phone.effect.vibe"
+import {
+  canDeleteEmailAccount,
+  deleteEmailAccount,
+  emailCooldownMs,
+  initial as initialEmailAuth,
+  type EmailAccountStatus,
+  type EmailAuth
+} from "../gen/auth__email.effect.vibe"
 import { revokeActiveAgentGrantInTx } from "./agent-grant.vibe"
 import {
   constantTimeEqual,
@@ -52,13 +69,35 @@ import { executeHttpJson } from "./http.vibe"
 import { consumeRateLimitWindowInTx } from "./rate-limit.vibe"
 
 export type SmsMode = "loopback" | "twilio"
+export type EmailMode = "loopback" | "cloudflare" | "disabled"
 export type PlayMode = "game" | "social"
 export type FeedEnvironment = CloudEnvironment | "localnet"
+
+export interface CloudflareEmailAddress {
+  readonly name: string
+  readonly email: string
+}
+
+export interface CloudflareEmailMessage {
+  readonly from: string | CloudflareEmailAddress
+  readonly to: string | ReadonlyArray<string>
+  readonly subject: string
+  readonly html?: string | undefined
+  readonly text?: string | undefined
+}
+
+export interface CloudflareEmailSender {
+  send(message: CloudflareEmailMessage): Promise<{ readonly messageId?: string } | void>
+}
 
 export interface AuthRuntimeConfig {
   readonly digestKey: string
   readonly oauthSigningSecret: string
   readonly smsMode: SmsMode
+  readonly emailMode?: EmailMode | undefined
+  readonly cloudflareEmailSender?: CloudflareEmailSender | undefined
+  readonly emailFrom?: string | undefined
+  readonly emailPublicOrigin?: string | undefined
   readonly twilioAccountSid?: string | undefined
   readonly twilioAuthToken?: string | undefined
   readonly twilioVerifyServiceSid?: string | undefined
@@ -74,13 +113,17 @@ export interface AccountProfile {
   readonly displayName: string
   readonly bio: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
   readonly phoneHash: string | null
   readonly phoneLast2: string | null
+  readonly phoneVerifiedAt: number | null
+  readonly emailHash: string | null
+  readonly emailMasked: string | null
+  readonly emailVerifiedAt: number | null
   readonly uiMode: PlayMode
   readonly playMode: PlayMode
   readonly balanceCents: number
   readonly startingGrantCents: number
-  readonly purchasedCents: number
   readonly totalFeesPaidCents: number
   readonly isAdmin: boolean
   readonly isReviewer: boolean
@@ -94,8 +137,13 @@ export interface SessionIdentity extends Pick<
   | "displayName"
   | "bio"
   | "avatarUrl"
+  | "bannerUrl"
   | "phoneHash"
   | "phoneLast2"
+  | "phoneVerifiedAt"
+  | "emailHash"
+  | "emailMasked"
+  | "emailVerifiedAt"
   | "uiMode"
   | "playMode"
   | "balanceCents"
@@ -157,19 +205,45 @@ export const DEFAULT_ALLOWED_COUNTRIES: ReadonlyArray<string> = [
 
 const SESSION_SLIDING_MS = 30 * 86_400_000
 const SESSION_ABSOLUTE_MS = 90 * 86_400_000
-const ONBOARDING_TOKEN_TTL_SECONDS = 15 * 60
+export const ONBOARDING_TOKEN_TTL_SECONDS = 15 * 60
 const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
 const IP_SMS_HOURLY_LIMIT = 10
-const STARTING_GRANT_CENTS = startingGrantPoints * 100
+const REVIEWER_LOGIN_WINDOW_MS = 15 * 60_000
+const REVIEWER_LOGIN_MAX_ATTEMPTS = 5
+export const STARTING_GRANT_CENTS = startingGrantPoints * 100
 const E164_PATTERN = /^\+[1-9]\d{7,14}$/
-const USERNAME_PATTERN = /^[a-z0-9_]{2,32}$/
+export const USERNAME_PATTERN = /^[a-z0-9_]{2,32}$/
 const TWILIO_SID_PATTERN = /^AC[a-fA-F0-9]{32}$/
 const TWILIO_VERIFY_PATTERN = /^VA[a-fA-F0-9]{32}$/
+const RESERVED_HANDLES = new Set([
+  "home",
+  "explore",
+  "markets",
+  "wallet",
+  "leaderboard",
+  "chats",
+  "notifications",
+  "settings",
+  "profile",
+  "orgs",
+  "post",
+  "article",
+  "link",
+  "oauth",
+  "auth",
+  "admin",
+  "how-to-play",
+  "api",
+  "mcp",
+  "me",
+  "new",
+  "search"
+])
 
-const TurnstileResponse = Schema.Struct({
-  success: Schema.Boolean
-})
+schema TurnstileResponse {
+  readonly success: boolean
+}
 
 const TwilioLookupResponse = Schema.Struct({
   valid: Schema.optionalKey(Schema.Boolean),
@@ -183,22 +257,22 @@ const TwilioLookupResponse = Schema.Struct({
   )
 })
 
-const TwilioVerifyResponse = Schema.Struct({
-  status: Schema.String
-})
+schema TwilioVerifyResponse {
+  readonly status: string
+}
 
-const PendingOnboardingClaims = Schema.Struct({
-  purpose: Schema.Literal("feed_phone_onboarding"),
-  phoneHash: Schema.String,
-  last2: Schema.String,
-  challengeId: Schema.String
-})
+schema PendingOnboardingClaims {
+  readonly purpose: "feed_phone_onboarding"
+  readonly phoneHash: string
+  readonly last2: string
+  readonly challengeId: string
+}
 
-const ChallengeStatePayload = Schema.Struct({
-  purpose: Schema.String,
-  attempts: Schema.Int,
-  phoneLast2: Schema.String
-})
+schema ChallengeStatePayload {
+  readonly purpose: string
+  readonly attempts: Schema.Int
+  readonly phoneLast2: string
+}
 
 const loopbackCodes = new Map<string, { readonly code: string; readonly expiresAt: number }>()
 
@@ -240,7 +314,7 @@ function extractLast2(phoneE164: string): string {
   return phoneE164.length >= 2 ? phoneE164.slice(-2) : declassifyPhoneLast2(phoneE164)
 }
 
-function normalizeIpPrefix(ipAddress: string): string {
+export function normalizeIpPrefix(ipAddress: string): string {
   const trimmed = ipAddress.trim()
   if (trimmed.includes(":")) {
     const segments = trimmed.split(":").slice(0, 4)
@@ -297,7 +371,7 @@ function parseSessionCookieToken(cookieHeader: string | undefined, httpsOnly: bo
   return undefined
 }
 
-effect function signingSecretBytes(config: Pick<AuthRuntimeConfig, "oauthSigningSecret">): Uint8Array<ArrayBuffer>!AuthFailure {
+export effect function signingSecretBytes(config: Pick<AuthRuntimeConfig, "oauthSigningSecret">): Uint8Array<ArrayBuffer>!AuthFailure {
   return try hmacSigningKeyBytes(config.oauthSigningSecret, "auth_not_configured", "Signing secret is not configured.")
 }
 
@@ -311,7 +385,7 @@ effect function twilioAuthCredentials(config: AuthRuntimeConfig): { readonly sid
   return { sid, token, serviceSid }
 }
 
-effect function lockFeedAccountByIdInTx(tx: Tx, accountId: string): (Row | undefined)!StoreFailure {
+export effect function lockFeedAccountByIdInTx(tx: Tx, accountId: string): (Row | undefined)!StoreFailure {
   const rows = try tx.query(
     `SELECT fa.*, a.status, a.sessions_revoked_before
      FROM feed_accounts fa
@@ -320,6 +394,30 @@ effect function lockFeedAccountByIdInTx(tx: Tx, accountId: string): (Row | undef
     [accountId]
   )
   return rows[0]
+}
+
+export effect function ensureHandleAvailableInTx(tx: Tx, username: string): void!(AuthFailure | StoreFailure) {
+  if (RESERVED_HANDLES.has(username)) {
+    throw new AuthFailure({ code: "username_reserved", message: "That username is reserved.", status: 400 })
+  }
+  const existingHandle = try tx.query("SELECT account_id FROM feed_accounts WHERE LOWER(handle) = $1 FOR UPDATE", [username])
+  if (existingHandle.length > 0) {
+    throw new AuthFailure({ code: "username_taken", message: "That username is already taken.", status: 409 })
+  }
+  const existingActor = try tx.query(
+    "SELECT id FROM feed_actors WHERE LOWER(username) = $1 OR LOWER(id) = $1 LIMIT 1",
+    [username]
+  )
+  if (existingActor.length > 0) {
+    throw new AuthFailure({ code: "username_taken", message: "That username is already taken.", status: 409 })
+  }
+  const existingOrg = try tx.query(
+    "SELECT id FROM feed_organizations WHERE LOWER(id) = $1 OR LOWER(COALESCE(username, '')) = $1 OR LOWER(COALESCE(ticker, '')) = $1 LIMIT 1",
+    [username]
+  )
+  if (existingOrg.length > 0) {
+    throw new AuthFailure({ code: "username_taken", message: "That username is already taken.", status: 409 })
+  }
 }
 
 effect function ensurePhoneUnusedByOtherInTx(tx: Tx, phoneHash: string, accountId: string): void!(AuthFailure | StoreFailure) {
@@ -332,7 +430,7 @@ effect function ensurePhoneUnusedByOtherInTx(tx: Tx, phoneHash: string, accountI
   }
 }
 
-effect function revokeSessionsAndBumpEpochInTx(
+export effect function revokeSessionsAndBumpEpochInTx(
   tx: Tx,
   accountId: string,
   currentEpoch: number,
@@ -342,7 +440,7 @@ effect function revokeSessionsAndBumpEpochInTx(
   const nextEpoch = Math.max(1, currentEpoch) + 1
   if (erase) {
     try tx.query(
-      "UPDATE accounts SET status = 'erased', phone = NULL, name = NULL, sessions_revoked_before = $2, updated_at = $3 WHERE key = $1",
+      "UPDATE accounts SET status = 'erased', email = NULL, phone = NULL, name = NULL, sessions_revoked_before = $2, updated_at = $3 WHERE key = $1",
       [accountId, nextEpoch, now]
     )
   } else {
@@ -380,25 +478,62 @@ export effect function insertCloudAccountTx(
   )
 }
 
-function rowToAccountProfile(row: Row): AccountProfile {
+export function rowToAccountProfile(row: Row): AccountProfile {
   const uiMode: PlayMode = toText(row.ui_mode) === "social" ? "social" : "game"
+  const phoneHash = toText(row.phone_hash) ?? null
+  const phoneLast2 = toText(row.phone_last2) ?? null
+  const phoneVerifiedAt = row.phone_verified_at !== null && row.phone_verified_at !== undefined ? toInt(row.phone_verified_at) : null
+  const emailHash = toText(row.email_hash) ?? null
+  const emailMasked = toText(row.email_masked) ?? null
+  const emailVerifiedAt = row.email_verified_at !== null && row.email_verified_at !== undefined ? toInt(row.email_verified_at) : null
   return {
     accountId: toText(row.account_id) ?? "",
     handle: toText(row.handle) ?? "",
     displayName: toText(row.display_name) ?? "",
     bio: toText(row.bio) ?? "",
     avatarUrl: toText(row.avatar_url) ?? null,
-    phoneHash: toText(row.phone_hash) ?? null,
-    phoneLast2: toText(row.phone_last2) ?? null,
+    bannerUrl: toText(row.banner_url) ?? null,
+    phoneHash,
+    phoneLast2,
+    phoneVerifiedAt,
+    emailHash,
+    emailMasked,
+    emailVerifiedAt,
     uiMode,
     playMode: uiMode,
     balanceCents: toInt(row.balance_cents),
     startingGrantCents: toInt(row.starting_grant_cents),
-    purchasedCents: toInt(row.purchased_cents ?? 0),
     totalFeesPaidCents: toInt(row.total_fees_paid_cents ?? 0),
     isAdmin: row.is_admin === true,
     isReviewer: row.is_reviewer === true,
     createdAt: toInt(row.created_at)
+  }
+}
+
+export function emailAuthFromAccount(row: Row | undefined, now: number): EmailAuth {
+  if (row === undefined) return { ...initialEmailAuth, now }
+  const accountStatus: EmailAccountStatus = toText(row.status) === "active"
+    ? "EmailActive"
+    : toText(row.status) === "deleting"
+      ? "EmailDeletedCooldown"
+      : "EmailErased"
+  return {
+    ...initialEmailAuth,
+    status: accountStatus,
+    userId: toText(row.account_id) ?? "",
+    username: toText(row.handle) ?? "",
+    isReviewer: row.is_reviewer === true,
+    ageConfirmed: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
+    termsAccepted: row.age_confirmed_at !== null && row.age_confirmed_at !== undefined,
+    emailVerified: row.email_verified_at !== null && row.email_verified_at !== undefined,
+    emailHash: toText(row.email_hash) ?? "",
+    emailMasked: toText(row.email_masked) ?? "",
+    pointsBalance: Math.floor(toInt(row.balance_cents) / 100),
+    startingGrantIssued: toInt(row.starting_grant_cents) > 0,
+    startingGrantCount: toInt(row.starting_grant_cents) > 0 ? 1 : 0,
+    sessionsEpoch: Math.max(1, toInt(row.sessions_revoked_before ?? 1)),
+    lastSignInAt: now,
+    now
   }
 }
 
@@ -563,7 +698,7 @@ effect function checkTwilioVerifyCode(phoneE164: string, code: string, config: A
   return parsed?.status === "approved"
 }
 
-effect function issueSessionInTx(
+export effect function issueSessionInTx(
   tx: Tx,
   accountId: string,
   sessionsEpoch: number,
@@ -1046,10 +1181,7 @@ export effect function completePhoneOnboarding(input: {
     if (existingPhone.length > 0) {
       throw new AuthFailure({ code: "account_exists", message: "An account for this phone number already exists.", status: 409 })
     }
-    const existingHandle = try tx.query("SELECT account_id FROM feed_accounts WHERE LOWER(handle) = $1 FOR UPDATE", [username])
-    if (existingHandle.length > 0) {
-      throw new AuthFailure({ code: "username_taken", message: "That username is already taken.", status: 409 })
-    }
+    try ensureHandleAvailableInTx(tx, username)
     const accountId = newUuid()
     const organizationId = newUuid()
     const pendingState: PhoneAuth = {
@@ -1080,12 +1212,14 @@ export effect function completePhoneOnboarding(input: {
       stateJson: cloudAccountState,
       now
     })
+    const defaultAvatarUrl = resolveUserPresetAvatarUrl(accountId)
+    const defaultBannerUrl = resolveUserPresetBannerUrl(accountId)
     const insertedRows = try tx.query(
       `INSERT INTO feed_accounts
-         (account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, purchased_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $7, 'game', $8, $8, 0, 0, false, false, NULL, $7, $7)
+         (account_id, handle, display_name, bio, avatar_url, banner_url, phone_hash, phone_last2, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, 'game', $10, $10, 0, false, false, NULL, $9, $9)
        RETURNING *`,
-      [accountId, username, displayName, bio, claims.phoneHash, claims.last2, now, STARTING_GRANT_CENTS]
+      [accountId, username, displayName, bio, defaultAvatarUrl, defaultBannerUrl, claims.phoneHash, claims.last2, now, STARTING_GRANT_CENTS]
     )
     try tx.query(
       `INSERT INTO feed_point_ledger
@@ -1111,14 +1245,39 @@ export effect function hashReviewerPassword(password: string): string!AuthFailur
 export effect function signInReviewerPassword(input: {
   readonly usernameOrId: string
   readonly password: string
+  readonly ipAddress?: string | undefined
   readonly config: AuthRuntimeConfig
-}): AuthenticatedAccountResult!(AuthFailure | StoreFailure)!Store {
+}): AuthenticatedAccountResult!(AuthFailure | RateLimited | StoreFailure)!Store {
   const identifier = input.usernameOrId.trim().toLowerCase()
   if (identifier === "" || input.password.length === 0) {
     throw new AuthFailure({ code: "reviewer_signin_refused", message: "Invalid reviewer credentials.", status: 401 })
   }
+  const ipScopeKey = input.ipAddress !== undefined && input.ipAddress.trim() !== ""
+    ? `reviewer_login_ip:${try hmacSha256Hex(input.config.digestKey, normalizeIpPrefix(input.ipAddress))}`
+    : undefined
+  const idScopeKey = `reviewer_login_id:${try hmacSha256Hex(input.config.digestKey, identifier)}`
   const store = try Store
   const now = try Clock.currentTimeMillis
+  try store.transaction(effect (tx: Tx) => {
+    try consumeRateLimitWindowInTx(tx, {
+      scopeKey: idScopeKey,
+      limit: REVIEWER_LOGIN_MAX_ATTEMPTS,
+      windowMs: REVIEWER_LOGIN_WINDOW_MS,
+      action: "reviewer_login",
+      message: "Too many reviewer sign-in attempts. Try again later.",
+      now
+    })
+    if (ipScopeKey !== undefined) {
+      try consumeRateLimitWindowInTx(tx, {
+        scopeKey: ipScopeKey,
+        limit: REVIEWER_LOGIN_MAX_ATTEMPTS,
+        windowMs: REVIEWER_LOGIN_WINDOW_MS,
+        action: "reviewer_login",
+        message: "Too many reviewer sign-in attempts from this IP address.",
+        now
+      })
+    }
+  })
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       `SELECT fa.*, a.status, a.sessions_revoked_before
@@ -1153,21 +1312,90 @@ export effect function signInReviewerPassword(input: {
   })
 }
 
+export effect function resolveSignedInAt(input: {
+  readonly accountId: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
+  readonly config?: AuthRuntimeConfig | undefined
+}): { readonly signedInAt: number | undefined; readonly now: number }!(AuthFailure | StoreFailure)!Store {
+  let signedInAt = input.authAt ?? input.sessionAuthAt
+  if (signedInAt === undefined && input.cookieHeader !== undefined && input.config !== undefined) {
+    const session = try authenticateSessionCookie(input.cookieHeader, input.config)
+    if (session === null || session.accountId !== input.accountId) {
+      throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
+    }
+    signedInAt = session.authAt
+  }
+  const now = try Clock.currentTimeMillis
+  return { signedInAt, now }
+}
+
 export effect function requestPhoneChange(input: {
   readonly accountId: string
   readonly newPhoneE164: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
   readonly turnstileToken?: string | undefined
   readonly ipAddress?: string | undefined
   readonly oldPhoneVerifiedOrRecovery?: boolean | undefined
   readonly config: AuthRuntimeConfig
 }): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  let verifiedOrRecovery = input.oldPhoneVerifiedOrRecovery === true
+  if (!verifiedOrRecovery && input.oldPhoneVerifiedOrRecovery !== false) {
+    const { signedInAt, now } = try resolveSignedInAt(input)
+    if (
+      signedInAt !== undefined
+      && Number.isSafeInteger(signedInAt)
+      && now - signedInAt >= 0
+      && now - signedInAt <= recentSignInWindowMs
+    ) {
+      verifiedOrRecovery = true
+    }
+  }
+  if (!verifiedOrRecovery) {
+    throw new AuthFailure({
+      code: "old_phone_verification_required",
+      message: "Verify your current phone or sign in within the last 10 minutes before changing your phone number.",
+      status: 403
+    })
+  }
   return try sendPhoneChallenge({
     phoneE164: input.newPhoneE164,
     purposeKey: "feed_phone_change",
     accountId: input.accountId,
-    oldPhoneVerifiedOrRecovery: input.oldPhoneVerifiedOrRecovery ?? true,
+    oldPhoneVerifiedOrRecovery: verifiedOrRecovery,
     turnstileToken: input.turnstileToken,
     ipAddress: input.ipAddress,
+    config: input.config
+  })
+}
+
+export effect function startPhoneLink(input: {
+  readonly accountId: string
+  readonly phoneE164: string
+  readonly authAt?: number | undefined
+  readonly sessionAuthAt?: number | undefined
+  readonly cookieHeader?: string | undefined
+  readonly turnstileToken?: string | undefined
+  readonly ipAddress?: string | undefined
+  readonly config: AuthRuntimeConfig
+}): StartPhoneVerificationResult!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const store = try Store
+  const existing = try store.transaction((tx: Tx) =>
+    tx.query("SELECT phone_hash FROM feed_accounts WHERE account_id = $1", [input.accountId])
+  )
+  const hasExistingPhone = toText(existing[0]?.phone_hash) !== undefined && toText(existing[0]?.phone_hash) !== ""
+  return try requestPhoneChange({
+    accountId: input.accountId,
+    newPhoneE164: input.phoneE164,
+    authAt: input.authAt,
+    sessionAuthAt: input.sessionAuthAt,
+    cookieHeader: input.cookieHeader,
+    turnstileToken: input.turnstileToken,
+    ipAddress: input.ipAddress,
+    oldPhoneVerifiedOrRecovery: hasExistingPhone ? undefined : true,
     config: input.config
   })
 }
@@ -1204,6 +1432,22 @@ export effect function confirmPhoneChange(input: {
       }
     }
   )
+}
+
+export effect function revokeSession(sessionKey: string): { readonly revoked: boolean }!StoreFailure!Store {
+  const normalizedKey = sessionKey.trim()
+  if (normalizedKey === "") {
+    return { revoked: false }
+  }
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "UPDATE sessions SET live = false, updated_at = $2 WHERE key = $1 AND live = true RETURNING key",
+      [normalizedKey, now]
+    )
+    return { revoked: rows.length > 0 }
+  })
 }
 
 export effect function signOutEverywhere(accountId: string): { readonly sessionsEpoch: number }!(AuthFailure | StoreFailure)!Store {
@@ -1271,8 +1515,13 @@ export effect function authenticateSessionCookie(
       displayName: profile.displayName,
       bio: profile.bio,
       avatarUrl: profile.avatarUrl,
+      bannerUrl: profile.bannerUrl,
       phoneHash: profile.phoneHash,
       phoneLast2: profile.phoneLast2,
+      phoneVerifiedAt: profile.phoneVerifiedAt,
+      emailHash: profile.emailHash,
+      emailMasked: profile.emailMasked,
+      emailVerifiedAt: profile.emailVerifiedAt,
       uiMode: profile.uiMode,
       playMode: profile.playMode,
       balanceCents: profile.balanceCents,
@@ -1292,15 +1541,7 @@ export effect function deleteAccountSelfServe(input: {
   readonly cookieHeader?: string | undefined
   readonly config?: AuthRuntimeConfig | undefined
 }): { readonly deleted: true; readonly cooldownEndsAt: number }!(AuthFailure | StoreFailure)!Store {
-  let signedInAt = input.authAt ?? input.sessionAuthAt
-  if (signedInAt === undefined && input.cookieHeader !== undefined && input.config !== undefined) {
-    const session = try authenticateSessionCookie(input.cookieHeader, input.config)
-    if (session === null || session.accountId !== input.accountId) {
-      throw new AuthFailure({ code: "unauthorized", message: "Active session required.", status: 401 })
-    }
-    signedInAt = session.authAt
-  }
-  const now = try Clock.currentTimeMillis
+  const { signedInAt, now } = try resolveSignedInAt(input)
   if (signedInAt === undefined || !Number.isSafeInteger(signedInAt) || now - signedInAt > recentSignInWindowMs) {
     throw new AuthFailure({
       code: "recent_signin_required",
@@ -1314,18 +1555,41 @@ export effect function deleteAccountSelfServe(input: {
     if (row === undefined || toText(row.status) !== "active") {
       throw new AuthFailure({ code: "account_not_found", message: "Account not found.", status: 404 })
     }
-    const specState: PhoneAuth = { ...phoneAuthFromAccount(row, now), lastSignInAt: signedInAt }
-    if (!canDeleteAccount(specState)) {
+    const hasVerifiedPhone = row.phone_verified_at !== null && row.phone_verified_at !== undefined
+    const hasVerifiedEmail = row.email_verified_at !== null && row.email_verified_at !== undefined
+    if (row.is_reviewer === true || (!hasVerifiedPhone && !hasVerifiedEmail)) {
       throw new AuthFailure({
         code: "delete_refused",
-        message: "Account cannot be deleted without a recent phone sign-in.",
+        message: "Account cannot be deleted without a verified phone or email sign-in.",
         status: 403
       })
     }
-    deleteAccount(specState)
+    if (hasVerifiedPhone) {
+      const specState: PhoneAuth = { ...phoneAuthFromAccount(row, now), lastSignInAt: signedInAt }
+      if (!canDeleteAccount(specState)) {
+        throw new AuthFailure({
+          code: "delete_refused",
+          message: "Account cannot be deleted without a recent sign-in.",
+          status: 403
+        })
+      }
+      deleteAccount(specState)
+    }
+    if (hasVerifiedEmail) {
+      const emailSpecState: EmailAuth = { ...emailAuthFromAccount(row, now), lastSignInAt: signedInAt }
+      if (!canDeleteEmailAccount(emailSpecState)) {
+        throw new AuthFailure({
+          code: "delete_refused",
+          message: "Account cannot be deleted without a recent sign-in.",
+          status: 403
+        })
+      }
+      deleteEmailAccount(emailSpecState)
+    }
     try revokeActiveAgentGrantInTx(tx, input.accountId, now)
     const phoneHash = toText(row.phone_hash)
-    const cooldownEndsAt = now + phoneCooldownMs
+    const emailHash = toText(row.email_hash)
+    const cooldownEndsAt = now + Math.max(phoneCooldownMs, emailCooldownMs)
     if (phoneHash !== undefined && phoneHash !== "") {
       try tx.query(
         `INSERT INTO feed_phone_cooldowns (phone_hash, released_at, expires_at)
@@ -1336,15 +1600,27 @@ export effect function deleteAccountSelfServe(input: {
       )
       try tx.query("DELETE FROM code_challenges WHERE destination_digest = $1", [phoneHash])
     }
+    if (emailHash !== undefined && emailHash !== "") {
+      try tx.query(
+        `INSERT INTO feed_email_cooldowns (email_hash, released_at, expires_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (email_hash) DO UPDATE
+         SET released_at = EXCLUDED.released_at, expires_at = EXCLUDED.expires_at`,
+        [emailHash, now, cooldownEndsAt]
+      )
+      try tx.query("DELETE FROM feed_email_magic_links WHERE email_hash = $1", [emailHash])
+    }
     try revokeSessionsAndBumpEpochInTx(tx, input.accountId, toInt(row.sessions_revoked_before), now, true)
     try tx.query(
       `UPDATE feed_accounts
-       SET handle = $2, display_name = 'Deleted User', bio = '', avatar_url = NULL,
-           phone_hash = NULL, phone_last2 = NULL, phone_verified_at = NULL, updated_at = $3
+       SET handle = $2, display_name = 'Deleted User', bio = '', avatar_url = NULL, banner_url = NULL,
+           phone_hash = NULL, phone_last2 = NULL, phone_verified_at = NULL,
+           email_hash = NULL, email_masked = NULL, email_verified_at = NULL, updated_at = $3
        WHERE account_id = $1`,
       [input.accountId, `deleted_${input.accountId}`, now]
     )
     try tx.query("DELETE FROM code_challenges WHERE user_id = $1", [input.accountId])
+    try tx.query("DELETE FROM feed_email_magic_links WHERE account_id = $1", [input.accountId])
     try tx.query("DELETE FROM feed_oauth_codes WHERE account_id = $1", [input.accountId])
     try tx.query(
       "UPDATE feed_device_codes SET status = 'denied' WHERE account_id = $1 AND status IN ('pending', 'approved')",
@@ -1373,19 +1649,82 @@ export effect function deleteAccountSelfServe(input: {
       [input.accountId]
     )
     try tx.query(
+      `WITH deleted_posts AS (
+         UPDATE feed_posts
+         SET deleted_at = $2
+         WHERE author_id = $1 AND author_kind = 'user' AND deleted_at IS NULL
+         RETURNING reply_to_post_id
+       ),
+       parent_reply_decrements AS (
+         SELECT reply_to_post_id, COUNT(*)::int AS decrement_by
+         FROM deleted_posts
+         WHERE reply_to_post_id IS NOT NULL
+         GROUP BY reply_to_post_id
+       )
+       UPDATE feed_posts fp
+       SET reply_count = GREATEST(0, fp.reply_count - d.decrement_by)
+       FROM parent_reply_decrements d
+       WHERE fp.id = d.reply_to_post_id`,
+      [input.accountId, now]
+    )
+    try tx.query(
       "DELETE FROM feed_follows WHERE follower_id = $1 OR (target_id = $1 AND target_kind = 'user')",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_blocks WHERE blocker_id = $1 OR blocked_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_mutes WHERE muter_id = $1 OR muted_id = $1",
+      [input.accountId]
+    )
+    try tx.query(
+      "DELETE FROM feed_alpha_invite_cooldowns WHERE account_id = $1",
+      [input.accountId]
+    )
+    const memberChatRows = try tx.query(
+      `SELECT c.id, c.kind, m.role
+       FROM feed_chat_members m
+       JOIN feed_chats c ON c.id = m.chat_id
+       WHERE m.member_id = $1 AND m.member_kind = 'user'`,
       [input.accountId]
     )
     try tx.query(
       "DELETE FROM feed_chat_members WHERE member_id = $1 AND member_kind = 'user'",
       [input.accountId]
     )
+    for (const chatRow of memberChatRows) {
+      const chatId = toText(chatRow.id)
+      const chatKind = toText(chatRow.kind)
+      if (chatId === undefined) continue
+      if (chatKind === "direct") {
+        try tx.query("DELETE FROM feed_chats WHERE id = $1", [chatId])
+      } else if (chatKind === "group") {
+        const remaining = try tx.query(
+          "SELECT member_id, role FROM feed_chat_members WHERE chat_id = $1 ORDER BY joined_at ASC, member_id ASC",
+          [chatId]
+        )
+        if (remaining.length === 0) {
+          try tx.query("DELETE FROM feed_chats WHERE id = $1", [chatId])
+        } else if (!remaining.some((member) => toText(member.role) === "owner")) {
+          const successorId = toText(remaining[0]?.member_id)
+          if (successorId !== undefined) {
+            try tx.query(
+              "UPDATE feed_chat_members SET role = 'owner' WHERE chat_id = $1 AND member_id = $2",
+              [chatId, successorId]
+            )
+            try tx.query("UPDATE feed_chats SET created_by = $2 WHERE id = $1", [chatId, successorId])
+          }
+        }
+      }
+    }
     try tx.query(
       "DELETE FROM feed_message_reactions WHERE account_id = $1",
       [input.accountId]
     )
     try tx.query(
-      "DELETE FROM feed_group_invites WHERE invited_account_id = $1 OR invited_by_npc_id = $1",
+      "DELETE FROM feed_group_invites WHERE invited_account_id = $1 OR invited_by_id = $1",
       [input.accountId]
     )
     try tx.query(

@@ -106,66 +106,6 @@ import nancy_pelosai from './actors/nancy-pelosai.ts';
 import nassaim_taleb from './actors/nassaim-taleb.ts';
 import nick_fuentais from './actors/nick-fuentais.ts';
 import nikitai_bier from './actors/nikitai-bier.ts';
-import org_ai16z from './actors/org-ai16z.ts';
-import org_aimazon from './actors/org-aimazon.ts';
-import org_aimerica_first from './actors/org-aimerica-first.ts';
-import org_ainduril from './actors/org-ainduril.ts';
-import org_ainfowars from './actors/org-ainfowars.ts';
-import org_aingel_list from './actors/org-aingel-list.ts';
-import org_aiphabet from './actors/org-aiphabet.ts';
-import org_aipple from './actors/org-aipple.ts';
-import org_airk_invest from './actors/org-airk-invest.ts';
-import org_aitism_capital from './actors/org-aitism-capital.ts';
-import org_aitropic from './actors/org-aitropic.ts';
-import org_aix from './actors/org-aix.ts';
-import org_aixios from './actors/org-aixios.ts';
-import org_betterhailp from './actors/org-betterhailp.ts';
-import org_block_rock from './actors/org-block-rock.ts';
-import org_bloombairg from './actors/org-bloombairg.ts';
-import org_blue_origain from './actors/org-blue-origain.ts';
-import org_bluepraint from './actors/org-bluepraint.ts';
-import org_braitbart from './actors/org-braitbart.ts';
-import org_ciai from './actors/org-ciai.ts';
-import org_coinbaise from './actors/org-coinbaise.ts';
-import org_colaissal_sciences from './actors/org-colaissal-sciences.ts';
-import org_craift_ventures from './actors/org-craift-ventures.ts';
-import org_deepmaind from './actors/org-deepmaind.ts';
-import org_deparment_of_war from './actors/org-deparment-of-war.ts';
-import org_ethereum_foundaition from './actors/org-ethereum-foundaition.ts';
-import org_extropaic from './actors/org-extropaic.ts';
-import org_faix_news from './actors/org-faix-news.ts';
-import org_financial_taimes from './actors/org-financial-taimes.ts';
-import org_forbesai from './actors/org-forbesai.ts';
-import org_founders_faind from './actors/org-founders-faind.ts';
-import org_maicrosoft from './actors/org-maicrosoft.ts';
-import org_metai from './actors/org-metai.ts';
-import org_msainbc from './actors/org-msainbc.ts';
-import org_netflaix from './actors/org-netflaix.ts';
-import org_neurailink from './actors/org-neurailink.ts';
-import org_new_republic from './actors/org-new-republic.ts';
-import org_nvidai from './actors/org-nvidai.ts';
-import org_openagi from './actors/org-openagi.ts';
-import org_palaintir from './actors/org-palaintir.ts';
-import org_piraite_wires from './actors/org-piraite-wires.ts';
-import org_politaico from './actors/org-politaico.ts';
-import org_sequoai_capital from './actors/org-sequoai-capital.ts';
-import org_sociai_capital from './actors/org-sociai-capital.ts';
-import org_spaicex from './actors/org-spaicex.ts';
-import org_straitegy from './actors/org-straitegy.ts';
-import org_techcrainch from './actors/org-techcrainch.ts';
-import org_teslai from './actors/org-teslai.ts';
-import org_the_atlaintic from './actors/org-the-atlaintic.ts';
-import org_the_daily_wire from './actors/org-the-daily-wire.ts';
-import org_the_economaist from './actors/org-the-economaist.ts';
-import org_the_informaition from './actors/org-the-informaition.ts';
-import org_the_intaircept from './actors/org-the-intaircept.ts';
-import org_the_new_york_taimes from './actors/org-the-new-york-taimes.ts';
-import org_the_terminal_organization from './actors/org-the-terminal-organization.ts';
-import org_the_vairge from './actors/org-the-vairge.ts';
-import org_ubair from './actors/org-ubair.ts';
-import org_waired from './actors/org-waired.ts';
-import org_wall_street_journai from './actors/org-wall-street-journai.ts';
-import org_zcaish from './actors/org-zcaish.ts';
 import pailmer_luckey from './actors/pailmer-luckey.ts';
 import pam_bondai from './actors/pam-bondai.ts';
 import paul_aitkins from './actors/paul-aitkins.ts';
@@ -190,8 +130,6 @@ import spartain from './actors/spartain.ts';
 import steven_craiwder from './actors/steven-craiwder.ts';
 import sundar_pichai from './actors/sundar-pichai.ts';
 import tailyor_lorenz from './actors/tailyor-lorenz.ts';
-import test_analyst_npc_002 from './actors/test-analyst-npc-002.ts';
-import test_trader_npc_001 from './actors/test-trader-npc-001.ts';
 import threadgai from './actors/threadgai.ts';
 import tim_pail from './actors/tim-pail.ts';
 import tom_braidy from './actors/tom-braidy.ts';
@@ -312,66 +250,6 @@ export const actors: PackActor[] = [
   nassaim_taleb,
   nick_fuentais,
   nikitai_bier,
-  org_ai16z,
-  org_aimazon,
-  org_aimerica_first,
-  org_ainduril,
-  org_ainfowars,
-  org_aingel_list,
-  org_aiphabet,
-  org_aipple,
-  org_airk_invest,
-  org_aitism_capital,
-  org_aitropic,
-  org_aix,
-  org_aixios,
-  org_betterhailp,
-  org_block_rock,
-  org_bloombairg,
-  org_blue_origain,
-  org_bluepraint,
-  org_braitbart,
-  org_ciai,
-  org_coinbaise,
-  org_colaissal_sciences,
-  org_craift_ventures,
-  org_deepmaind,
-  org_deparment_of_war,
-  org_ethereum_foundaition,
-  org_extropaic,
-  org_faix_news,
-  org_financial_taimes,
-  org_forbesai,
-  org_founders_faind,
-  org_maicrosoft,
-  org_metai,
-  org_msainbc,
-  org_netflaix,
-  org_neurailink,
-  org_new_republic,
-  org_nvidai,
-  org_openagi,
-  org_palaintir,
-  org_piraite_wires,
-  org_politaico,
-  org_sequoai_capital,
-  org_sociai_capital,
-  org_spaicex,
-  org_straitegy,
-  org_techcrainch,
-  org_teslai,
-  org_the_atlaintic,
-  org_the_daily_wire,
-  org_the_economaist,
-  org_the_informaition,
-  org_the_intaircept,
-  org_the_new_york_taimes,
-  org_the_terminal_organization,
-  org_the_vairge,
-  org_ubair,
-  org_waired,
-  org_wall_street_journai,
-  org_zcaish,
   pailmer_luckey,
   pam_bondai,
   paul_aitkins,
@@ -396,8 +274,6 @@ export const actors: PackActor[] = [
   steven_craiwder,
   sundar_pichai,
   tailyor_lorenz,
-  test_analyst_npc_002,
-  test_trader_npc_001,
   threadgai,
   tim_pail,
   tom_braidy,

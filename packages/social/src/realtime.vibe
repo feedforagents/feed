@@ -9,12 +9,15 @@ export type FeedRealtimeEvent =
       readonly authorKind: "user" | "npc" | "org"
       readonly replyToPostId: string | null
       readonly quotePostId: string | null
+      readonly quoteAuthorId?: string | null
       readonly createdAt: number
     }
   | {
       readonly type: "post.deleted"
       readonly postId: string
       readonly authorId: string
+      readonly replyToPostId?: string | null
+      readonly parentReplyCount?: number | null
     }
   | {
       readonly type: "post.engagement"
@@ -39,6 +42,7 @@ export type FeedRealtimeEvent =
       readonly messageId: string
       readonly accountId: string
       readonly emoji: string
+      readonly action?: "added" | "removed"
       readonly recipientIds?: ReadonlyArray<string>
     }
   | {
@@ -46,8 +50,16 @@ export type FeedRealtimeEvent =
       readonly inviteId: string
       readonly chatId: string
       readonly invitedAccountId: string
+      readonly invitedById?: string
       readonly invitedByNpcId: string
       readonly status: "pending" | "accepted" | "declined"
+      readonly recipientIds?: ReadonlyArray<string>
+    }
+  | {
+      readonly type: "chat.updated"
+      readonly chatId: string
+      readonly action: "renamed" | "member_joined" | "member_left" | "member_removed" | "ownership_transferred" | "deleted"
+      readonly actorId: string
       readonly recipientIds?: ReadonlyArray<string>
     }
   | {
@@ -71,10 +83,12 @@ export type FeedRealtimeEvent =
       readonly ticker: string
       readonly side: "buy" | "sell"
       readonly quoteCents: number
+      readonly indexPriceCents?: number
+      readonly markPriceCents?: number
     }
   | {
       readonly type: "market.perp"
-      readonly action: "open" | "close" | "liquidate"
+      readonly action: "open" | "add" | "reduce" | "flip" | "close" | "liquidate"
       readonly actorId: string
       readonly ticker: string
       readonly side: "long" | "short"
@@ -82,6 +96,16 @@ export type FeedRealtimeEvent =
       readonly leverage: number
       readonly positionId?: string
       readonly markPriceCents?: number
+    }
+  | {
+      readonly type: "market.prediction"
+      readonly marketId: string
+      readonly action: "buy" | "sell"
+      readonly side: "yes" | "no"
+      readonly yesPriceBps: number
+      readonly noPriceBps: number
+      readonly shares: number
+      readonly notionalCents: number
     }
   | {
       readonly type: "market.clue"
@@ -120,6 +144,7 @@ export interface SseStreamOptions {
 export interface SseResponseOptions extends SseStreamOptions {
   readonly filter?: (event: FeedRealtimeEvent) => boolean
   readonly viewerAccountId?: string | null
+  readonly store?: Store.Shape
 }
 
 const encoder = new TextEncoder()
@@ -187,6 +212,41 @@ effect function isAuthorVisibleInStore(
   }))
 }
 
+effect function isPostCreatedDeliverableInStore(
+  store: Store.Shape | undefined,
+  viewerId: string,
+  event: Extract<FeedRealtimeEvent, { readonly type: "post.created" }>
+): boolean!! {
+  if (store === undefined) return false
+  return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
+    if (event.authorId !== "" && event.authorId !== viewerId) {
+      const authorRows = try tx.query(
+        "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
+        [viewerId, event.authorId]
+      )
+      const authorRow = authorRows[0]
+      if (authorRow === undefined || Boolean(authorRow.is_blocked) || Boolean(authorRow.is_muted)) return false
+    }
+    let quoteAuthorId = event.quoteAuthorId ?? null
+    if (quoteAuthorId === null && event.quotePostId !== null && event.quotePostId !== "") {
+      const quoteRows = try tx.query(
+        "SELECT author_id FROM feed_posts WHERE id = $1 LIMIT 1",
+        [event.quotePostId]
+      )
+      quoteAuthorId = toText(quoteRows[0]?.author_id) ?? null
+    }
+    if (quoteAuthorId !== null && quoteAuthorId !== "" && quoteAuthorId !== viewerId) {
+      const quoteVisRows = try tx.query(
+        "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
+        [viewerId, quoteAuthorId]
+      )
+      const quoteVis = quoteVisRows[0]
+      if (quoteVis === undefined || Boolean(quoteVis.is_blocked) || Boolean(quoteVis.is_muted)) return false
+    }
+    return true
+  }))
+}
+
 effect function isChatEventDeliverableInStore(
   store: Store.Shape | undefined,
   viewerId: string,
@@ -198,17 +258,20 @@ effect function isChatEventDeliverableInStore(
   if (store === undefined || chatId === "") return false
   return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
     const memberRows = try tx.query(
-      "SELECT 1 FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2 LIMIT 1",
+      "SELECT c.kind FROM feed_chat_members m INNER JOIN feed_chats c ON c.id = m.chat_id WHERE m.chat_id = $1 AND m.member_id = $2 LIMIT 1",
       [chatId, viewerId]
     )
-    if (memberRows.length === 0) return false
+    const memberRow = memberRows[0]
+    if (memberRow === undefined) return false
     if (authorId === "" || authorId === viewerId) return true
+    const chatKind = toText(memberRow.kind) ?? "group"
     const visRows = try tx.query(
       "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
       [viewerId, authorId]
     )
     const row = visRows[0]
     if (row === undefined) return false
+    if (chatKind === "direct") return !row.is_blocked
     return !row.is_blocked && !row.is_muted
   }))
 }
@@ -251,12 +314,14 @@ export effect function canDeliverRealtimeEventToViewer(
     case "world.tick":
     case "market.spot":
     case "market.perp":
+    case "market.prediction":
     case "market.clue":
     case "market.resolved":
     case "org.posted":
     case "article.published":
       return true
     case "post.created":
+      return viewerId === undefined ? true : try isPostCreatedDeliverableInStore(store, viewerId, event)
     case "post.deleted":
       return viewerId === undefined ? true : try isAuthorVisibleInStore(store, viewerId, event.authorId)
     case "post.engagement":
@@ -273,7 +338,15 @@ export effect function canDeliverRealtimeEventToViewer(
       if (viewerId === undefined || event.invitedAccountId !== viewerId || !recipientListAllows(event.recipientIds, viewerId)) {
         return false
       }
-      return try isAuthorVisibleInStore(store, viewerId, event.invitedByNpcId)
+      return try isAuthorVisibleInStore(store, viewerId, event.invitedById ?? event.invitedByNpcId)
+    case "chat.updated":
+      if (viewerId === undefined || !recipientListAllows(event.recipientIds, viewerId)) {
+        return false
+      }
+      if (event.action === "deleted" || event.action === "member_removed" || event.action === "member_left") {
+        return event.recipientIds !== undefined && event.recipientIds.includes(viewerId)
+      }
+      return try isChatEventDeliverableInStore(store, viewerId, event.chatId, event.actorId, event.recipientIds)
     case "alpha.invite":
       if (viewerId === undefined || event.targetAccountId !== viewerId || !recipientListAllows(event.recipientIds, viewerId)) {
         return false
@@ -302,10 +375,11 @@ export effect function subscribeFeedEvents(): Stream.Stream<FeedRealtimeEvent>!!
 }
 
 export effect function subscribeViewerFeedEvents(
-  viewerAccountId: string | null | undefined
+  viewerAccountId: string | null | undefined,
+  storeOverride?: Store.Shape
 ): Stream.Stream<FeedRealtimeEvent>!! {
   const maybeStore = try Effect.serviceOption(Store)
-  const store = Option.isSome(maybeStore) ? maybeStore.value : undefined
+  const store = storeOverride ?? (Option.isSome(maybeStore) ? maybeStore.value : undefined)
   const events = try subscribeFeedEvents()
   return Stream.filterEffect(events, (event) => canDeliverRealtimeEventToViewer(store, event, viewerAccountId))
 }
@@ -330,7 +404,7 @@ export function toSseReadableStream(
 }
 
 export effect function createSseResponse(options: SseResponseOptions = {}): Response!! {
-  const events = try subscribeViewerFeedEvents(options.viewerAccountId)
+  const events = try subscribeViewerFeedEvents(options.viewerAccountId, options.store)
   const filtered = options.filter === undefined ? events : Stream.filter(events, options.filter)
   const streamOptions: SseStreamOptions = {
     ...(options.signal === undefined ? {} : { signal: options.signal }),

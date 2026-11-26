@@ -1,5 +1,15 @@
 // spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
-import { toInt, toText, type Row, type Tx, type StoreFailure } from "@repo/db"
+import {
+  resolveActorAvatarUrl,
+  resolveActorBannerUrl,
+  resolveOrgBannerUrl,
+  resolveOrgLogoUrl,
+  toInt,
+  toText,
+  type Row,
+  type Tx,
+  type StoreFailure
+} from "@repo/db"
 import { canCreateNotification, type AccountModeration, type BlockRecord, type ModerationState, type NotificationKind } from "../gen/social__moderation.effect.vibe"
 import type { PresentationMode as PostsPresentationMode } from "../gen/social__posts.effect.vibe"
 import { publishFeedEvent, type FeedRealtimeEvent } from "./realtime.vibe"
@@ -7,6 +17,7 @@ import { publishFeedEvent, type FeedRealtimeEvent } from "./realtime.vibe"
 export error SocialFailure {
   code: string
   message: string
+  retryAfterSeconds?: number
   cause?: unknown
 }
 
@@ -20,6 +31,7 @@ export interface ResolvedSubject {
   readonly handle: string
   readonly displayName: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
   readonly uiMode: SocialPresentationMode
 }
 
@@ -29,6 +41,7 @@ export interface SubjectProfile {
   readonly handle: string
   readonly displayName: string
   readonly avatarUrl: string | null
+  readonly bannerUrl: string | null
 }
 
 export interface SubjectRef {
@@ -42,6 +55,8 @@ export interface NotificationSeed {
   readonly actorId: string | null
   readonly postId: string | null
   readonly marketId: string | null
+  readonly chatId?: string | null
+  readonly inviteId?: string | null
   readonly title: string
   readonly body: string
   readonly isGameOnly: boolean
@@ -55,8 +70,18 @@ module web {
   export function uuid(): string {
     return globalThis.crypto.randomUUID()
   }
+
+  /** @throws {never} */
+  export function isValidHttpsUrl(raw: string): boolean {
+    try {
+      const parsed = new URL(raw)
+      return parsed.protocol === "https:" && parsed.hostname !== ""
+    } catch {
+      return false
+    }
+  }
 }
-import { uuid } from web
+import { isValidHttpsUrl, uuid } from web
 
 export function freshId(): string {
   return uuid()
@@ -74,10 +99,54 @@ export function clampLimit(limit: number | undefined, fallback: number, max: num
   return floored > max ? max : floored
 }
 
+function hasDisallowedUrlCharacters(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code <= 0x20 || code === 0x7f) return true
+  }
+  return /\s/.test(value)
+}
+
+export effect function validateProfileImageUrl(
+  raw: string | null | undefined,
+  fieldLabel: string
+): (string | null)!SocialFailure {
+  if (raw === undefined || raw === null) return null
+  const trimmed = raw.trim()
+  if (trimmed === "") return null
+  if (trimmed.length > 500) {
+    throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} must be 500 characters or fewer` })
+  }
+  if (hasDisallowedUrlCharacters(trimmed)) {
+    throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} contains invalid characters` })
+  }
+  if (trimmed.startsWith("/assets/") || trimmed.startsWith("/images/")) {
+    if (trimmed.includes("..")) {
+      throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} path cannot contain parent traversal` })
+    }
+    return trimmed
+  }
+  if (trimmed.startsWith("https://")) {
+    if (!isValidHttpsUrl(trimmed)) {
+      throw new SocialFailure({ code: "InvalidInput", message: `${fieldLabel} must be a valid https:// URL or /assets/ path` })
+    }
+    return trimmed
+  }
+  throw new SocialFailure({
+    code: "InvalidInput",
+    message: `${fieldLabel} must start with /assets/, /images/, or https://`
+  })
+}
+
 export function normalizeOptionalText(value: string | undefined): string | null {
   if (value === undefined) return null
   const trimmed = value.trim()
   return trimmed === "" ? null : trimmed
+}
+
+export function canonicalHandle(raw: string | undefined, fallback = ""): string {
+  const cleaned = (raw ?? "").trim().replace(/^@+/, "")
+  return (cleaned === "" ? fallback.trim().replace(/^@+/, "") : cleaned).toLowerCase()
 }
 
 export function toSpecMode(mode: SocialPresentationMode | undefined): PostsPresentationMode {
@@ -140,17 +209,20 @@ function subjectFromAccountRow(row: Row): ResolvedSubject {
     handle: toText(row.handle) ?? "",
     displayName: toText(row.display_name) ?? "",
     avatarUrl: toText(row.avatar_url) ?? null,
+    bannerUrl: toText(row.banner_url) ?? null,
     uiMode: mode
   }
 }
 
 function subjectFromActorRow(row: Row): ResolvedSubject {
+  const id = toText(row.id) ?? ""
   return {
-    id: toText(row.id) ?? "",
+    id,
     kind: "npc",
-    handle: toText(row.username) ?? "",
+    handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
     displayName: toText(row.name) ?? "",
-    avatarUrl: null,
+    avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
+    bannerUrl: id !== "" ? resolveActorBannerUrl(id, toText(row.profile_banner_url)) : null,
     uiMode: "game"
   }
 }
@@ -160,30 +232,54 @@ function subjectFromOrgRow(row: Row): ResolvedSubject {
   return {
     id,
     kind: "org",
-    handle: id,
+    handle: canonicalHandle(toText(row.username), id),
     displayName: toText(row.name) ?? "",
-    avatarUrl: null,
+    avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
+    bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null,
     uiMode: "game"
   }
 }
 
-effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | undefined)!(SocialFailure | StoreFailure) {
-  const cleaned = handleOrId.trim().replace(/^@/, "")
-  if (cleaned === "") {
-    throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
-  }
+effect function findAccountByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const accountRows = try tx.query(
-    "SELECT account_id, handle, display_name, avatar_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
+    "SELECT account_id, handle, display_name, avatar_url, banner_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
     [cleaned]
   )
   const accountRow = accountRows[0]
-  if (accountRow !== undefined) return subjectFromAccountRow(accountRow)
+  return accountRow === undefined ? undefined : subjectFromAccountRow(accountRow)
+}
+
+effect function findActorByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const actorRows = try tx.query(
-    "SELECT id, name, username FROM feed_actors WHERE id = $1 OR lower(username) = lower($1) LIMIT 1",
+    "SELECT id, name, username, profile_image_url, profile_banner_url FROM feed_actors WHERE (id = $1 OR lower(username) = lower($1)) AND id NOT LIKE 'test-%' AND id NOT LIKE 'org-%' LIMIT 1",
     [cleaned]
   )
   const actorRow = actorRows[0]
   return actorRow === undefined ? undefined : subjectFromActorRow(actorRow)
+}
+
+effect function findOrgByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
+  const orgRows = try tx.query(
+    "SELECT id, username, name, image_url, banner_url FROM feed_organizations WHERE lower(id) = lower($1) OR lower(COALESCE(username, '')) = lower($1) OR lower(COALESCE(ticker, '')) = lower($1) LIMIT 1",
+    [cleaned]
+  )
+  const orgRow = orgRows[0]
+  return orgRow === undefined ? undefined : subjectFromOrgRow(orgRow)
+}
+
+effect function normalizeHandleOrId(handleOrId: string): string!SocialFailure {
+  const cleaned = handleOrId.trim().replace(/^@/, "")
+  if (cleaned === "") {
+    throw new SocialFailure({ code: "InvalidInput", message: "Account handle or ID is required" })
+  }
+  return cleaned
+}
+
+effect function findUserOrNpcTx(tx: Tx, handleOrId: string): (ResolvedSubject | undefined)!(SocialFailure | StoreFailure) {
+  const cleaned = try normalizeHandleOrId(handleOrId)
+  const account = try findAccountByHandleOrIdTx(tx, cleaned)
+  if (account !== undefined) return account
+  return try findActorByHandleOrIdTx(tx, cleaned)
 }
 
 export effect function resolveUserOrNpcTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
@@ -193,15 +289,13 @@ export effect function resolveUserOrNpcTx(tx: Tx, handleOrId: string): ResolvedS
 }
 
 export effect function resolveSubjectTx(tx: Tx, handleOrId: string): ResolvedSubject!(SocialFailure | StoreFailure) {
-  const found = try findUserOrNpcTx(tx, handleOrId)
-  if (found !== undefined) return found
-  const cleaned = handleOrId.trim().replace(/^@/, "")
-  const orgRows = try tx.query(
-    "SELECT id, name FROM feed_organizations WHERE id = $1 OR lower(ticker) = lower($1) LIMIT 1",
-    [cleaned]
-  )
-  const orgRow = orgRows[0]
-  if (orgRow !== undefined) return subjectFromOrgRow(orgRow)
+  const cleaned = try normalizeHandleOrId(handleOrId)
+  const account = try findAccountByHandleOrIdTx(tx, cleaned)
+  if (account !== undefined) return account
+  const org = try findOrgByHandleOrIdTx(tx, cleaned)
+  if (org !== undefined) return org
+  const actor = try findActorByHandleOrIdTx(tx, cleaned)
+  if (actor !== undefined) return actor
   throw new SocialFailure({ code: "NotFound", message: `Profile not found: ${cleaned}` })
 }
 
@@ -261,7 +355,12 @@ export effect function consumeHourlyRateLimitTx(
     return
   }
   if (recordedCount >= limit) {
-    throw new SocialFailure({ code: "RateLimited", message: "Hourly action limit exceeded" })
+    const retryAfterSeconds = Math.max(1, Math.ceil((recordedStart + HOUR_MS - now) / 1000))
+    throw new SocialFailure({
+      code: "RateLimited",
+      message: "Hourly action limit exceeded",
+      retryAfterSeconds
+    })
   }
   try tx.query(
     "UPDATE feed_rate_limits SET count = count + 1 WHERE scope_key = $1",
@@ -302,8 +401,8 @@ export effect function insertNotificationTx(
   }
   const id = freshId()
   try tx.query(
-    "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
-    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.title, seed.body, seed.isGameOnly, seed.createdAt]
+    "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, chat_id, invite_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12)",
+    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.chatId ?? null, seed.inviteId ?? null, seed.title, seed.body, seed.isGameOnly, seed.createdAt]
   )
   return {
     type: "notification.created",
@@ -313,6 +412,18 @@ export effect function insertNotificationTx(
     isGameOnly: seed.isGameOnly,
     actorId: seed.actorId,
     recipientIds: [seed.accountId]
+  }
+}
+
+function userProfileFromRow(row: Row, id: string): SubjectProfile {
+  const handle = toText(row.handle) ?? id
+  return {
+    id,
+    kind: "user",
+    handle,
+    displayName: toText(row.display_name) ?? handle,
+    avatarUrl: toText(row.avatar_url) ?? null,
+    bannerUrl: toText(row.banner_url) ?? null
   }
 }
 
@@ -326,44 +437,106 @@ export effect function loadSubjectProfilesMapTx(
   const profiles = new Map<string, SubjectProfile>()
   if (userIds.length > 0) {
     const userRows = try tx.query(
-      "SELECT account_id, handle, display_name, avatar_url FROM feed_accounts WHERE account_id = ANY($1)",
+      "SELECT account_id, handle, display_name, avatar_url, banner_url FROM feed_accounts WHERE account_id = ANY($1)",
       [userIds]
     )
     for (const row of userRows) {
       const id = toText(row.account_id) ?? ""
-      profiles.set(`user:${id}`, {
-        id,
-        kind: "user",
-        handle: toText(row.handle) ?? id,
-        displayName: toText(row.display_name) ?? (toText(row.handle) ?? id),
-        avatarUrl: toText(row.avatar_url) ?? null
-      })
+      profiles.set(`user:${id}`, userProfileFromRow(row, id))
     }
   }
   if (npcIds.length > 0) {
-    const npcRows = try tx.query("SELECT id, username, name FROM feed_actors WHERE id = ANY($1)", [npcIds])
+    const npcRows = try tx.query(
+      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1)",
+      [npcIds]
+    )
     for (const row of npcRows) {
       const id = toText(row.id) ?? ""
       profiles.set(`npc:${id}`, {
         id,
         kind: "npc",
-        handle: toText(row.username) ?? id,
+        handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
         displayName: toText(row.name) ?? id,
-        avatarUrl: null
+        avatarUrl: id !== "" ? resolveActorAvatarUrl(id, toText(row.profile_image_url)) : null,
+        bannerUrl: id !== "" ? resolveActorBannerUrl(id, toText(row.profile_banner_url)) : null
       })
     }
   }
   if (orgIds.length > 0) {
-    const orgRows = try tx.query("SELECT id, name FROM feed_organizations WHERE id = ANY($1)", [orgIds])
+    const orgRows = try tx.query(
+      "SELECT id, username, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      [orgIds]
+    )
     for (const row of orgRows) {
       const id = toText(row.id) ?? ""
       profiles.set(`org:${id}`, {
         id,
         kind: "org",
-        handle: id,
+        handle: canonicalHandle(toText(row.username), id),
         displayName: toText(row.name) ?? id,
-        avatarUrl: null
+        avatarUrl: id !== "" ? resolveOrgLogoUrl(id, toText(row.image_url)) : null,
+        bannerUrl: id !== "" ? resolveOrgBannerUrl(id, toText(row.banner_url)) : null
       })
+    }
+  }
+  return profiles
+}
+
+export effect function loadProfilesByIdsTx(
+  tx: Tx,
+  ids: ReadonlyArray<string>
+): Map<string, SubjectProfile>!StoreFailure {
+  const uniqueIds = [...new Set(ids.filter((id) => id !== ""))]
+  const profiles = new Map<string, SubjectProfile>()
+  if (uniqueIds.length === 0) return profiles
+  const userRows = try tx.query(
+    "SELECT account_id, handle, display_name, avatar_url, banner_url FROM feed_accounts WHERE account_id = ANY($1)",
+    [uniqueIds]
+  )
+  for (const row of userRows) {
+    const id = toText(row.account_id) ?? ""
+    if (id !== "") {
+      profiles.set(id, userProfileFromRow(row, id))
+    }
+  }
+  const missingAfterUsers = uniqueIds.filter((id) => !profiles.has(id))
+  if (missingAfterUsers.length > 0) {
+    const orgRows = try tx.query(
+      "SELECT id, username, name, image_url, banner_url FROM feed_organizations WHERE id = ANY($1)",
+      [missingAfterUsers]
+    )
+    for (const row of orgRows) {
+      const id = toText(row.id) ?? ""
+      if (id !== "") {
+        profiles.set(id, {
+          id,
+          kind: "org",
+          handle: canonicalHandle(toText(row.username), id),
+          displayName: toText(row.name) ?? id,
+          avatarUrl: resolveOrgLogoUrl(id, toText(row.image_url)),
+          bannerUrl: resolveOrgBannerUrl(id, toText(row.banner_url))
+        })
+      }
+    }
+  }
+  const missingAfterOrgs = uniqueIds.filter((id) => !profiles.has(id))
+  if (missingAfterOrgs.length > 0) {
+    const npcRows = try tx.query(
+      "SELECT id, username, name, profile_image_url, profile_banner_url FROM feed_actors WHERE id = ANY($1) AND id NOT LIKE 'test-%' AND id NOT LIKE 'org-%'",
+      [missingAfterOrgs]
+    )
+    for (const row of npcRows) {
+      const id = toText(row.id) ?? ""
+      if (id !== "") {
+        profiles.set(id, {
+          id,
+          kind: "npc",
+          handle: canonicalHandle(toText(row.username), id.replace(/^org-/, "")),
+          displayName: toText(row.name) ?? id,
+          avatarUrl: resolveActorAvatarUrl(id, toText(row.profile_image_url)),
+          bannerUrl: resolveActorBannerUrl(id, toText(row.profile_banner_url))
+        })
+      }
     }
   }
   return profiles

@@ -47,7 +47,7 @@ export function PositionRow({ position, onClose, loading = false, disabled = fal
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 border-b border-border bg-card px-4 py-3.5 text-card-foreground sm:flex-row sm:items-center sm:justify-between",
+        "flex flex-col gap-3 border-b border-border bg-background px-4 py-3.5 text-foreground sm:flex-row sm:items-center sm:justify-between",
         className,
       )}
       {...props}

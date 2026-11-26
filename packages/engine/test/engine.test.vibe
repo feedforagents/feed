@@ -5,23 +5,49 @@ import { localStoreLayer } from "@repo/db/node"
 import { buyPredictionShares, openPerpPosition } from "@repo/markets"
 import { TestClock } from "effect/testing"
 import {
+  DEFAULT_RSS_URLS,
   EngineFailure,
+  PromptCatalog,
+  UNCERTAIN_RESERVATION_TTL_MS,
   approveManualHold,
   confirmLlmSpend,
   ensureRollingMarketSlots,
+  executeNpcDecision,
   fastForwardSimulatedHours,
+  findEligibleAlphaTarget,
+  formatActorToneAndFinanceGuardrails,
+  formatActorVoiceContext,
   getDailySpendStatus,
   getEngineAdminStatus,
+  hasFirstPersonSingularLeak,
+  interleaveRssFeedItems,
+  isRuntimeNpcActor,
   loadPublicWorldSnapshot,
   markLlmSpendUncertain,
+  orgPromptIdForType,
   overrideManualHold,
   parseLlmJsonRecord,
+  realityGroundingContent,
+  reconcileStaleUncertainSpend,
+  replaceActorSlugsWithNames,
   reserveLlmBudget,
+  resolveClockMode,
+  runArticleTick,
+  runGameTick,
   runMarketsRecovery,
   runMarketsTick,
   runMinuteTick,
   runNpcTick,
+  runOrganizationTick,
+  runPerpFundingTick,
+  runRssRefreshTick,
+  runWorldFactsTick,
+  sanitizeNarrativeText,
+  trimToWordBoundary,
+  utcMinuteCycle,
+  validateNpcTradingDecision,
 } from "../src/index.vibe"
+import { actors as packActors } from "@repo/pack-default"
 
 module nodeEnv {
   import process from "node:process"
@@ -527,3 +553,335 @@ it.effect('Engine parses wrapped LLM JSON, filters expired snapshot markets, fun
     })
   })
 }))
+
+it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pauses all 9 tick jobs, funding cutover arms future period, and stale uncertain spend reconciles (spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/worldClock.md, "Simulated clock fast-forward is restricted to simulated mode"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes"; spec/engine/worldClock.md, "Story: Guard perpetual funding cutover across 8-hour UTC periods"; spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+  const startMs = Date.UTC(2026, 10, 24, 10, 0, 0)
+  try withSeededEngine(startMs, effect {
+    const prodMode = try withEnvOverrides(
+      { FEED_CLOCK_MODE: "", NODE_ENV: "development", DEPLOYMENT_ENV: "production" },
+      sync(() => resolveClockMode()),
+    )
+    const prodFastForwardErr = try withEnvOverrides(
+      { FEED_CLOCK_MODE: "", NODE_ENV: "development", DEPLOYMENT_ENV: "production" },
+      Effect.flip(fastForwardSimulatedHours(1)),
+    )
+
+    try queryRows("UPDATE feed_world_state SET game_running = false WHERE singleton = true")
+    const pausedMinute = try runMinuteTick(startMs)
+    const pausedGame = try runGameTick(startMs)
+    const pausedMarkets = try runMarketsTick(startMs)
+    const pausedRecovery = try runMarketsRecovery(startMs)
+    const pausedNpc = try runNpcTick(startMs)
+    const pausedOrg = try runOrganizationTick(startMs)
+    const pausedArticle = try runArticleTick(startMs)
+    const pausedFunding = try runPerpFundingTick(startMs)
+    const pausedFacts = try runWorldFactsTick(startMs)
+    const pausedRss = try runRssRefreshTick(startMs)
+    const pausedHealthRows = try queryRows("SELECT job_name, last_status FROM feed_tick_health ORDER BY job_name ASC")
+    const pausedStatusByJob = new Map(pausedHealthRows.map((r) => [toText(r.job_name) ?? "", toText(r.last_status) ?? ""]))
+
+    try queryRows("UPDATE feed_world_state SET game_running = true WHERE singleton = true")
+    const firstFunding = try runPerpFundingTick(startMs)
+    const cutoverRow = (try queryRows("SELECT funding_cutover_period FROM feed_world_state WHERE singleton = true"))[0] ?? {}
+    const minuteRes = try runMinuteTick(startMs + 60_000)
+    const leasesAfterMinute = try queryRows("SELECT job_name FROM feed_job_leases WHERE job_name = 'minute-tick'")
+    const wallNow = try Clock.currentTimeMillis
+    try queryRows(
+      `INSERT INTO feed_job_leases (job_name, owner_id, lease_until, updated_at)
+       VALUES ('minute-tick', 'other-worker', $1, $2)
+       ON CONFLICT (job_name) DO UPDATE SET owner_id = EXCLUDED.owner_id, lease_until = EXCLUDED.lease_until, updated_at = EXCLUDED.updated_at`,
+      [wallNow + 60_000, wallNow],
+    )
+    const blockedByLeaseMinute = try runMinuteTick(startMs + 120_000)
+    try queryRows("DELETE FROM feed_job_leases WHERE job_name = 'minute-tick'")
+    const minuteAfterNextPeriod = try runMinuteTick(startMs + 9 * 3_600_000)
+
+    const staleRes = try reserveLlmBudget({
+      attemptId: "stale-uncertain-1",
+      estimatedMicros: 5_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: startMs,
+    })
+    try markLlmSpendUncertain({ attemptId: staleRes.attemptId, nowMs: startMs })
+    const beforeReconcile = try getDailySpendStatus(startMs + 60_000)
+    const afterReconcileRun = try reconcileStaleUncertainSpend(startMs + UNCERTAIN_RESERVATION_TTL_MS + 1_000)
+    const afterReconcile = try getDailySpendStatus(startMs + UNCERTAIN_RESERVATION_TTL_MS + 1_000)
+
+    const interleaved = interleaveRssFeedItems([
+      ["feedA-1", "feedA-2", "feedA-3"],
+      ["feedB-1", "feedB-2"],
+      ["feedC-1"],
+    ])
+
+    try check(() => {
+      assert.strictEqual(prodMode, "ClockRealtime")
+      assert.strictEqual(failureCode(prodFastForwardErr), "CLOCK_MODE_INVALID")
+      assert.strictEqual(pausedMinute.skipped, true)
+      assert.strictEqual(pausedGame.minute.skipped, true)
+      assert.strictEqual(pausedMarkets.skipped, true)
+      assert.strictEqual(pausedRecovery.processed, 0)
+      assert.strictEqual(pausedNpc.actorsSelected, 0)
+      assert.strictEqual(pausedOrg.skipped, true)
+      assert.strictEqual(pausedOrg.postsCreated, 0)
+      assert.strictEqual(pausedArticle.skipped, true)
+      assert.isNull(pausedArticle.articleId)
+      assert.strictEqual(pausedFunding.skipped, true)
+      assert.strictEqual(pausedFacts.skipped, true)
+      assert.strictEqual(pausedFacts.factsAdded, 0)
+      assert.strictEqual(pausedRss.skipped, true)
+      for (const job of [
+        "minute-tick",
+        "game-tick",
+        "markets-tick",
+        "markets-recovery",
+        "npc-tick",
+        "organization-tick",
+        "article-tick",
+        "perp-funding",
+        "world-facts",
+        "rss-refresh",
+      ]) {
+        assert.strictEqual(pausedStatusByJob.get(job), "skipped")
+      }
+      assert.strictEqual(firstFunding.accrued, false)
+      assert.strictEqual(firstFunding.cutoverConfigured, true)
+      assert.strictEqual(toInt(cutoverRow.funding_cutover_period), firstFunding.period + 1)
+      assert.strictEqual(minuteRes.fundingAccrued, false)
+      assert.strictEqual(leasesAfterMinute.length, 0)
+      assert.strictEqual(blockedByLeaseMinute.skipped, true)
+      assert.strictEqual(minuteAfterNextPeriod.fundingAccrued, true)
+      assert.strictEqual(utcMinuteCycle(startMs), Math.floor(startMs / 60_000))
+      assert.isTrue(minuteRes.spotTradesSimulated >= 1)
+      assert.strictEqual(beforeReconcile.uncertainReservations, 1)
+      assert.strictEqual(beforeReconcile.reservedCents, 500)
+      assert.strictEqual(afterReconcileRun.reconciledCount, 1)
+      assert.strictEqual(afterReconcileRun.releasedMicros, 5_000_000)
+      assert.strictEqual(afterReconcile.uncertainReservations, 0)
+      assert.strictEqual(afterReconcile.reservedCents, 0)
+      assert.isTrue(DEFAULT_RSS_URLS.length >= 8)
+      assert.deepStrictEqual(interleaved, ["feedA-1", "feedB-1", "feedC-1", "feedA-2", "feedB-2", "feedA-3"])
+    })
+  })
+}))
+
+it.effect('NPCs execute full trading and social actions, alpha invites honor blocks and cooldowns, and atomic settlement publishes clean proof articles and NEW MARKET posts (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', () => scoped(effect {
+  const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
+  try withSeededEngine(liveNow, effect {
+    const actorId = "sam-ailtman"
+    const humanId = "alpha-tester-user"
+    try queryRows(
+      `INSERT INTO feed_accounts (account_id, handle, display_name, balance_cents, starting_grant_cents, created_at, updated_at)
+       VALUES ($1, $2, $3, 10000, 10000, $4, $4)`,
+      [humanId, "alphatester", "Alpha Tester", liveNow],
+    )
+    const humanPostId = "human-post-for-npc"
+    try queryRows(
+      `INSERT INTO feed_posts (id, author_id, author_kind, content, like_count, repost_count, reply_count, created_at)
+       VALUES ($1, $2, 'user', 'Watching $NVDAI and $OPENAGI flow closely today', 0, 0, 0, $3)`,
+      [humanPostId, humanId, liveNow],
+    )
+
+    const boughtPred = try buyPredictionShares({
+      actorId,
+      actorKind: "npc",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 2_000,
+    })
+    const soldPredRes = try executeNpcDecision(
+      actorId,
+      { kind: "SELL_PREDICTION", marketId: "seed-market-1", side: "yes", shares: Math.min(boughtPred.shares, 500) },
+      liveNow,
+    )
+    const openedPerp = try openPerpPosition({
+      ownerId: actorId,
+      ownerKind: "npc",
+      ticker: "NVDAI",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 3,
+    })
+    const closedPerpRes = try executeNpcDecision(
+      actorId,
+      { kind: "CLOSE_PERP", positionId: openedPerp.positionId, closePct: 100 },
+      liveNow,
+    )
+    const closedPerpRow = (try queryRows("SELECT status FROM feed_perp_positions WHERE id = $1", [openedPerp.positionId]))[0] ?? {}
+
+    const likeRes = try executeNpcDecision(actorId, { kind: "LIKE_POST", postId: humanPostId }, liveNow)
+    const repostRes = try executeNpcDecision(actorId, { kind: "REPOST_POST", postId: humanPostId }, liveNow)
+    const followRes = try executeNpcDecision(actorId, { kind: "FOLLOW_USER", targetId: humanId }, liveNow)
+    const likeRows = try queryRows("SELECT 1 FROM feed_post_likes WHERE post_id = $1 AND account_id = $2", [humanPostId, actorId])
+    const repostRows = try queryRows("SELECT 1 FROM feed_post_reposts WHERE post_id = $1 AND account_id = $2", [humanPostId, actorId])
+    const followRows = try queryRows("SELECT 1 FROM feed_follows WHERE follower_id = $1 AND target_id = $2", [actorId, humanId])
+
+    const npcPost1 = "npc-alpha-post-1"
+    const npcPost2 = "npc-alpha-post-2"
+    try queryRows(
+      `INSERT INTO feed_posts (id, author_id, author_kind, content, like_count, repost_count, reply_count, created_at)
+       VALUES ($1, $3, 'npc', 'Compute tape check one', 1, 0, 0, $4),
+              ($2, $3, 'npc', 'Compute tape check two', 1, 0, 0, $4)`,
+      [npcPost1, npcPost2, actorId, liveNow],
+    )
+    try queryRows(
+      `INSERT INTO feed_post_likes (post_id, account_id, created_at)
+       VALUES ($1, $3, $4), ($2, $3, $4)`,
+      [npcPost1, npcPost2, humanId, liveNow],
+    )
+    const eligibleBeforeBlock = try findEligibleAlphaTarget(actorId, liveNow)
+    try queryRows("INSERT INTO feed_blocks (blocker_id, blocked_id, created_at) VALUES ($1, $2, $3)", [humanId, actorId, liveNow])
+    const eligibleWhileBlocked = try findEligibleAlphaTarget(actorId, liveNow)
+    try queryRows("DELETE FROM feed_blocks WHERE blocker_id = $1 AND blocked_id = $2", [humanId, actorId])
+    try queryRows(
+      `INSERT INTO feed_alpha_invite_cooldowns (actor_id, account_id, decline_count, next_eligible_at, updated_at)
+       VALUES ($1, $2, 1, $3, $4)`,
+      [actorId, humanId, liveNow + 60_000, liveNow],
+    )
+    const eligibleDuringCooldown = try findEligibleAlphaTarget(actorId, liveNow)
+    const eligibleAfterCooldown = try findEligibleAlphaTarget(actorId, liveNow + 120_000)
+
+    const cappedNpcTick = try withEnvOverrides({ NPC_MAX_STEPS_PER_TICK: "2" }, runNpcTick(liveNow))
+
+    const store = try Store
+    const worldSnap = try store.transaction(effect (tx: Tx) => try loadPublicWorldSnapshot(tx, liveNow))
+
+    const settleMarketId = "seed-market-8"
+    try queryRows(
+      `UPDATE feed_prediction_markets
+       SET status = 'expired', phase = 'expired', secret_outcome = 'YES', expires_at = $2
+       WHERE id = $1`,
+      [settleMarketId, liveNow - 10_000],
+    )
+    const recovery = try runMarketsRecovery(liveNow)
+    const settledMarket = (try queryRows(
+      "SELECT status, resolved_outcome, resolution_article_id, resolution_proof FROM feed_prediction_markets WHERE id = $1",
+      [settleMarketId],
+    ))[0] ?? {}
+    const proofArticleId = toText(settledMarket.resolution_article_id) ?? ""
+    const proofArticleRow = (try queryRows(
+      "SELECT title, summary, body, is_resolution_proof FROM feed_articles WHERE id = $1",
+      [proofArticleId],
+    ))[0] ?? {}
+    const remainingWorkRows = try queryRows("SELECT 1 FROM feed_prediction_resolution_work WHERE market_id = $1", [settleMarketId])
+    const newMarketPosts = try queryRows(
+      "SELECT content FROM feed_posts WHERE author_kind = 'org' AND content LIKE 'NEW MARKET%'",
+    )
+    const worldEvents = try queryRows("SELECT event_type FROM feed_world_events")
+    const eventTypes = new Set(worldEvents.map((r) => toText(r.event_type) ?? ""))
+
+    const orgTick = try runOrganizationTick(liveNow)
+    const orgPosts = try queryRows("SELECT author_id, content FROM feed_posts WHERE author_kind = 'org' AND deleted_at IS NULL")
+    const clueActors = try queryRows("SELECT actor_id FROM feed_npc_market_clues")
+    const artTick1 = try runArticleTick(liveNow)
+    const artTick2 = try runArticleTick(liveNow + 30 * 60_000 * 6)
+
+    const trimmedHashtag = trimToWordBoundary("Stay tuned for more #Bitcoin updates right now", 28)
+    const trimmedSentence = trimToWordBoundary("Cybercab v14 shipped today. Orderbook looks wild! #TeslAI #Autonomous", 54)
+    const cleanedSlugText = replaceActorSlugsWithNames("Sources close to glenn-greenaiwald and org-politaico confirmed the leak.")
+    const scrubbedNarrative = sanitizeNarrativeText("OpenAI and Elon Musk spoke to Bloomberg about NVIDIA 🚀 #AI #crypto", 240)
+    const minNotionalPerpDecision = validateNpcTradingDecision(
+      { actions: [{ kind: "PERP_TRADE", ticker: "NVDAI", side: "long", collateralCents: 500, leverage: 1 }] },
+      4,
+      ["NVDAI"],
+      ["seed-market-1"],
+    )
+    const glennPack = packActors.find((a) => a.id === "glenn-greenaiwald")
+    const glennVoiceCtx = formatActorVoiceContext(glennPack, "fallback", 42)
+    const glennGuardrails = formatActorToneAndFinanceGuardrails(glennPack)
+    const multiPostDecisions = validateNpcTradingDecision(
+      {
+        actions: [
+          { kind: "CREATE_POST", content: "First post on $NVDAI" },
+          { kind: "CREATE_POST", content: "Second duplicate spam post" },
+          { kind: "CREATE_POST", content: "Third spam post" },
+        ],
+      },
+      4,
+      ["NVDAI"],
+      ["seed-market-1"],
+    )
+    const postAuthorCountsBefore = try queryRows(
+      `SELECT author_id, COUNT(*)::int AS cnt FROM feed_posts WHERE author_kind = 'npc' AND reply_to_post_id IS NULL AND created_at >= $1 GROUP BY author_id`,
+      [liveNow - 600_000],
+    )
+    const maxPostsPerNpcInWindow = Math.max(0, ...postAuthorCountsBefore.map((r) => toInt(r.cnt)))
+
+    try check(() => {
+      assert.strictEqual(trimmedHashtag, "Stay tuned for more...")
+      assert.strictEqual(trimmedSentence, "Cybercab v14 shipped today. Orderbook looks wild!")
+      assert.strictEqual(cleanedSlugText, "Sources close to Glenn GreenAIwald and PolitAIco confirmed the leak.")
+      assert.strictEqual(scrubbedNarrative, "OpenAGI and AIlon Musk spoke to BloombAIrg about NVIDAI")
+      assert.isFalse(isRuntimeNpcActor("org-bloombairg"))
+      assert.isFalse(isRuntimeNpcActor("org-openagi"))
+      assert.isTrue(isRuntimeNpcActor("sam-ailtman"))
+      assert.strictEqual(orgPromptIdForType("media"), "orgMediaPost")
+      assert.strictEqual(orgPromptIdForType("company"), "orgCompanyPost")
+      assert.strictEqual(orgPromptIdForType("government"), "orgGovernmentPost")
+      assert.strictEqual(orgPromptIdForType("vc"), "orgVcPost")
+      assert.strictEqual(orgPromptIdForType("financial"), "orgFinancialPost")
+      assert.strictEqual(orgPromptIdForType("organization"), "orgFoundationPost")
+      assert.isTrue(PromptCatalog.orgMediaPost.system.includes("THIRD-PERSON"))
+      assert.isTrue(PromptCatalog.orgMediaPost.system.includes("NEVER use 'I', 'me', 'my'"))
+      assert.isTrue(realityGroundingContent.includes("Sim Cook"))
+      assert.isTrue(realityGroundingContent.includes("AItropic"))
+      assert.isTrue(realityGroundingContent.includes("NVIDAI"))
+      assert.isTrue(realityGroundingContent.includes("Block Rock"))
+      assert.isFalse(realityGroundingContent.includes("GPT-5"))
+      assert.isFalse(realityGroundingContent.includes("Tim CAIok"))
+      assert.isFalse(realityGroundingContent.includes("AInthropic"))
+      assert.isFalse(realityGroundingContent.includes("NVAIDAI"))
+      assert.strictEqual(minNotionalPerpDecision.length, 1)
+      assert.isTrue(
+        minNotionalPerpDecision[0]?.kind === "PERP_TRADE" &&
+          minNotionalPerpDecision[0].collateralCents * minNotionalPerpDecision[0].leverage >= 1000,
+      )
+      assert.isTrue(glennVoiceCtx.includes("Example Posts"))
+      assert.isTrue(glennGuardrails.includes("NOT a quant"))
+      assert.isTrue(orgPosts.every((r) => !hasFirstPersonSingularLeak(toText(r.content) ?? "")))
+      assert.isTrue(clueActors.every((r) => !(toText(r.actor_id) ?? "").startsWith("org-")))
+      assert.strictEqual(multiPostDecisions.filter((d) => d.kind === "CREATE_POST").length, 1)
+      assert.isTrue(PromptCatalog.ambientPost.system.includes("FIRST PERSON"))
+      assert.isTrue(PromptCatalog.commentary.system.includes("FIRST PERSON"))
+      assert.isTrue(PromptCatalog.replyPost.system.includes("FIRST PERSON"))
+      assert.isTrue(PromptCatalog.ambientPost.system.includes("NVIDAI"))
+      assert.isTrue(maxPostsPerNpcInWindow <= 2)
+      assert.strictEqual(soldPredRes.success, true)
+      assert.strictEqual(closedPerpRes.success, true)
+      assert.strictEqual(toText(closedPerpRow.status), "closed")
+      assert.strictEqual(likeRes.success, true)
+      assert.strictEqual(repostRes.success, true)
+      assert.strictEqual(followRes.success, true)
+      assert.strictEqual(likeRows.length, 1)
+      assert.strictEqual(repostRows.length, 1)
+      assert.strictEqual(followRows.length, 1)
+      assert.strictEqual(eligibleBeforeBlock, humanId)
+      assert.isNull(eligibleWhileBlocked)
+      assert.isNull(eligibleDuringCooldown)
+      assert.strictEqual(eligibleAfterCooldown, humanId)
+      assert.strictEqual(cappedNpcTick.maxStepsUsed, 2)
+      assert.isTrue(worldSnap.tickers.includes("NVDAI"))
+      assert.isTrue(worldSnap.tickers.includes("OPENAGI"))
+      assert.isTrue(worldSnap.tickers.includes("TSLAI"))
+      assert.isTrue(worldSnap.tickers.includes("METAI"))
+      assert.isTrue(worldSnap.worldContext.includes("NVDAI"))
+      assert.isTrue(worldSnap.worldContext.includes("OPENAGI"))
+      assert.isTrue(worldSnap.worldContext.includes("TSLAI"))
+      assert.strictEqual(recovery.resolved, 1)
+      assert.strictEqual(toText(settledMarket.status), "resolved")
+      assert.strictEqual(toText(settledMarket.resolved_outcome), "YES")
+      assert.isTrue(proofArticleId.length > 0)
+      assert.strictEqual(proofArticleRow.is_resolution_proof, true)
+      assert.isFalse((toText(proofArticleRow.summary) ?? "").includes("[proof-yes]"))
+      assert.isFalse((toText(proofArticleRow.summary) ?? "").includes("[proof-no]"))
+      assert.isFalse((toText(settledMarket.resolution_proof) ?? "").includes("[proof-yes]"))
+      assert.strictEqual(remainingWorkRows.length, 0)
+      assert.isTrue(newMarketPosts.length >= 1)
+      assert.isTrue(eventTypes.has("market_resolution"))
+      assert.isTrue(eventTypes.has("market_opened"))
+      assert.isTrue(orgTick.postsCreated >= 2)
+      assert.isNotNull(artTick1.articleId)
+      assert.isNotNull(artTick2.articleId)
+    })
+  })
+}), 180_000)

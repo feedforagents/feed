@@ -2,6 +2,7 @@
 import {
   AgentRuntime,
   createCharacter,
+  readEnv,
   stringToUuid,
   type Action,
   type ActionResult,
@@ -12,21 +13,56 @@ import {
   type State,
   type UUID,
 } from "@elizaos/core"
-import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
+import { Store, type Row, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
 import {
+  MIN_SELL_SHARE_UNITS,
   buyPredictionShares,
+  closePerpPosition,
   executeNpcSpotTrade,
   listPerpMarkets,
   listPerpPositions,
   listPredictionMarkets,
   openPerpPosition,
+  sellPredictionShares,
+  type PerpPositionView,
 } from "@repo/markets"
-import { actors, type PackActor } from "@repo/pack-default"
-import { RealtimeBus, createNpcAlphaInvite, createPost, listFeedPosts, sendChatMessage } from "@repo/social"
+import { actors, organizations, type PackActor } from "@repo/pack-default"
+import {
+  RealtimeBus,
+  createNpcAlphaInvite,
+  createPost,
+  followAccount,
+  likePost,
+  listFeedPosts,
+  repostPost,
+  sendChatMessage,
+} from "@repo/social"
 import { minAlphaEngagement } from "../gen/engine__npcLoop.effect.vibe"
 import { generateCompletion } from "./llm-client.vibe"
-import { buildWorldContext, formatFeedDiversityHint, renderPrompt, validateNpcTradingDecision } from "./prompts.vibe"
-import { EngineFailure, hashString, maybePublishFeedEvent, newEngineId, parseLlmJsonRecord, resolveClockNow, sanitizeText } from "./shared.vibe"
+import {
+  buildWorldContext,
+  formatActorToneAndFinanceGuardrails,
+  formatActorVoiceContext,
+  formatFeedDiversityHint,
+  prioritizePerpMarkets,
+  renderPrompt,
+  validateNpcTradingDecision,
+  type NpcDecisionAction,
+} from "./prompts.vibe"
+import {
+  EngineFailure,
+  displayNameForEntity,
+  hashString,
+  isRuntimeNpcActor,
+  maybePublishFeedEvent,
+  newEngineId,
+  parseLlmJsonRecord,
+  resolveClockNow,
+  safeNonNegInt,
+  sanitizeNarrativeText,
+  sanitizeText,
+  stripLeadingSelfPrefix,
+} from "./shared.vibe"
 import { getDailySpendStatus } from "./spend-budget.vibe"
 
 interface DbActorRow {
@@ -48,6 +84,10 @@ export interface NpcTickBatchSummary {
 }
 
 type StoreEffectRunner = <A, E>(eff: A!E!Store) => Promise<A>
+
+const packActorById: ReadonlyMap<string, PackActor> = new Map(actors.map((a) => [a.id, a]))
+const orgById = new Map(organizations.map((o) => [o.id, o]))
+const ACTOR_POST_COOLDOWN_MS = 10 * 60_000
 
 function asParamRecord(options: unknown, message: Memory): Record<string, unknown> {
   const opt = options as { readonly parameters?: unknown } | undefined
@@ -108,16 +148,24 @@ function buildNpcCharacter(actor: DbActorRow, packActor: PackActor | undefined):
 }
 
 interface NpcProviderSnapshot {
+  readonly worldClockText: string
   readonly worldFactsText: string
   readonly marketsText: string
   readonly postsText: string
   readonly portfolioText: string
+  readonly alphaChatsText: string
+  readonly ownRecentPosts: ReadonlyArray<string>
   readonly worldContext: string
   readonly diversityHint: string
   readonly tickers: ReadonlyArray<string>
   readonly marketIds: ReadonlyArray<string>
   readonly replyPostIds: ReadonlyArray<string>
   readonly chatIds: ReadonlyArray<string>
+  readonly openPerpPositionIds: ReadonlyArray<string>
+  readonly openPerpPositionsSummary: string
+  readonly heldPredictionKeys: ReadonlyArray<string>
+  readonly heldPredictionsSummary: string
+  readonly followTargetIds: ReadonlyArray<string>
 }
 
 effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcProviderSnapshot!StoreFailure!Store {
@@ -129,7 +177,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
     const predPositions = try tx.query(
       `SELECT market_id, side, shares, cost_basis_cents
        FROM feed_prediction_positions
-       WHERE holder_id = $1 AND holder_kind = 'npc' AND shares > 0`,
+       WHERE holder_id = $1 AND holder_kind = 'npc' AND settled_at IS NULL AND shares > 0`,
       [actor.id],
     )
     const chatRows = try tx.query(
@@ -141,12 +189,71 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
        LIMIT 5`,
       [actor.id],
     )
-    return { stateRow: stateRows[0] ?? {}, facts, headlines, predPositions, chatRows }
+    const chatIds = chatRows.map((c) => toText(c.id) ?? "").filter((id) => id.length > 0)
+    const chatMessages = chatIds.length > 0
+      ? try tx.query(
+          `SELECT chat_id, sender_id, body
+           FROM feed_messages
+           WHERE chat_id = ANY($1)
+           ORDER BY created_at DESC
+           LIMIT 6`,
+          [chatIds],
+        )
+      : []
+    const followCandidates = try tx.query(
+      `SELECT a.account_id AS target_id
+       FROM feed_accounts a
+       WHERE NOT EXISTS (
+         SELECT 1 FROM feed_follows f WHERE f.follower_id = $1 AND f.target_id = a.account_id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM feed_blocks b
+         WHERE (b.blocker_id = $1 AND b.blocked_id = a.account_id)
+            OR (b.blocker_id = a.account_id AND b.blocked_id = $1)
+       )
+       ORDER BY a.updated_at DESC
+       LIMIT 6`,
+      [actor.id],
+    )
+    const alreadyFollowingRows = try tx.query(
+      "SELECT target_id FROM feed_follows WHERE follower_id = $1",
+      [actor.id],
+    )
+    const blockedRows = try tx.query(
+      "SELECT blocker_id, blocked_id FROM feed_blocks WHERE blocker_id = $1 OR blocked_id = $1",
+      [actor.id],
+    )
+    const ownPostRows = try tx.query(
+      `SELECT content
+       FROM feed_posts
+       WHERE author_id = $1 AND author_kind = 'npc' AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 5`,
+      [actor.id],
+    )
+    return {
+      stateRow: stateRows[0] ?? {},
+      facts,
+      headlines,
+      predPositions,
+      chatRows,
+      chatMessages,
+      followCandidates,
+      ownPostRows,
+      alreadyFollowing: new Set(alreadyFollowingRows.map((r) => toText(r.target_id) ?? "")),
+      blockedIds: new Set(
+        blockedRows.map((r) => {
+          const blocker = toText(r.blocker_id) ?? ""
+          const blocked = toText(r.blocked_id) ?? ""
+          return blocker === actor.id ? blocked : blocker
+        }),
+      ),
+    }
   })
   const openMarketsRaw = listPredictionMarkets("open") catch effect () => []
   const perpMarketsRaw = listPerpMarkets() catch effect () => []
-  const perpPositionsRaw = listPerpPositions(actor.id) catch effect () => []
-  const feedPage = listFeedPosts({ tab: "latest", mode: "game", limit: 10 }) catch effect () => ({ items: [] })
+  const perpPositionsRaw: ReadonlyArray<PerpPositionView> = listPerpPositions(actor.id) catch effect () => []
+  const feedPage = listFeedPosts({ tab: "latest", mode: "game", limit: 12 }) catch effect () => ({ items: [] })
   const feedItems = Array.isArray(feedPage)
     ? (feedPage as ReadonlyArray<Record<string, unknown>>)
     : Array.isArray((feedPage as { readonly items?: unknown }).items)
@@ -166,7 +273,7 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
       expiresAt: toInt(row.expiresAt ?? row.expires_at),
     }
   }).filter((m) => m.id.length > 0 && m.expiresAt > nowMs)
-  const perps = (Array.isArray(perpMarketsRaw) ? perpMarketsRaw : []).map((p) => {
+  const rawPerps = (Array.isArray(perpMarketsRaw) ? perpMarketsRaw : []).map((p) => {
     const row = p as Record<string, unknown>
     return {
       ticker: toText(row.ticker) ?? "",
@@ -175,21 +282,45 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
       fundingRateBps: toInt(row.fundingRateBps ?? row.funding_rate_bps),
     }
   }).filter((p) => p.ticker.length > 0)
-  const recentPosts = feedItems.map((p) => ({
-    id: toText(p.id) ?? "",
-    authorId: toText(p.authorId ?? p.author_id) ?? "",
-    authorKind: toText(p.authorKind ?? p.author_kind) ?? "npc",
-    content: toText(p.content) ?? "",
-  })).filter((p) => p.id.length > 0)
-  const predSummary = dbSnap.predPositions.map((r) => `${toText(r.market_id)}:${toText(r.side)}(${toInt(r.shares)})`).join(", ") || "none"
-  const perpList = Array.isArray(perpPositionsRaw) ? perpPositionsRaw : []
-  const portfolioText = `Cash: $${(actor.balanceCents / 100).toFixed(2)} | Prediction Positions: ${predSummary} | Open Perps: ${perpList.length}`
+  const perps = prioritizePerpMarkets(rawPerps, Math.max(16, rawPerps.length))
+  const recentPosts = feedItems.map((p) => {
+    const authorId = toText(p.authorId ?? p.author_id) ?? ""
+    const authorName = displayNameForEntity(authorId, toText(p.authorDisplayName ?? p.author_display_name))
+    return {
+      id: toText(p.id) ?? "",
+      authorId,
+      authorName,
+      authorKind: toText(p.authorKind ?? p.author_kind) ?? "npc",
+      content: toText(p.content) ?? "",
+    }
+  }).filter((p) => p.id.length > 0)
+  const openPerps = (Array.isArray(perpPositionsRaw) ? perpPositionsRaw : []).filter((p) => p.status === "open")
+  const openPerpPositionIds = openPerps.map((p) => p.id)
+  const openPerpEntries = openPerps.map((p) => {
+    const pnlSign = p.unrealizedPnlCents >= 0 ? "+" : ""
+    return `${p.id}:${p.ticker}:${p.side}(${pnlSign}${p.unrealizedPnlCents}c)`
+  })
+  const openPerpPositionsSummary = openPerpEntries.join(", ") || "(none)"
+  const heldPredEntries = dbSnap.predPositions.map((r) => {
+    const marketId = toText(r.market_id) ?? ""
+    const side = (toText(r.side) ?? "YES").toLowerCase() === "no" ? "no" : "yes"
+    const shares = Math.max(0, toInt(r.shares))
+    return { key: `${marketId}:${side}`, text: `${marketId}:${side}(${shares})` }
+  }).filter((entry) => entry.key.length > 4)
+  const heldPredictionKeys = heldPredEntries.map((e) => e.key)
+  const heldPredictionsSummary = heldPredEntries.map((e) => e.text).join(", ") || "(none)"
+  const portfolioText =
+    `Cash: $${(actor.balanceCents / 100).toFixed(2)} | Held Predictions: ${heldPredictionsSummary} | Open Perps (${openPerps.length}): ${openPerpPositionsSummary}`
   const factsLines = dbSnap.facts.map((r) => toText(r.fact_text) ?? "").filter((s) => s.length > 0)
   const headlineLines = dbSnap.headlines.map((r) => toText(r.headline) ?? "").filter((s) => s.length > 0)
+  const currentDay = Math.max(1, safeNonNegInt(dbSnap.stateRow.current_day, 1))
+  const currentHour = safeNonNegInt(dbSnap.stateRow.current_hour, 0)
+  const worldPhase = toText(dbSnap.stateRow.phase) ?? "active"
+  const worldClockText = `World Clock: Day ${currentDay}, Hour ${String(currentHour).padStart(2, "0")}:00 UTC (Phase: ${worldPhase})`
   const worldContext = buildWorldContext({
-    currentDay: Math.max(1, toInt(dbSnap.stateRow.current_day) || 1),
-    currentHour: Math.max(0, toInt(dbSnap.stateRow.current_hour)),
-    phase: toText(dbSnap.stateRow.phase) ?? "active",
+    currentDay,
+    currentHour,
+    phase: worldPhase,
     worldFacts: factsLines,
     parodyHeadlines: headlineLines,
     openMarkets: markets,
@@ -197,17 +328,63 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
     recentPosts,
     actorSummary: portfolioText,
   })
+  const predMarketsSummary = markets.slice(0, 8).map((m) => `${m.id} (${m.yesProbPct}% YES): ${m.question}`).join(" | ")
+  const perpQuotesSummary = perps
+    .slice(0, 12)
+    .map((p) => `$${p.ticker} mark $${(p.markPriceCents / 100).toFixed(2)} (idx $${(p.indexPriceCents / 100).toFixed(2)}, ${p.fundingRateBps}bps)`)
+    .join(" | ")
+  const marketsText = [
+    predMarketsSummary ? `Predictions: ${predMarketsSummary}` : "",
+    perpQuotesSummary ? `Perps: ${perpQuotesSummary}` : "",
+  ]
+    .filter((s) => s.length > 0)
+    .join(" || ") || "No open markets."
+  const chatNameById = new Map(dbSnap.chatRows.map((c) => [toText(c.id) ?? "", toText(c.name) ?? "Alpha Desk"]))
+  const chatLines = dbSnap.chatRows.map((c) => `${toText(c.id) ?? ""} (${toText(c.name) ?? "Alpha Desk"})`)
+  const recentChatLines = dbSnap.chatMessages.map(
+    (m) => `[${chatNameById.get(toText(m.chat_id) ?? "") ?? toText(m.chat_id) ?? "alpha"}] ${displayNameForEntity(toText(m.sender_id) ?? "")}: ${sanitizeNarrativeText(toText(m.body) ?? "", 80)}`,
+  )
+  const alphaChatsText = chatLines.length > 0
+    ? `Groups: ${chatLines.join(", ")}${recentChatLines.length > 0 ? ` | Recent: ${recentChatLines.join(" ; ")}` : ""}`
+    : "No alpha group chats."
+  const followTargetsSet = new Set<string>()
+  for (const row of dbSnap.followCandidates) {
+    const id = toText(row.target_id) ?? ""
+    if (id.length > 0 && id !== actor.id) followTargetsSet.add(id)
+  }
+  for (const post of recentPosts) {
+    if (
+      post.authorId.length > 0 &&
+      post.authorId !== actor.id &&
+      !dbSnap.alreadyFollowing.has(post.authorId) &&
+      !dbSnap.blockedIds.has(post.authorId)
+    ) {
+      followTargetsSet.add(post.authorId)
+    }
+    if (followTargetsSet.size >= 8) break
+  }
+  const ownRecentPosts = dbSnap.ownPostRows
+    .map((r) => sanitizeNarrativeText(toText(r.content) ?? "", 140))
+    .filter((line) => line.length > 0)
   return {
+    worldClockText,
     worldFactsText: [...factsLines, ...headlineLines].join(" | ") || "No breaking world facts.",
-    marketsText: markets.map((m) => `${m.id} (${m.yesProbPct}% YES): ${m.question}`).join(" | ") || "No open markets.",
-    postsText: recentPosts.slice(0, 6).map((p) => `@${p.authorId}: ${sanitizeText(p.content, 80)}`).join(" | ") || "Feed empty.",
+    marketsText,
+    postsText: recentPosts.slice(0, 6).map((p) => `[${p.id}] ${p.authorName}: ${sanitizeNarrativeText(p.content, 80)}`).join(" | ") || "Feed empty.",
     portfolioText,
+    alphaChatsText,
+    ownRecentPosts,
     worldContext,
     diversityHint: formatFeedDiversityHint(recentPosts),
     tickers: perps.map((p) => p.ticker),
     marketIds: markets.map((m) => m.id),
     replyPostIds: recentPosts.filter((p) => p.authorId !== actor.id).map((p) => p.id),
     chatIds: dbSnap.chatRows.map((c) => toText(c.id) ?? "").filter((id) => id.length > 0),
+    openPerpPositionIds,
+    openPerpPositionsSummary,
+    heldPredictionKeys,
+    heldPredictionsSummary,
+    followTargetIds: [...followTargetsSet].slice(0, 8),
   }
 }
 
@@ -223,10 +400,46 @@ function buildNpcProviders(actorId: string, snapshot: NpcProviderSnapshot): Prov
     provider("TRENDING_MARKETS", "Open prediction markets and spot/perp quotes", snapshot.marketsText),
     provider("RECENT_POSTS", "Recent Feed posts from NPCs and users", snapshot.postsText),
     provider("ACTOR_PORTFOLIO", "Current NPC cash, prediction shares, and open perps", snapshot.portfolioText),
+    provider("ALPHA_CHATS", "Private NPC alpha desk chats and recent desk messages", snapshot.alphaChatsText),
   ]
 }
 
-effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string): (string | null)!StoreFailure {
+function affiliatedTickersForActor(actorId: string): ReadonlyArray<string> {
+  const packActor = packActorById.get(actorId)
+  if (!packActor) return []
+  const tickers: string[] = []
+  for (const orgId of packActor.affiliations) {
+    const ticker = orgById.get(orgId)?.ticker?.toUpperCase()
+    if (ticker) tickers.push(ticker)
+  }
+  return tickers
+}
+
+function affiliatedKeywordsForActor(actorId: string): ReadonlyArray<string> {
+  const packActor = packActorById.get(actorId)
+  if (!packActor) return []
+  const words = new Set<string>()
+  for (const orgId of packActor.affiliations) {
+    const org = orgById.get(orgId)
+    if (org?.name && org.name.length >= 3) words.add(org.name.toLowerCase())
+    if (org?.ticker && org.ticker.length >= 2) words.add(org.ticker.toLowerCase())
+  }
+  if (packActor.name.length >= 4) words.add(packActor.name.toLowerCase())
+  return [...words]
+}
+
+effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string, nowMs: number): (string | null)!StoreFailure {
+  const affiliatedTickers = affiliatedTickersForActor(actorId)
+  const keywords = affiliatedKeywordsForActor(actorId)
+  const matchedMarkets = keywords.length > 0
+    ? (try tx.query("SELECT id, question, description FROM feed_prediction_markets WHERE status IN ('open', 'expired', 'resolved') ORDER BY created_at DESC LIMIT 40"))
+        .filter((row) => {
+          const text = `${toText(row.question) ?? ""} ${toText(row.description) ?? ""}`.toLowerCase()
+          return keywords.some((kw) => text.includes(kw))
+        })
+        .map((row) => toText(row.id) ?? "")
+        .filter((id) => id.length > 0)
+    : []
   const rows = try tx.query(
     `SELECT eng.account_id, SUM(eng.score) AS engagement_score
      FROM (
@@ -244,22 +457,48 @@ effect function findEligibleAlphaTargetTx(tx: Tx, actorId: string): (string | nu
        FROM feed_posts reply
        JOIN feed_posts p ON p.id = reply.reply_to_post_id
        WHERE p.author_id = $1 AND p.author_kind = 'npc' AND reply.author_kind = 'user' AND reply.deleted_at IS NULL
+       UNION ALL
+       SELECT t.trader_id AS account_id, 1 AS score
+       FROM feed_trades t
+       WHERE t.trader_kind = 'user'
+         AND (
+           (t.market_kind IN ('perp', 'spot') AND upper(t.market_ref) = ANY($4))
+           OR (t.market_kind = 'prediction' AND t.market_ref = ANY($5))
+         )
      ) eng
      JOIN feed_accounts a ON a.account_id = eng.account_id
      WHERE NOT EXISTS (
        SELECT 1 FROM feed_group_invites gi
-       WHERE gi.invited_account_id = eng.account_id AND gi.invited_by_npc_id = $1 AND gi.status IN ('pending', 'accepted')
+       WHERE gi.invited_account_id = eng.account_id AND gi.invited_by_id = $1 AND gi.status IN ('pending', 'accepted')
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM feed_blocks b
+       WHERE (b.blocker_id = $1 AND b.blocked_id = eng.account_id)
+          OR (b.blocker_id = eng.account_id AND b.blocked_id = $1)
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM feed_alpha_invite_cooldowns c
+       WHERE c.actor_id = $1 AND c.account_id = eng.account_id AND c.next_eligible_at > $3
      )
      GROUP BY eng.account_id
      HAVING SUM(eng.score) >= $2
      ORDER BY engagement_score DESC, eng.account_id ASC
      LIMIT 1`,
-    [actorId, minAlphaEngagement],
+    [actorId, minAlphaEngagement, nowMs, affiliatedTickers, matchedMarkets],
   )
   return rows.length > 0 ? (toText(rows[0]?.account_id) ?? null) : null
 }
 
-function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Action[] {
+export effect function findEligibleAlphaTarget(
+  actorId: string,
+  nowMs?: number,
+): (string | null)!(EngineFailure | StoreFailure)!Store {
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => try findEligibleAlphaTargetTx(tx, actorId, resolvedNow))
+}
+
+function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, nowMs: number): Action[] {
   const wrap = (
     name: string,
     description: string,
@@ -282,15 +521,24 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Ac
       const ticker = String(p.ticker ?? "")
       const side = p.side === "sell" ? "sell" : "buy"
       const quoteCents = Math.max(100, Math.round(Number(p.quoteCents ?? 2500)))
-      try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents })
-      try maybePublishFeedEvent({ type: "market.spot", actorId: actor.id, ticker, side, quoteCents })
+      const spotReceipt = try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents })
+      try maybePublishFeedEvent({
+        type: "market.spot",
+        actorId: actor.id,
+        ticker,
+        side,
+        quoteCents,
+        indexPriceCents: spotReceipt.indexPriceCents,
+        markPriceCents: spotReceipt.markPriceCents,
+      })
       return { success: true, text: `Spot ${side} ${quoteCents}c ${ticker}`, data: { ticker, side, quoteCents } }
     }),
     wrap("PERP_TRADE", "Open a leveraged NPC perpetual position", effect (p) => {
       const ticker = String(p.ticker ?? "")
       const side = p.side === "short" ? "short" : "long"
-      const collateralCents = Math.max(500, Math.round(Number(p.collateralCents ?? 2500)))
       const leverage = Math.max(1, Math.min(20, Math.round(Number(p.leverage ?? 3))))
+      const minCollateral = Math.max(500, Math.ceil(1_000 / leverage))
+      const collateralCents = Math.max(minCollateral, Math.round(Number(p.collateralCents ?? 2500)))
       const opened = try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc" })
       try maybePublishFeedEvent({
         type: "market.perp",
@@ -303,17 +551,104 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Ac
         positionId: opened.positionId,
         markPriceCents: opened.position.markPriceCents,
       })
-      return { success: true, text: `Perp ${side} ${leverage}x ${ticker}`, data: { ticker, side, collateralCents, leverage } }
+      return { success: true, text: `Perp ${side} ${leverage}x ${ticker}`, data: { ticker, side, collateralCents, leverage, positionId: opened.positionId } }
     }),
-    wrap("PREDICTION_TRADE", "Trade prediction market YES/NO shares", effect (p) => {
+    wrap("CLOSE_PERP", "Close or reduce an open NPC perpetual position", effect (p) => {
+      const positionId = String(p.positionId ?? "")
+      if (!positionId) return { success: false, text: "Missing positionId" }
+      const rawPct = typeof p.closePct === "number" && Number.isFinite(p.closePct) ? Math.max(1, Math.min(100, Math.round(p.closePct))) : undefined
+      const store = try Store
+      const actualLeverage = try store.transaction(effect (tx: Tx) => {
+        const rows = try tx.query(
+          `SELECT leverage FROM feed_perp_positions WHERE id = $1 AND holder_id = $2`,
+          [positionId, actor.id],
+        )
+        return Math.max(1, safeNonNegInt(rows[0]?.leverage, 1))
+      })
+      const closed = try closePerpPosition({
+        positionId,
+        ownerId: actor.id,
+        ...(rawPct === undefined ? {} : { closePct: rawPct }),
+        viaClientName: "eliza-npc",
+      })
+      try maybePublishFeedEvent({
+        type: "market.perp",
+        action: "close",
+        actorId: actor.id,
+        ticker: closed.ticker,
+        side: closed.side,
+        sizeCents: closed.sizeCents,
+        leverage: actualLeverage,
+        positionId: closed.positionId,
+        markPriceCents: closed.exitPriceCents,
+      })
+      return {
+        success: true,
+        text: `Closed perp ${closed.ticker} (${closed.positionId}) PnL ${closed.realizedPnlCents}c`,
+        data: { positionId: closed.positionId, ticker: closed.ticker, realizedPnlCents: closed.realizedPnlCents },
+      }
+    }),
+    wrap("PREDICTION_TRADE", "Buy prediction market YES/NO shares", effect (p) => {
       const marketId = String(p.marketId ?? "")
       const side = p.side === "no" ? "no" : "yes"
       const amountCents = Math.max(100, Math.round(Number(p.amountCents ?? 1500)))
-      try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc" })
+      const receipt = try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc" })
+      try maybePublishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents,
+      })
       return { success: true, text: `Prediction ${side} ${amountCents}c on ${marketId}`, data: { marketId, side, amountCents } }
     }),
+    wrap("SELL_PREDICTION", "Sell held prediction market YES/NO shares", effect (p) => {
+      const marketId = String(p.marketId ?? "")
+      const side = p.side === "no" ? "no" : "yes"
+      const requestedShares = Math.max(MIN_SELL_SHARE_UNITS, Math.round(Number(p.shares ?? MIN_SELL_SHARE_UNITS)))
+      if (!marketId) return { success: false, text: "Missing marketId" }
+      const store = try Store
+      const heldShares = try store.transaction(effect (tx: Tx) => {
+        const rows = try tx.query(
+          `SELECT shares FROM feed_prediction_positions
+           WHERE market_id = $1 AND holder_id = $2 AND side = $3 AND settled_at IS NULL`,
+          [marketId, actor.id, side === "yes" ? "YES" : "NO"],
+        )
+        return rows.length > 0 ? Math.max(0, toInt(rows[0]?.shares)) : 0
+      })
+      const sellShares = Math.min(heldShares, requestedShares)
+      if (sellShares < MIN_SELL_SHARE_UNITS) {
+        return { success: false, text: "Insufficient held shares to sell" }
+      }
+      const receipt = try sellPredictionShares({
+        actorId: actor.id,
+        actorKind: "npc",
+        marketId,
+        side,
+        shares: sellShares,
+        viaClientName: "eliza-npc",
+      })
+      try maybePublishFeedEvent({
+        type: "market.prediction",
+        marketId: receipt.marketId,
+        action: receipt.action,
+        side: receipt.side,
+        yesPriceBps: receipt.yesPriceBps,
+        noPriceBps: receipt.noPriceBps,
+        shares: receipt.shares,
+        notionalCents: receipt.notionalCents,
+      })
+      return {
+        success: true,
+        text: `Sold ${sellShares} ${side} shares on ${marketId} for ${receipt.netCents}c`,
+        data: { marketId, side, shares: sellShares, netCents: receipt.netCents },
+      }
+    }),
     wrap("CREATE_POST", "Publish a Feed social post as the NPC", effect (p) => {
-      const content = sanitizeText(String(p.content ?? ""), 275)
+      const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 260)
       if (content.length === 0) return { success: false, text: "Empty post" }
       const marketId = typeof p.marketId === "string" ? p.marketId : undefined
       const ticker = typeof p.ticker === "string" ? p.ticker : undefined
@@ -322,21 +657,39 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Ac
     }),
     wrap("CREATE_REPLY", "Reply to an existing Feed post", effect (p) => {
       const replyToPostId = String(p.replyToPostId ?? "")
-      const content = sanitizeText(String(p.content ?? ""), 260)
+      const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 250)
       if (!replyToPostId || !content) return { success: false, text: "Invalid reply" }
       try createPost({ authorId: actor.id, authorKind: "npc", content, replyToPostId })
       return { success: true, text: content, data: { replyToPostId } }
     }),
+    wrap("LIKE_POST", "Like a Feed post as the NPC", effect (p) => {
+      const postId = String(p.postId ?? "")
+      if (!postId) return { success: false, text: "Invalid postId" }
+      const res = try likePost(actor.id, postId)
+      return { success: true, text: `Liked post ${res.postId}`, data: { postId: res.postId, likeCount: res.likeCount } }
+    }),
+    wrap("REPOST_POST", "Repost a Feed post as the NPC", effect (p) => {
+      const postId = String(p.postId ?? "")
+      if (!postId) return { success: false, text: "Invalid postId" }
+      const res = try repostPost(actor.id, postId)
+      return { success: true, text: `Reposted post ${res.postId}`, data: { postId: res.postId, repostCount: res.repostCount } }
+    }),
+    wrap("FOLLOW_USER", "Follow an account or actor as the NPC", effect (p) => {
+      const targetId = String(p.targetId ?? "")
+      if (!targetId) return { success: false, text: "Invalid targetId" }
+      const res = try followAccount(actor.id, targetId)
+      return { success: true, text: `Followed ${res.targetId}`, data: { targetId: res.targetId, targetKind: res.targetKind } }
+    }),
     wrap("SEND_GROUP_MESSAGE", "Send a message in an NPC alpha group chat", effect (p) => {
       const chatId = String(p.chatId ?? "")
-      const content = sanitizeText(String(p.content ?? ""), 275)
+      const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 260)
       if (!chatId || !content) return { success: false, text: "Invalid chat message" }
       try sendChatMessage({ senderId: actor.id, senderKind: "npc", chatId, content })
       return { success: true, text: content, data: { chatId } }
     }),
     wrap("INVITE_ALPHA", "Invite a qualifying engaged human user to NPC alpha group", effect () => {
       const store = try Store
-      const targetAccountId = try store.transaction(effect (tx: Tx) => try findEligibleAlphaTargetTx(tx, actor.id))
+      const targetAccountId = try store.transaction(effect (tx: Tx) => try findEligibleAlphaTargetTx(tx, actor.id, nowMs))
       if (!targetAccountId) {
         return { success: false, text: "No human user has reached engagement threshold." }
       }
@@ -347,12 +700,37 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner): Ac
   ]
 }
 
-function createFeedNpcPlugin(actor: DbActorRow, snapshot: NpcProviderSnapshot, runWithStore: StoreEffectRunner): Plugin {
+function createFeedNpcPlugin(actor: DbActorRow, snapshot: NpcProviderSnapshot, runWithStore: StoreEffectRunner, nowMs: number): Plugin {
   return {
     name: `@repo/engine/npc-${actor.id}`,
     description: `Feed autonomous actions and world context for ${actor.name}`,
     providers: buildNpcProviders(actor.id, snapshot),
-    actions: buildNpcActions(actor, runWithStore),
+    actions: buildNpcActions(actor, runWithStore, nowMs),
+  }
+}
+
+function isActionAllowedByAutonomy(decision: NpcDecisionAction, packActor: PackActor | undefined): boolean {
+  const autonomy = packActor?.feed.autonomy
+  if (!autonomy) return true
+  switch (decision.kind) {
+    case "SPOT_TRADE":
+    case "PERP_TRADE":
+    case "PREDICTION_TRADE":
+      return autonomy.trading
+    case "CLOSE_PERP":
+    case "SELL_PREDICTION":
+      return true
+    case "CREATE_POST":
+      return autonomy.posting
+    case "CREATE_REPLY":
+      return autonomy.commenting
+    case "LIKE_POST":
+    case "REPOST_POST":
+    case "FOLLOW_USER":
+      return autonomy.posting || autonomy.commenting
+    case "SEND_GROUP_MESSAGE":
+    case "INVITE_ALPHA":
+      return autonomy.groups
   }
 }
 
@@ -376,19 +754,99 @@ effect function composeFeedProviders(runtime: AgentRuntime, providers: ReadonlyA
   return { values: { ...values, providers: text }, data: { providerOrder: ordered.map((provider) => provider.name), providers: results }, text }
 }
 
-effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
+function rowToDbActor(row: Row): DbActorRow {
+  return {
+    id: toText(row.id) ?? "",
+    name: toText(row.name) ?? "",
+    username: toText(row.username) ?? "",
+    tier: toText(row.tier) ?? "C_TIER",
+    description: toText(row.description) ?? "",
+    systemPrompt: toText(row.system_prompt) ?? "",
+    balanceCents: toInt(row.balance_cents),
+  }
+}
+
+effect function makeStoreEffectRunner(): StoreEffectRunner!!Store {
   const store = try Store
   const busOpt = try Effect.serviceOption(RealtimeBus)
-  const runWithStore: StoreEffectRunner = <A, E>(eff: A!E!Store) => {
+  return <A, E>(eff: A!E!Store) => {
     const layer = Option.isSome(busOpt)
       ? Layer.mergeAll(Layer.succeed(Store, store), Layer.succeed(RealtimeBus, busOpt.value))
       : Layer.succeed(Store, store)
     return runPromise(Effect.provide(eff, layer))
   }
+}
+
+effect function executeNpcAction(
+  runtime: AgentRuntime,
+  agentUuid: UUID,
+  action: Action,
+  decision: NpcDecisionAction,
+  state: State,
+): (ActionResult | undefined)!EngineFailure {
+  const params = toJsonParamRecord(decision as unknown as Record<string, unknown>)
+  const actionMemory: Memory = {
+    id: safeElizaUuid(newEngineId("act")),
+    entityId: agentUuid,
+    agentId: agentUuid,
+    roomId: safeElizaUuid("feed-world-room"),
+    content: { text: decision.kind, data: params },
+  }
+  const result = try tryPromise({
+    try: () => Promise.resolve(action.handler(runtime, actionMemory, state, { parameters: params })),
+    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `NPC action ${decision.kind} failed`, cause }),
+  })
+  return result as ActionResult | undefined
+}
+
+export effect function executeNpcDecision(
+  actorId: string,
+  decision: NpcDecisionAction,
+  nowMs?: number,
+): ActionResult!(EngineFailure | StoreFailure)!Store {
+  const resolvedNow = try resolveClockNow(nowMs)
+  const store = try Store
+  const actorRow = try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT id, name, username, tier, description, system_prompt, balance_cents
+       FROM feed_actors
+       WHERE id = $1`,
+      [actorId],
+    )
+    const row = rows[0]
+    if (!row) return null
+    return rowToDbActor(row)
+  })
+  if (!actorRow || !isRuntimeNpcActor(actorRow.id, actorRow.name, actorRow.username)) {
+    throw new EngineFailure({ code: "NOT_FOUND", message: `NPC actor ${actorId} not found.` })
+  }
+  const runWithStore = try makeStoreEffectRunner()
+  const packActor = packActorById.get(actorRow.id)
+  if (!isActionAllowedByAutonomy(decision, packActor)) {
+    return { success: false, text: `Autonomy disables ${decision.kind} for ${actorRow.id}` }
+  }
+  const character = buildNpcCharacter(actorRow, packActor)
+  const agentUuid = safeElizaUuid(`feed-npc:${actorRow.id}`)
+  const runtime = try Effect.try({
+    try: () => new AgentRuntime({ character, agentId: agentUuid }),
+    catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `Failed creating AgentRuntime for ${actorRow.id}`, cause }),
+  })
+  const actions = buildNpcActions(actorRow, runWithStore, resolvedNow)
+  const action = actions.find((a) => a.name === decision.kind)
+  if (!action) {
+    return { success: false, text: `Unknown action ${decision.kind}` }
+  }
+  const result = try executeNpcAction(runtime, agentUuid, action, decision, { values: {}, data: {}, text: "" })
+  return result ?? { success: false, text: "No action result" }
+}
+
+effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: number): number!(EngineFailure | StoreFailure)!Store {
+  if (!isRuntimeNpcActor(actor.id, actor.name, actor.username)) return 0
+  const runWithStore = try makeStoreEffectRunner()
   const snap = try loadNpcProviderSnapshot(actor, nowMs)
-  const packActor = actors.find((a) => a.id === actor.id || a.username === actor.username)
+  const packActor = packActorById.get(actor.id) ?? actors.find((a) => a.username === actor.username.toLowerCase())
   const character = buildNpcCharacter(actor, packActor)
-  const plugin = createFeedNpcPlugin(actor, snap, runWithStore)
+  const plugin = createFeedNpcPlugin(actor, snap, runWithStore, nowMs)
   const agentUuid = safeElizaUuid(`feed-npc:${actor.id}`)
   const runtime = try Effect.try({
     try: () => new AgentRuntime({ character, agentId: agentUuid }),
@@ -406,92 +864,267 @@ effect function runSingleNpcTurn(actor: DbActorRow, maxSteps: number, nowMs: num
     content: { text: "Observe Feed markets and social posts, then plan bounded actions." },
   }
   const composedState = try composeFeedProviders(runtime, plugin.providers ?? [], triggerMemory)
+  const voiceSeed = hashString(`${actor.id}:${Math.floor(nowMs / 60_000)}`)
+  const budgetedWorldContext = [
+    snap.worldClockText,
+    `WORLD_FACTS: ${sanitizeText(snap.worldFactsText, 900)}`,
+    `TRENDING_MARKETS: ${sanitizeText(snap.marketsText, 1200)}`,
+    `RECENT_POSTS: ${sanitizeText(snap.postsText, 750)}`,
+    `ALPHA_CHATS: ${sanitizeText(snap.alphaChatsText, 450)}`,
+  ].join("\n")
   const rendered = renderPrompt("npcTradingDecision", {
     actorId: actor.id,
+    actorHandle: actor.username.toLowerCase(),
     actorName: actor.name,
     actorPersona: sanitizeText(packActor?.personality ?? actor.description, 200),
+    actorVoiceContext: formatActorVoiceContext(packActor, actor.description, voiceSeed),
+    actorGuardrails: formatActorToneAndFinanceGuardrails(packActor),
+    ownRecentPosts: snap.ownRecentPosts.length > 0 ? snap.ownRecentPosts.map((p) => `- ${p}`).join("\n") : "(none)",
     tradingStyle: packActor?.feed.tradingStyle ?? "balanced catalyst trader",
     maxSteps: String(maxSteps),
     tickers: snap.tickers.join(", ") || "(none)",
     marketIds: snap.marketIds.join(", ") || "(none)",
+    openPerpPositions: snap.openPerpPositionsSummary,
+    heldPredictions: snap.heldPredictionsSummary,
     replyPostIds: snap.replyPostIds.slice(0, 6).join(", ") || "(none)",
+    followTargets: snap.followTargetIds.join(", ") || "(none)",
     chatIds: snap.chatIds.join(", ") || "(none)",
     portfolio: snap.portfolioText,
-    worldContext: sanitizeText(composedState.text || snap.worldContext, 1800),
+    worldContext: budgetedWorldContext,
     diversityHint: snap.diversityHint,
   })
+  const turnTemperature = Math.max(0.7, Math.min(0.92, packActor?.settings.temperature ?? rendered.temperature))
   const completion = try generateCompletion({
     promptId: "npcTradingDecision",
     system: rendered.system,
     user: rendered.user,
     maxTokens: rendered.maxTokens,
-    temperature: rendered.temperature,
+    temperature: turnTemperature,
     jsonMode: true,
     nowMs,
     actorId: actor.id,
   })
   const parsed = parseLlmJsonRecord(completion.text)
-  const decisions = validateNpcTradingDecision(parsed, maxSteps, snap.tickers, snap.marketIds, snap.replyPostIds, snap.chatIds)
+  const decisions = validateNpcTradingDecision(
+    parsed,
+    maxSteps,
+    snap.tickers,
+    snap.marketIds,
+    snap.replyPostIds,
+    snap.chatIds,
+    snap.openPerpPositionIds,
+    snap.heldPredictionKeys,
+    snap.followTargetIds,
+  ).filter((decision) => isActionAllowedByAutonomy(decision, packActor))
+  const store = try Store
+  const hasRecentPost = try store.transaction(effect (tx: Tx) => {
+    const recentRows = try tx.query(
+      `SELECT 1 FROM feed_posts
+       WHERE author_id = $1 AND author_kind = 'npc' AND deleted_at IS NULL AND reply_to_post_id IS NULL AND created_at >= $2
+       LIMIT 1`,
+      [actor.id, nowMs - ACTOR_POST_COOLDOWN_MS],
+    )
+    return recentRows.length > 0
+  })
+  let postedInTurn = hasRecentPost
+  let repliedInTurn = false
   let actionsExecuted = 0
   const actionMap = new Map((plugin.actions ?? []).map((act) => [act.name, act]))
   for (const decision of decisions) {
     if (actionsExecuted >= maxSteps) break
+    if (decision.kind === "CREATE_POST" && postedInTurn) continue
+    if (decision.kind === "CREATE_REPLY" && repliedInTurn) continue
     const action = actionMap.get(decision.kind)
     if (!action) continue
-    const params = toJsonParamRecord(decision as unknown as Record<string, unknown>)
-    const actionMemory: Memory = {
-      id: safeElizaUuid(newEngineId("act")),
-      entityId: agentUuid,
-      agentId: agentUuid,
-      roomId: safeElizaUuid("feed-world-room"),
-      content: { text: decision.kind, data: params },
-    }
-    const result = try tryPromise({
-      try: () => Promise.resolve(action.handler(runtime, actionMemory, composedState, { parameters: params })),
-      catch: (cause) => new EngineFailure({ code: "RUNTIME_FAILED", message: `NPC action ${decision.kind} failed`, cause }),
-    })
-    if ((result as ActionResult | undefined)?.success) {
+    const result = try executeNpcAction(runtime, agentUuid, action, decision, composedState)
+    if (result?.success) {
       actionsExecuted += 1
+      if (decision.kind === "CREATE_POST") postedInTurn = true
+      if (decision.kind === "CREATE_REPLY") repliedInTurn = true
     }
   }
   return actionsExecuted
+}
+
+function actorSelectionWeight(tier: string): number {
+  switch (tier) {
+    case "S_TIER":
+      return 4
+    case "A_TIER":
+      return 3
+    case "B_TIER":
+      return 2
+    default:
+      return 1
+  }
+}
+
+function pickWeightedFromPool(
+  pool: Array<DbActorRow>,
+  count: number,
+  bucketKey: string,
+  salt: string,
+): ReadonlyArray<DbActorRow> {
+  const picked: DbActorRow[] = []
+  for (let slot = 0; slot < count && pool.length > 0; slot += 1) {
+    let totalWeight = 0
+    for (const candidate of pool) {
+      totalWeight += actorSelectionWeight(candidate.tier)
+    }
+    let cursor = hashString(`${bucketKey}:${salt}:${slot}`) % Math.max(1, totalWeight)
+    let pickedIdx = 0
+    for (let i = 0; i < pool.length; i += 1) {
+      cursor -= actorSelectionWeight(pool[i]!.tier)
+      if (cursor < 0) {
+        pickedIdx = i
+        break
+      }
+    }
+    picked.push(pool[pickedIdx]!)
+    pool.splice(pickedIdx, 1)
+  }
+  return picked
+}
+
+function resolveConfiguredMaxSteps(budgetMaxSteps: number): number {
+  const raw = readEnv("NPC_MAX_STEPS_PER_TICK")?.trim()
+  if (raw && raw.length > 0) {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      const clamped = Math.max(1, Math.min(4, Math.floor(parsed)))
+      return Math.min(budgetMaxSteps, clamped)
+    }
+  }
+  return Math.max(1, Math.min(4, budgetMaxSteps))
+}
+
+function selectSmartNpcBatch(
+  allActors: ReadonlyArray<DbActorRow>,
+  mentionedActorIds: ReadonlySet<string>,
+  postedTodayIds: ReadonlySet<string>,
+  recentlyPostedIds: ReadonlySet<string>,
+  batchLimit: number,
+  bucketKey: string,
+): ReadonlyArray<DbActorRow> {
+  const targetCount = Math.min(batchLimit, allActors.length)
+  if (targetCount <= 0) return []
+  const eligibleActors = allActors.filter((a) => !recentlyPostedIds.has(a.id))
+  const primaryActors = eligibleActors.length >= targetCount ? eligibleActors : allActors
+  const selected: DbActorRow[] = []
+  const selectedIds = new Set<string>()
+  const mentionCap = Math.max(1, Math.floor(targetCount / 2))
+  const mentionedPool = primaryActors.filter((a) => mentionedActorIds.has(a.id))
+  for (const actor of pickWeightedFromPool([...mentionedPool], Math.min(mentionCap, mentionedPool.length), bucketKey, "mention")) {
+    selected.push(actor)
+    selectedIds.add(actor.id)
+  }
+  const remainingAfterMentions = targetCount - selected.length
+  if (remainingAfterMentions > 0) {
+    const diversityQuota = Math.max(1, Math.floor(remainingAfterMentions * 0.3))
+    const unpostedPool = primaryActors.filter((a) => !selectedIds.has(a.id) && !postedTodayIds.has(a.id))
+    for (const actor of pickWeightedFromPool([...unpostedPool], Math.min(diversityQuota, unpostedPool.length), bucketKey, "diversity")) {
+      selected.push(actor)
+      selectedIds.add(actor.id)
+    }
+  }
+  const remainingSlots = targetCount - selected.length
+  if (remainingSlots > 0) {
+    const restPool = primaryActors.filter((a) => !selectedIds.has(a.id))
+    for (const actor of pickWeightedFromPool([...restPool], remainingSlots, bucketKey, "tier")) {
+      selected.push(actor)
+      selectedIds.add(actor.id)
+    }
+  }
+  return selected
 }
 
 export effect function runBoundedNpcBatch(nowMs?: number): NpcTickBatchSummary!(EngineFailure | StoreFailure)!Store {
   const resolvedNow = try resolveClockNow(nowMs)
   const spendStatus = try getDailySpendStatus(resolvedNow)
   const batchLimit = Math.max(1, spendStatus.effectiveBatchSize)
-  const maxSteps = Math.max(1, spendStatus.maxStepsAllowed)
+  const maxSteps = resolveConfiguredMaxSteps(spendStatus.maxStepsAllowed)
+  const utcDayStartMs = Math.floor(resolvedNow / 86_400_000) * 86_400_000
+  const mentionWindowMs = resolvedNow - 30 * 60_000
+  const postCooldownSinceMs = resolvedNow - ACTOR_POST_COOLDOWN_MS
   const store = try Store
-  const allActors = try store.transaction(effect (tx: Tx) => {
+  const batchContext = try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       `SELECT id, name, username, tier, description, system_prompt, balance_cents
        FROM feed_actors
+       WHERE id NOT LIKE 'test-%' AND id NOT LIKE 'org-%'
        ORDER BY id ASC`,
     )
-    return rows.map((row) => ({
-      id: toText(row.id) ?? "",
-      name: toText(row.name) ?? "",
-      username: toText(row.username) ?? "",
-      tier: toText(row.tier) ?? "C_TIER",
-      description: toText(row.description) ?? "",
-      systemPrompt: toText(row.system_prompt) ?? "",
-      balanceCents: toInt(row.balance_cents),
-    })).filter((a) => a.id.length > 0)
+    const allActors: DbActorRow[] = rows
+      .map(rowToDbActor)
+      .filter((a) => isRuntimeNpcActor(a.id, a.name, a.username))
+    const repliedRows = try tx.query(
+      `SELECT DISTINCT parent.author_id AS actor_id
+       FROM feed_posts reply
+       JOIN feed_posts parent ON parent.id = reply.reply_to_post_id
+       WHERE reply.deleted_at IS NULL
+         AND reply.created_at >= $1
+         AND parent.author_kind = 'npc'
+       LIMIT 20`,
+      [mentionWindowMs],
+    )
+    const recentMentionPosts = try tx.query(
+      `SELECT content
+       FROM feed_posts
+       WHERE deleted_at IS NULL AND created_at >= $1 AND content LIKE '%@%'
+       ORDER BY created_at DESC
+       LIMIT 30`,
+      [mentionWindowMs],
+    )
+    const postedTodayRows = try tx.query(
+      `SELECT DISTINCT author_id
+       FROM feed_posts
+       WHERE author_kind = 'npc' AND deleted_at IS NULL AND created_at >= $1`,
+      [utcDayStartMs],
+    )
+    const recentlyPostedRows = try tx.query(
+      `SELECT DISTINCT author_id
+       FROM feed_posts
+       WHERE author_kind = 'npc' AND deleted_at IS NULL AND reply_to_post_id IS NULL AND created_at >= $1`,
+      [postCooldownSinceMs],
+    )
+    const actorByUsername = new Map(allActors.map((a) => [a.username.toLowerCase(), a.id]))
+    const mentionedActorIds = new Set<string>()
+    for (const row of repliedRows) {
+      const id = toText(row.actor_id)
+      if (id) mentionedActorIds.add(id)
+    }
+    for (const row of recentMentionPosts) {
+      const content = toText(row.content) ?? ""
+      const matches = content.matchAll(/@([a-zA-Z0-9_-]{2,40})/g)
+      for (const m of matches) {
+        const handle = m[1]?.toLowerCase()
+        const actorId = handle ? actorByUsername.get(handle) : undefined
+        if (actorId) mentionedActorIds.add(actorId)
+      }
+    }
+    const postedTodayIds = new Set(postedTodayRows.map((r) => toText(r.author_id) ?? "").filter((id) => id.length > 0))
+    const recentlyPostedIds = new Set(recentlyPostedRows.map((r) => toText(r.author_id) ?? "").filter((id) => id.length > 0))
+    return { allActors, mentionedActorIds, postedTodayIds, recentlyPostedIds }
   })
-  if (allActors.length === 0) {
+  if (batchContext.allActors.length === 0) {
     return { actorsSelected: 0, actorsCompleted: 0, actionsExecuted: 0, maxStepsUsed: maxSteps, throttledBatchSize: batchLimit }
   }
-  const startOffset = hashString(`npc-batch:${Math.floor(resolvedNow / 120_000)}`) % allActors.length
-  const selectedCount = Math.min(batchLimit, allActors.length)
-  const batch: DbActorRow[] = []
-  for (let i = 0; i < selectedCount; i++) {
-    batch.push(allActors[(startOffset + i) % allActors.length]!)
-  }
+  const batch = selectSmartNpcBatch(
+    batchContext.allActors,
+    batchContext.mentionedActorIds,
+    batchContext.postedTodayIds,
+    batchContext.recentlyPostedIds,
+    batchLimit,
+    `npc-batch:${Math.floor(resolvedNow / 120_000)}`,
+  )
+  const outcomes = try Effect.forEach(
+    batch,
+    effect (actor: DbActorRow) => runSingleNpcTurn(actor, maxSteps, resolvedNow) catch effect () => null,
+    { concurrency: 4 },
+  )
   let actorsCompleted = 0
   let actionsExecuted = 0
-  for (const actor of batch) {
-    const executed = runSingleNpcTurn(actor, maxSteps, resolvedNow) catch effect () => null
+  for (const executed of outcomes) {
     if (executed !== null) {
       actorsCompleted += 1
       actionsExecuted += executed

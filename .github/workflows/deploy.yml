@@ -39,7 +39,6 @@ jobs:
       CLOUDFLARE_RUNTIME_SECRETS: ${{ secrets.CLOUDFLARE_RUNTIME_SECRETS }}
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
       SURPLUS_API_KEY: ${{ secrets.SURPLUS_API_KEY }}
-      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
       DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
       PROD_DIRECT_DATABASE_URL: ${{ secrets.PROD_DIRECT_DATABASE_URL }}
       STAGING_DIRECT_DATABASE_URL: ${{ secrets.STAGING_DIRECT_DATABASE_URL }}
@@ -99,12 +98,16 @@ jobs:
                     const rows = yield* tx.query(`SELECT count(*) AS count FROM ${table}`);
                     counts[table] = toInt(rows[0]?.count);
                   }
-                  return counts;
+                  const ticks = yield* tx.query(
+                    "SELECT job_name, last_status, last_error, last_run_at FROM feed_tick_health ORDER BY job_name ASC"
+                  );
+                  return { counts, ticks };
                 })
               );
             });
-            const counts = await Effect.runPromise(Effect.provide(program, workerDbStore(url)));
+            const { counts, ticks } = await Effect.runPromise(Effect.provide(program, workerDbStore(url)));
             console.log("Database migrated and seeded:", JSON.stringify(counts));
+            console.log("Current feed_tick_health:", JSON.stringify(ticks));
             if (counts.feed_actors < 1 || counts.feed_prediction_markets < 1 || counts.feed_perp_markets < 1) {
               throw new Error("Seed verification failed: expected non-empty core world tables");
             }
@@ -134,11 +137,11 @@ jobs:
             const parsed = JSON.parse(raw);
             const secrets = {};
             for (const [key, value] of Object.entries(parsed)) {
-              if (typeof value === "string" && value.trim() !== "" && key !== "DATABASE_URL") {
+              if (typeof value === "string" && value.trim() !== "" && key !== "DATABASE_URL" && key !== "GAME_START") {
                 secrets[key] = value;
               }
             }
-            for (const key of ["CRON_SECRET", "SURPLUS_API_KEY", "STRIPE_SECRET_KEY"]) {
+            for (const key of ["CRON_SECRET", "SURPLUS_API_KEY"]) {
               const fromEnv = process.env[key]?.trim();
               if (fromEnv && !secrets[key]) secrets[key] = fromEnv;
             }
@@ -184,6 +187,8 @@ jobs:
               console.log(`R2 bucket ready: ${bucketName}`);
             }
           '
+          pnpm --filter @repo/app exec wrangler email sending enable feed.fun || true
+          pnpm --filter @repo/app exec wrangler secret delete GAME_START --config "wrangler.${TARGET_ENV}.jsonc" --force || true
           pnpm --filter @repo/app exec wrangler deploy \
             --config "wrangler.${TARGET_ENV}.jsonc" \
             --secrets-file "$SECRETS_FILE" \
@@ -226,7 +231,7 @@ jobs:
               });
               if (res.ok) {
                 const json = await res.json();
-                if (json.ok === true && json.service === "feed" && json.commit === expectedSha) {
+                if (json.ok === true && json.service === "feed" && json.gameStart === "run" && json.commit === expectedSha) {
                   health = json;
                   break;
                 }
@@ -301,8 +306,12 @@ jobs:
                 throw new Error("/api/markets returned empty perps");
               }
             });
-            await expectStatus("/api/leaderboard", 200);
-            await expectStatus("/api/economy/packs", 200);
+            await expectStatus("/api/leaderboard", 200, (t) => {
+              const j = JSON.parse(t);
+              if (!Array.isArray(j.entries) || !Array.isArray(j.leaderboard)) {
+                throw new Error("/api/leaderboard missing entries/leaderboard arrays");
+              }
+            });
 
             const mcpPublic = await fetch(`${primaryOrigin}/mcp`, {
               method: "POST",
@@ -343,6 +352,15 @@ jobs:
               const cronText = await cronRes.text();
               if (!cronRes.ok) throw new Error(`POST /api/cron/minute-tick failed: HTTP ${cronRes.status}: ${cronText}`);
               console.log("OK POST /api/cron/minute-tick -> HTTP 200", cronText.slice(0, 200));
+
+              const npcRes = await fetch(`${primaryOrigin}/api/cron/npc-tick`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${cronSecret}` },
+                signal: AbortSignal.timeout(90_000)
+              });
+              const npcText = await npcRes.text();
+              if (!npcRes.ok) throw new Error(`POST /api/cron/npc-tick failed: HTTP ${npcRes.status}: ${npcText}`);
+              console.log("OK POST /api/cron/npc-tick -> HTTP 200", npcText.slice(0, 300));
             }
 
             if (targetEnv === "production") {

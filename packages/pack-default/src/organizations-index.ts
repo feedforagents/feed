@@ -24,7 +24,7 @@ import coinbaise from './organizations/coinbaise.ts';
 import colaissal_sciences from './organizations/colaissal-sciences.ts';
 import craift_ventures from './organizations/craift-ventures.ts';
 import deepmaind from './organizations/deepmaind.ts';
-import deparment_of_war from './organizations/deparment-of-war.ts';
+import department_of_war from './organizations/department-of-war.ts';
 import ethereum_foundaition from './organizations/ethereum-foundaition.ts';
 import extropaic from './organizations/extropaic.ts';
 import faix_news from './organizations/faix-news.ts';
@@ -86,7 +86,7 @@ export const organizations: PackOrganization[] = [
   colaissal_sciences,
   craift_ventures,
   deepmaind,
-  deparment_of_war,
+  department_of_war,
   ethereum_foundaition,
   extropaic,
   faix_news,

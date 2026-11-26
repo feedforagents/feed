@@ -1,17 +1,46 @@
 import { actors, organizations } from "@repo/pack-default"
 import { FEED_BASELINE_SQL, FEED_SCHEMA_VERSION } from "./schema.sql.ts"
 import {
+  INITIAL_ALPHA_GROUPS,
   INITIAL_ARTICLES,
   INITIAL_MARKETS,
   INITIAL_POSTS,
+  INITIAL_SPOT_BASE_RESERVE,
   INITIAL_WORLD_FACTS,
-  buildInsertBatch,
+  SPOT_BASE_SCALE,
+  buildInitialPriceHistoryRows,
+  buildInsertBatches,
+  buildNpcSpotHoldingRows,
+  buildSeedNpcFollowRows,
+  canonicalHandle,
   initialOrgPriceCents,
+  initialSpotQuoteReserveCents,
+  isRuntimeActor,
+  resolveActorAvatarUrl,
+  resolveActorBannerUrl,
+  resolveOrgBannerUrl,
+  resolveOrgLogoUrl,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
   serializeActorPersonality,
-  type BatchQuery
+  tierStartingBalanceCents,
+  type BatchQuery,
+  type TradeableOrgSeed
 } from "./seed-data.ts"
 
-export { FEED_BASELINE_SQL, FEED_SCHEMA_VERSION }
+export {
+  FEED_BASELINE_SQL,
+  FEED_SCHEMA_VERSION,
+  INITIAL_SPOT_BASE_RESERVE,
+  SPOT_BASE_SCALE,
+  resolveActorAvatarUrl,
+  resolveActorBannerUrl,
+  resolveOrgBannerUrl,
+  resolveOrgLogoUrl,
+  resolveUserPresetAvatarUrl,
+  resolveUserPresetBannerUrl,
+  tierStartingBalanceCents
+}
 
 export type Row = Readonly<Record<string, unknown>>
 
@@ -35,6 +64,7 @@ export service Store {
 }
 
 export function toInt(value: unknown): number {
+  if (value === null || value === undefined) return 0
   return typeof value === "number"
     ? value
     : typeof value === "bigint"
@@ -150,21 +180,77 @@ export function workerDbStore(connectionString: string): Layer.Layer<Store, Stor
   })
 }
 
+effect function ensureDefaultWorldStateTx(tx: Tx, now: number): void!StoreFailure {
+  try tx.query(
+    "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
+    [now]
+  )
+}
+
 export effect function migrateFeedSchema(): void!StoreFailure!Store {
   const store = try Store
   const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
     try tx.query("SELECT pg_advisory_xact_lock(4242002)")
     try tx.script(FEED_BASELINE_SQL)
-    try tx.query(
-      "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
-      [now]
-    )
+    try tx.query("ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS banner_url text")
+    try tx.query("ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS email_hash text")
+    try tx.query("ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS email_masked text")
+    try tx.query("ALTER TABLE feed_accounts ADD COLUMN IF NOT EXISTS email_verified_at bigint")
+    try tx.query("CREATE UNIQUE INDEX IF NOT EXISTS feed_accounts_email_hash_idx ON feed_accounts (email_hash) WHERE email_hash IS NOT NULL")
+    try tx.query("ALTER TABLE feed_device_codes DROP CONSTRAINT IF EXISTS feed_device_codes_user_code_key")
+    try tx.query("CREATE UNIQUE INDEX IF NOT EXISTS feed_device_codes_pending_user_code_idx ON feed_device_codes (user_code) WHERE status = 'pending'")
+    try tx.query("ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_image_url text")
+    try tx.query("ALTER TABLE feed_actors ADD COLUMN IF NOT EXISTS profile_banner_url text")
+    try tx.query("ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS username text")
+    try tx.query("ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS image_url text")
+    try tx.query("ALTER TABLE feed_organizations ADD COLUMN IF NOT EXISTS banner_url text")
+    try tx.query("CREATE INDEX IF NOT EXISTS feed_organizations_username_idx ON feed_organizations (lower(username))")
+    try tx.query("ALTER TABLE feed_notifications ADD COLUMN IF NOT EXISTS chat_id text")
+    try tx.query("ALTER TABLE feed_notifications ADD COLUMN IF NOT EXISTS invite_id text")
+    try tx.query("ALTER TABLE feed_articles ADD COLUMN IF NOT EXISTS image_url text")
+    try tx.query("ALTER TABLE feed_chat_members ADD COLUMN IF NOT EXISTS last_read_at bigint NOT NULL DEFAULT 0")
+    try ensureDefaultWorldStateTx(tx, now)
   })
 }
 
-effect function runBatch(tx: Tx, batch: BatchQuery | undefined): void!StoreFailure {
-  if (batch !== undefined) try tx.query(batch.sql, batch.params)
+effect function runBatches(tx: Tx, batches: ReadonlyArray<BatchQuery>): void!StoreFailure {
+  for (const batch of batches) {
+    try tx.query(batch.sql, batch.params)
+  }
+}
+
+effect function migrateLegacyOrgActorsTx(tx: Tx): void!StoreFailure {
+  try tx.query(
+    "UPDATE feed_posts SET author_id = substr(author_id, 5), author_kind = 'org' WHERE author_id LIKE 'org-%'"
+  )
+  try tx.query(
+    `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
+     SELECT follower_id, substr(target_id, 5), 'org', created_at
+     FROM feed_follows
+     WHERE target_id LIKE 'org-%'
+     ON CONFLICT (follower_id, target_id, target_kind) DO NOTHING`
+  )
+  try tx.query("DELETE FROM feed_follows WHERE target_id LIKE 'org-%' OR follower_id LIKE 'org-%'")
+  try tx.query("DELETE FROM feed_npc_spot_holdings WHERE actor_id LIKE 'org-%'")
+  try tx.query("DELETE FROM feed_npc_market_clues WHERE actor_id LIKE 'org-%'")
+  try tx.query("DELETE FROM feed_actors WHERE id LIKE 'org-%'")
+  try tx.query("UPDATE feed_organizations SET ticker = NULL WHERE id = 'deparment-of-war'")
+}
+
+effect function finalizeRenamedOrgsTx(tx: Tx): void!StoreFailure {
+  try tx.query("UPDATE feed_spot_pools SET organization_id = 'department-of-war' WHERE organization_id = 'deparment-of-war'")
+  try tx.query("UPDATE feed_posts SET author_id = 'department-of-war' WHERE author_id = 'deparment-of-war'")
+  try tx.query("UPDATE feed_articles SET author_org_id = 'department-of-war' WHERE author_org_id = 'deparment-of-war'")
+  try tx.query(
+    `INSERT INTO feed_follows (follower_id, target_id, target_kind, created_at)
+     SELECT follower_id, 'department-of-war', target_kind, created_at
+     FROM feed_follows
+     WHERE target_id = 'deparment-of-war'
+     ON CONFLICT (follower_id, target_id, target_kind) DO NOTHING`
+  )
+  try tx.query("DELETE FROM feed_follows WHERE target_id = 'deparment-of-war' OR follower_id = 'deparment-of-war'")
+  try tx.query("DELETE FROM feed_organizations WHERE id = 'deparment-of-war'")
 }
 
 export effect function seedFeedWorld(): void!StoreFailure!Store {
@@ -172,16 +258,16 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
   const now = try Clock.currentTimeMillis
   try store.transaction(effect (tx: Tx) => {
     try tx.query("SELECT pg_advisory_xact_lock(4242003)")
-    const existing = toInt((try tx.query("SELECT count(*) AS count FROM feed_actors"))[0]?.count)
-    if (existing > 0) return
+    try ensureDefaultWorldStateTx(tx, now)
+    const runtimeActors = actors.filter(isRuntimeActor)
+    try migrateLegacyOrgActorsTx(tx)
     try tx.query(
-      "INSERT INTO feed_world_state (singleton, current_day, current_hour, phase, game_running, funding_cutover_period, last_tick_at, updated_at) VALUES (true, 1, 0, 'active', true, 0, 0, $1) ON CONFLICT (singleton) DO NOTHING",
-      [now]
+      "DELETE FROM feed_actors WHERE id IN ('test-analyst-npc-002', 'test-trader-npc-001') AND NOT EXISTS (SELECT 1 FROM feed_npc_market_clues WHERE actor_id = feed_actors.id)"
     )
-    try runBatch(tx, buildInsertBatch(
+    try runBatches(tx, buildInsertBatches(
       "feed_actors",
-      ["id", "name", "username", "tier", "description", "system_prompt", "personality_json", "balance_cents", "created_at"],
-      actors.map((actor) => [
+      ["id", "name", "username", "tier", "description", "system_prompt", "personality_json", "profile_image_url", "profile_banner_url", "balance_cents", "created_at"],
+      runtimeActors.map((actor) => [
         actor.id,
         actor.name,
         actor.username,
@@ -189,45 +275,61 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         actor.description,
         actor.system,
         serializeActorPersonality(actor),
-        10_000_000,
+        resolveActorAvatarUrl(actor.id),
+        resolveActorBannerUrl(actor.id),
+        tierStartingBalanceCents(actor.tier),
         now
       ]),
-      "ON CONFLICT (id) DO NOTHING"
+      "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, username = EXCLUDED.username, tier = EXCLUDED.tier, description = EXCLUDED.description, system_prompt = EXCLUDED.system_prompt, personality_json = EXCLUDED.personality_json, profile_image_url = CASE WHEN feed_actors.profile_image_url IS NULL OR btrim(feed_actors.profile_image_url) = '' OR feed_actors.profile_image_url LIKE '/images/%' THEN EXCLUDED.profile_image_url ELSE feed_actors.profile_image_url END, profile_banner_url = CASE WHEN feed_actors.profile_banner_url IS NULL OR btrim(feed_actors.profile_banner_url) = '' OR feed_actors.profile_banner_url LIKE '/images/%' THEN EXCLUDED.profile_banner_url ELSE feed_actors.profile_banner_url END"
     ))
-    try runBatch(tx, buildInsertBatch(
+    try runBatches(tx, buildInsertBatches(
       "feed_organizations",
-      ["id", "name", "ticker", "org_type", "description", "post_style", "can_be_involved", "initial_price_cents", "created_at"],
+      ["id", "name", "username", "ticker", "org_type", "description", "post_style", "can_be_involved", "initial_price_cents", "image_url", "banner_url", "created_at"],
       organizations.map((org) => [
         org.id,
         org.name,
+        canonicalHandle(org.username ?? org.id),
         org.ticker ?? null,
         org.type,
         org.description,
         org.postStyle ?? "",
         org.canBeInvolved,
         initialOrgPriceCents(org),
+        resolveOrgLogoUrl(org.id),
+        resolveOrgBannerUrl(org.id),
         now
       ]),
-      "ON CONFLICT (id) DO NOTHING"
+      "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, username = EXCLUDED.username, org_type = EXCLUDED.org_type, description = EXCLUDED.description, post_style = EXCLUDED.post_style, can_be_involved = EXCLUDED.can_be_involved, initial_price_cents = COALESCE(feed_organizations.initial_price_cents, EXCLUDED.initial_price_cents), image_url = CASE WHEN feed_organizations.image_url IS NULL OR btrim(feed_organizations.image_url) = '' OR feed_organizations.image_url LIKE '/images/%' THEN EXCLUDED.image_url ELSE feed_organizations.image_url END, banner_url = CASE WHEN feed_organizations.banner_url IS NULL OR btrim(feed_organizations.banner_url) = '' OR feed_organizations.banner_url LIKE '/images/%' THEN EXCLUDED.banner_url ELSE feed_organizations.banner_url END"
     ))
-    const tradeableOrgs = organizations.flatMap((org) => {
+    try finalizeRenamedOrgsTx(tx)
+    try runBatches(tx, buildInsertBatches(
+      "feed_follows",
+      ["follower_id", "target_id", "target_kind", "created_at"],
+      buildSeedNpcFollowRows(runtimeActors, organizations, now),
+      "ON CONFLICT (follower_id, target_id, target_kind) DO NOTHING"
+    ))
+    const tradeableOrgs: ReadonlyArray<TradeableOrgSeed> = organizations.flatMap((org) => {
       const priceCents = initialOrgPriceCents(org)
       return org.ticker && priceCents !== null && priceCents > 0 ? [{ org, ticker: org.ticker, priceCents }] : []
     })
-    try runBatch(tx, buildInsertBatch(
+    try runBatches(tx, buildInsertBatches(
       "feed_spot_pools",
       ["ticker", "organization_id", "base_reserve", "quote_reserve_cents", "index_price_cents", "updated_at"],
       tradeableOrgs.map(({ org, ticker, priceCents }) => [
         ticker,
         org.id,
-        10_000,
-        10_000 * priceCents,
+        INITIAL_SPOT_BASE_RESERVE,
+        initialSpotQuoteReserveCents(priceCents),
         priceCents,
         now
       ]),
       "ON CONFLICT (ticker) DO NOTHING"
     ))
-    try runBatch(tx, buildInsertBatch(
+    try tx.query(
+      "UPDATE feed_spot_pools SET base_reserve = $1, quote_reserve_cents = $2 * index_price_cents, updated_at = $3 WHERE index_price_cents >= 100 AND quote_reserve_cents >= (base_reserve * index_price_cents) / 2",
+      [INITIAL_SPOT_BASE_RESERVE, INITIAL_SPOT_BASE_RESERVE / SPOT_BASE_SCALE, now]
+    )
+    try runBatches(tx, buildInsertBatches(
       "feed_perp_markets",
       ["ticker", "index_price_cents", "mark_price_cents", "long_oi_cents", "short_oi_cents", "max_leverage", "funding_rate_bps", "last_funding_period", "updated_at"],
       tradeableOrgs.map(({ ticker, priceCents }) => [
@@ -243,7 +345,13 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
       ]),
       "ON CONFLICT (ticker) DO NOTHING"
     ))
-    try runBatch(tx, buildInsertBatch(
+    try runBatches(tx, buildInsertBatches(
+      "feed_npc_spot_holdings",
+      ["actor_id", "ticker", "base_units", "updated_at"],
+      buildNpcSpotHoldingRows(runtimeActors, tradeableOrgs, now),
+      "ON CONFLICT (actor_id, ticker) DO NOTHING"
+    ))
+    try runBatches(tx, buildInsertBatches(
       "feed_prediction_markets",
       ["id", "slot_index", "question", "description", "category", "timeframe", "phase", "yes_shares", "no_shares", "liquidity_cents", "secret_outcome", "status", "resolved_outcome", "resolution_proof", "resolution_article_id", "expires_at", "resolved_at", "created_at"],
       INITIAL_MARKETS.map((market) => [
@@ -266,9 +374,12 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         null,
         now - market.createdAgoMs
       ]),
-      "ON CONFLICT (id) DO NOTHING"
+      "ON CONFLICT DO NOTHING"
     ))
-    try runBatch(tx, buildInsertBatch(
+    try tx.query(
+      "UPDATE feed_prediction_markets SET phase = CASE phase WHEN 'early' THEN 'opening' WHEN 'setup' THEN 'opening' WHEN 'active' THEN 'mid' WHEN 'live' THEN 'climax' ELSE phase END WHERE phase IN ('early', 'setup', 'active', 'live')"
+    )
+    try runBatches(tx, buildInsertBatches(
       "feed_posts",
       ["id", "author_id", "author_kind", "content", "reply_to_post_id", "quote_post_id", "via_client_name", "market_id", "ticker", "like_count", "repost_count", "reply_count", "deleted_at", "created_at"],
       INITIAL_POSTS.map((post) => [
@@ -289,7 +400,7 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
       ]),
       "ON CONFLICT (id) DO NOTHING"
     ))
-    try runBatch(tx, buildInsertBatch(
+    try runBatches(tx, buildInsertBatches(
       "feed_articles",
       ["id", "title", "summary", "body", "author_org_id", "related_market_id", "is_resolution_proof", "published_at"],
       INITIAL_ARTICLES.map((article) => [
@@ -304,7 +415,7 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
       ]),
       "ON CONFLICT (id) DO NOTHING"
     ))
-    try runBatch(tx, buildInsertBatch(
+    try runBatches(tx, buildInsertBatches(
       "feed_world_facts",
       ["id", "fact_text", "category", "created_at"],
       INITIAL_WORLD_FACTS.map((fact) => [
@@ -313,6 +424,57 @@ export effect function seedFeedWorld(): void!StoreFailure!Store {
         fact.category,
         now - fact.createdAgoMs
       ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatches(tx, buildInsertBatches(
+      "feed_chats",
+      ["id", "kind", "name", "created_by", "tier", "created_at"],
+      INITIAL_ALPHA_GROUPS.map((group) => [
+        group.id,
+        "npc_alpha",
+        group.name,
+        group.ownerId,
+        group.tier,
+        now - group.createdAgoMs
+      ]),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatches(tx, buildInsertBatches(
+      "feed_chat_members",
+      ["chat_id", "member_id", "member_kind", "role", "joined_at", "last_read_at"],
+      INITIAL_ALPHA_GROUPS.flatMap((group) => {
+        const joinedAt = now - group.createdAgoMs
+        return group.memberIds.map((memberId) => [
+          group.id,
+          memberId,
+          "npc",
+          memberId === group.ownerId ? "owner" : "member",
+          joinedAt,
+          joinedAt
+        ])
+      }),
+      "ON CONFLICT (chat_id, member_id) DO NOTHING"
+    ))
+    try runBatches(tx, buildInsertBatches(
+      "feed_messages",
+      ["id", "chat_id", "sender_id", "sender_kind", "via_client_name", "body", "created_at"],
+      INITIAL_ALPHA_GROUPS.flatMap((group) =>
+        group.messages.map((message) => [
+          message.id,
+          group.id,
+          message.senderId,
+          "npc",
+          null,
+          message.body,
+          now - message.createdAgoMs
+        ])
+      ),
+      "ON CONFLICT (id) DO NOTHING"
+    ))
+    try runBatches(tx, buildInsertBatches(
+      "feed_market_price_history",
+      ["id", "market_kind", "market_ref", "price_cents", "yes_price_bps", "mark_price_cents", "volume_cents", "recorded_at"],
+      buildInitialPriceHistoryRows(INITIAL_MARKETS, tradeableOrgs, now),
       "ON CONFLICT (id) DO NOTHING"
     ))
   })

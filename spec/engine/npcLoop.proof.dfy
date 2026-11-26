@@ -38,10 +38,10 @@ lemma PlayerScoreAbsent(xs: seq<PlayerEngagement>, pid: int, init: int)
 }
 
 lemma recordPlayerEngagement_ensures(s: NpcLoopState, playerId: int, engagementDelta: int, by_: LoopSender)
+  ensures (inv(s) ==> canRecordPlayerEngagement(s, playerId, engagementDelta, by_) ==> alwaysEngagementUniqueAndNonNegative(recordPlayerEngagement(s, playerId, engagementDelta, by_)))
   ensures (inv(s) ==> canRecordPlayerEngagement(s, playerId, engagementDelta, by_) ==> alwaysNpcRolesOnly(recordPlayerEngagement(s, playerId, engagementDelta, by_)))
   ensures (inv(s) ==> canRecordPlayerEngagement(s, playerId, engagementDelta, by_) ==> alwaysStepsBounded(recordPlayerEngagement(s, playerId, engagementDelta, by_)))
   ensures (inv(s) ==> canRecordPlayerEngagement(s, playerId, engagementDelta, by_) ==> alwaysSpotIndexPositive(recordPlayerEngagement(s, playerId, engagementDelta, by_)))
-  ensures (inv(s) ==> canRecordPlayerEngagement(s, playerId, engagementDelta, by_) ==> alwaysEngagementUniqueAndNonNegative(recordPlayerEngagement(s, playerId, engagementDelta, by_)))
   ensures (inv(s) ==> canRecordPlayerEngagement(s, playerId, engagementDelta, by_) ==> stepSpotOnlyMovesOnNpcSpot(s, "recordPlayerEngagement", recordPlayerEngagement(s, playerId, engagementDelta, by_)))
 {
   if inv(s) && canRecordPlayerEngagement(s, playerId, engagementDelta, by_) {
