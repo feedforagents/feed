@@ -858,9 +858,13 @@ export async function previewPerpOrder(
   setStoreState({ perpPreview: res.ok ? res.data : null });
 }
 
+let marketsLoadCount = 0;
+
 export async function loadMarkets(): Promise<void> {
+  const loadId = ++marketsLoadCount;
   setStoreState({ marketsLoading: true });
   const mktRes = await requestJson("/api/markets", { parse: passThrough });
+  if (loadId !== marketsLoadCount) return;
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
