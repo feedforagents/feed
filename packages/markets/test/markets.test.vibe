@@ -908,8 +908,9 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           ericEntry?.avatarUrl,
           ericEntry?.handle,
           politaicoEntry === undefined
-        ]
-      },
+    ],
+    tiedRanksShareRankTwo: boardFinal.entries.map((entry) => [entry.accountId, entry.rank])
+          },
       {
         fixedStartingGrant: [10_000, false],
         slippageAwareMtm: [true, true],
@@ -926,8 +927,9 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           true,
           "/images/actors/eric-weinstain.jpg",
           "ericrweinstain",
-          true
-        ]
+      true
+    ],
+    tiedRanksShareRankTwo: [["user-alice", 1], ["user-bob", 2], ["user-dave", 2], ["user-carol", 4]]
       }
     ))
   })
