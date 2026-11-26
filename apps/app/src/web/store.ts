@@ -487,8 +487,11 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
         await loadMarkets();
         if (s.walletView && s.viewer) {
           await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
-        } else if (s.marketsViewMode === "terminal" && s.selectedMarketId) {
-          await loadMarketDetails(s.selectedMarketKind, s.selectedMarketId);
+        } else {
+          const latest = getStoreSnapshot();
+          if (latest.marketsViewMode === "terminal" && latest.selectedMarketId) {
+            await loadMarketDetails(latest.selectedMarketKind, latest.selectedMarketId);
+          }
         }
       });
     }

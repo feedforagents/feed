@@ -70,6 +70,7 @@ const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
+let marketDetailsRequestSeq = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -741,6 +742,7 @@ export async function loadMarketDetails(
   const s = getStoreSnapshot();
   const viewerId = s.viewer?.accountId ?? null;
   const range = rangeOverride ?? s.marketTimeRange;
+  const reqSeq = ++marketDetailsRequestSeq;
   setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
   const basePath = kind === "perp"
     ? `/api/markets/perp/${encodeURIComponent(id)}`
@@ -756,6 +758,7 @@ export async function loadMarketDetails(
     requestJson(`${basePath}/trades?limit=40`, { parse: decodeMarketTrades }),
     requestJson(feedUrl, { parse: (raw) => decodeFeedPage(raw, viewerId) }),
   ]);
+  if (reqSeq !== marketDetailsRequestSeq) return;
   const latest = getStoreSnapshot();
   if (latest.selectedMarketKind !== kind || latest.selectedMarketId !== id) return;
   setStoreState({
