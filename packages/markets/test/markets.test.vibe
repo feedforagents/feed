@@ -929,7 +929,7 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           "ericrweinstain",
       true
     ],
-    tiedRanksShareRankTwo: [["user-alice", 1], ["user-bob", 2], ["user-dave", 2], ["user-carol", 4]]
+    tiedRanksShareRankTwo: [["user-alice", 1], ["user-bob", 2], ["user-dave", 2], ["user-email-only", 2], ["user-carol", 5]]
       }
     ))
   })
