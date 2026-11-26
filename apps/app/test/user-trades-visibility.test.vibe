@@ -1,0 +1,225 @@
+// spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { buyPredictionShares } from "@repo/markets"
+import { realtimeBusLayer } from "@repo/social"
+import { TestClock } from "effect/testing"
+import { parseAppServerConfig } from "../src/server/config.vibe"
+import { handleFeedRequest } from "../src/server/router.vibe"
+
+module httpHarness {
+  /** @throws {never} */
+  export function buildReq(origin: string, path: string, method: string, cookie?: string, bodyJson?: string): Request {
+    const hdrs = new Headers()
+    if (cookie !== undefined && cookie.length > 0) {
+      hdrs.set("cookie", cookie)
+    }
+    if (bodyJson !== undefined) {
+      hdrs.set("content-type", "application/json")
+    }
+    return new Request(`${origin}${path}`, {
+      method,
+      headers: hdrs,
+      body: bodyJson,
+    })
+  }
+}
+import { buildReq } from httpHarness
+
+const ORIGIN = "http://trades-vis.localtest"
+
+const CFG = parseAppServerConfig(
+  {
+    DEPLOYMENT_ENV: "localnet",
+    PUBLIC_APP_URL: ORIGIN,
+    PUBLIC_API_URL: ORIGIN,
+    SMS_MODE: "loopback",
+    EMAIL_MODE: "loopback",
+    AUTH_DIGEST_KEY: "trades-vis-digest-key-111111111111111111111111111",
+    OAUTH_SIGNING_SECRET: "trades-vis-oauth-key-222222222222222222222222222",
+    CRON_SECRET: "trades-vis-cron-key",
+  },
+  ORIGIN,
+)
+
+error JsonReadError { reason: string }
+
+effect function sendJson(path: string, opts?: { readonly method?: string; readonly cookie?: string; readonly payload?: unknown }) {
+  const serialized = opts?.payload === undefined ? undefined : JSON.stringify(opts.payload)
+  const method = opts?.method ?? (serialized === undefined ? "GET" : "POST")
+  const res = try handleFeedRequest(buildReq(ORIGIN, path, method, opts?.cookie, serialized), CFG)
+  const parsed = try tryPromise({
+    try: () => res.json() as Promise<Record<string, unknown>>,
+    catch: () => new JsonReadError({ reason: `non-json from ${path}` }),
+  })
+  return { status: res.status, cookie: (res.headers.get("set-cookie") ?? "").split(";")[0]?.trim() ?? "", body: parsed }
+}
+
+effect function createVerifiedSession(phone: string, handle: string) {
+  try sendJson("/api/auth/phone/start", { payload: { phoneE164: phone } })
+  const otp = try sendJson(`/api/auth/dev/loopback-code?phone=${encodeURIComponent(phone)}`)
+  const step2 = try sendJson("/api/auth/phone/verify", {
+    payload: { phoneE164: phone, code: String(otp.body.code ?? "") },
+  })
+  const done = try sendJson("/api/auth/phone/onboard", {
+    payload: {
+      pendingToken: String(step2.body.pendingToken ?? ""),
+      username: handle,
+      accepted18Plus: true,
+      acceptedTerms: true,
+    },
+  })
+  const acct = done.body.account as Record<string, unknown>
+  return {
+    accountId: String(acct.accountId ?? ""),
+    handle: String(acct.username ?? handle),
+    cookie: done.cookie,
+  }
+}
+
+function tradeCountOf(body: Record<string, unknown>): number {
+  const list = body.trades
+  return Array.isArray(list) ? list.length : -1
+}
+
+it.effect(
+  'GET /api/users/:handle/trades enforces mutual blocks, SocialMode suppression, NPC/org kinds, and limit clamping (spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  effect () => {
+    const testLayer = Layer.merge(
+      Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })),
+      Layer.fresh(realtimeBusLayer),
+    )
+    provide testLayer {
+      try TestClock.setTime(Date.now())
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const store = try Store
+      const seedRefs = try store.transaction(effect (tx: Tx) => {
+        const npcRows = try tx.query("SELECT id, username FROM feed_actors ORDER BY id ASC LIMIT 1")
+        const orgRows = try tx.query("SELECT id FROM feed_organizations ORDER BY id ASC LIMIT 1")
+        return {
+          npcId: toText(npcRows[0]?.id) ?? "",
+          npcHandle: toText(npcRows[0]?.username) ?? "",
+          orgId: toText(orgRows[0]?.id) ?? "",
+        }
+      })
+
+      const alice = try createVerifiedSession("+14155550311", "trades_alice")
+      const bob = try createVerifiedSession("+14155550312", "trades_bob")
+
+      try buyPredictionShares({
+        actorId: alice.accountId,
+        actorKind: "user",
+        marketId: "seed-market-1",
+        side: "yes",
+        amountCents: 400,
+      })
+      try buyPredictionShares({
+        actorId: alice.accountId,
+        actorKind: "user",
+        marketId: "seed-market-2",
+        side: "no",
+        amountCents: 300,
+      })
+      try buyPredictionShares({
+        actorId: bob.accountId,
+        actorKind: "user",
+        marketId: "seed-market-1",
+        side: "no",
+        amountCents: 250,
+      })
+      try buyPredictionShares({
+        actorId: seedRefs.npcId,
+        actorKind: "npc",
+        marketId: "seed-market-1",
+        side: "yes",
+        amountCents: 300,
+      })
+
+      const anonGameAlice = try sendJson(`/api/users/${alice.handle}/trades`)
+      const anonLimitOneAlice = try sendJson(`/api/users/${alice.handle}/trades?limit=1`)
+      const anonSocialAlice = try sendJson(`/api/users/${alice.handle}/trades?mode=social`)
+      const bobGameAlice = try sendJson(`/api/users/${alice.handle}/trades`, { cookie: bob.cookie })
+      const bobGameNpc = try sendJson(`/api/users/${seedRefs.npcHandle}/trades`, { cookie: bob.cookie })
+      const orgTrades = try sendJson(`/api/users/${seedRefs.orgId}/trades`, { cookie: bob.cookie })
+      const ghostTrades = try sendJson("/api/users/ghost_missing_user_999/trades")
+
+      const blockBobRes = try sendJson(`/api/users/${bob.handle}/block`, { method: "POST", cookie: alice.cookie })
+      const bobReadsAliceWhileBlockedBy = try sendJson(`/api/users/${alice.handle}/trades`, { cookie: bob.cookie })
+      const aliceReadsBobWhileBlocking = try sendJson(`/api/users/${bob.handle}/trades`, { cookie: alice.cookie })
+      const aliceSelfWhileBlocking = try sendJson(`/api/users/${alice.handle}/trades`, { cookie: alice.cookie })
+      const bobSelfWhileBlocked = try sendJson(`/api/users/${bob.handle}/trades`, { cookie: bob.cookie })
+
+      const unblockBobRes = try sendJson(`/api/users/${bob.handle}/block`, { method: "DELETE", cookie: alice.cookie })
+      const bobReadsAliceAfterUnblock = try sendJson(`/api/users/${alice.handle}/trades`, { cookie: bob.cookie })
+      const aliceReadsBobAfterUnblock = try sendJson(`/api/users/${bob.handle}/trades`, { cookie: alice.cookie })
+
+      const blockNpcRes = try sendJson(`/api/users/${seedRefs.npcHandle}/block`, { method: "POST", cookie: bob.cookie })
+      const bobReadsNpcWhileBlocking = try sendJson(`/api/users/${seedRefs.npcHandle}/trades`, { cookie: bob.cookie })
+
+      const switchBobSocial = try sendJson("/api/auth/mode", { cookie: bob.cookie, payload: { mode: "social" } })
+      const bobSocialReadsAliceWithGameQuery = try sendJson(`/api/users/${alice.handle}/trades?mode=game`, { cookie: bob.cookie })
+      const aliceSelfInGameMode = try sendJson(`/api/users/${alice.handle}/trades`, { cookie: alice.cookie })
+      const switchBobGame = try sendJson("/api/auth/mode", { cookie: bob.cookie, payload: { mode: "game" } })
+      const bobRestoredGameReadsAlice = try sendJson(`/api/users/${alice.handle}/trades`, { cookie: bob.cookie })
+
+      try orDie(
+        Effect.try(() => {
+          assert.deepStrictEqual(
+            {
+              anonGameAlice: [anonGameAlice.status, tradeCountOf(anonGameAlice.body)],
+              anonLimitOneAlice: [anonLimitOneAlice.status, tradeCountOf(anonLimitOneAlice.body)],
+              anonSocialAlice: [anonSocialAlice.status, tradeCountOf(anonSocialAlice.body)],
+              bobGameAlice: [bobGameAlice.status, tradeCountOf(bobGameAlice.body)],
+              bobGameNpcHasTrades: bobGameNpc.status === 200 && tradeCountOf(bobGameNpc.body) >= 1,
+              orgTrades: [orgTrades.status, tradeCountOf(orgTrades.body)],
+              ghostStatus: ghostTrades.status,
+              blockBobStatus: blockBobRes.status,
+              bobReadsAliceWhileBlockedBy: [bobReadsAliceWhileBlockedBy.status, tradeCountOf(bobReadsAliceWhileBlockedBy.body)],
+              aliceReadsBobWhileBlocking: [aliceReadsBobWhileBlocking.status, tradeCountOf(aliceReadsBobWhileBlocking.body)],
+              aliceSelfWhileBlocking: [aliceSelfWhileBlocking.status, tradeCountOf(aliceSelfWhileBlocking.body)],
+              bobSelfWhileBlocked: [bobSelfWhileBlocked.status, tradeCountOf(bobSelfWhileBlocked.body)],
+              unblockBobStatus: unblockBobRes.status,
+              bobReadsAliceAfterUnblock: [bobReadsAliceAfterUnblock.status, tradeCountOf(bobReadsAliceAfterUnblock.body)],
+              aliceReadsBobAfterUnblock: [aliceReadsBobAfterUnblock.status, tradeCountOf(aliceReadsBobAfterUnblock.body)],
+              blockNpcStatus: blockNpcRes.status,
+              bobReadsNpcWhileBlocking: [bobReadsNpcWhileBlocking.status, tradeCountOf(bobReadsNpcWhileBlocking.body)],
+              switchBobSocialStatus: switchBobSocial.status,
+              bobSocialReadsAliceWithGameQuery: [bobSocialReadsAliceWithGameQuery.status, tradeCountOf(bobSocialReadsAliceWithGameQuery.body)],
+              aliceSelfInGameMode: [aliceSelfInGameMode.status, tradeCountOf(aliceSelfInGameMode.body)],
+              switchBobGameStatus: switchBobGame.status,
+              bobRestoredGameReadsAlice: [bobRestoredGameReadsAlice.status, tradeCountOf(bobRestoredGameReadsAlice.body)],
+            },
+            {
+              anonGameAlice: [200, 2],
+              anonLimitOneAlice: [200, 1],
+              anonSocialAlice: [200, 0],
+              bobGameAlice: [200, 2],
+              bobGameNpcHasTrades: true,
+              orgTrades: [200, 0],
+              ghostStatus: 404,
+              blockBobStatus: 200,
+              bobReadsAliceWhileBlockedBy: [200, 0],
+              aliceReadsBobWhileBlocking: [200, 0],
+              aliceSelfWhileBlocking: [200, 2],
+              bobSelfWhileBlocked: [200, 1],
+              unblockBobStatus: 200,
+              bobReadsAliceAfterUnblock: [200, 2],
+              aliceReadsBobAfterUnblock: [200, 1],
+              blockNpcStatus: 200,
+              bobReadsNpcWhileBlocking: [200, 0],
+              switchBobSocialStatus: 200,
+              bobSocialReadsAliceWithGameQuery: [200, 0],
+              aliceSelfInGameMode: [200, 2],
+              switchBobGameStatus: 200,
+              bobRestoredGameReadsAlice: [200, 2],
+            },
+          )
+        }),
+      )
+    }
+  },
+  60_000,
+)

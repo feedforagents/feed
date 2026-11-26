@@ -1482,8 +1482,14 @@ effect function handleSocialPostsAndUsers(
   }
   const userTradesMatch = /^\/api\/users\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && userTradesMatch !== null) {
+    const session = try optionalSession(request, config)
+    const mode = resolveMode(session, url)
     const handle = decodeSegment(userTradesMatch[1] ?? "")
-    const trades = try listUserTrades({ handleOrId: handle, limit: clampIntQuery(url, "limit", 50, 1, 200) })
+    const profile = try getProfile(handle, session?.accountId, mode)
+    const canViewTrades = (profile.kind === "user" || profile.kind === "npc") && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
+    const trades = canViewTrades
+      ? try listUserTrades({ handleOrId: profile.id, limit: clampIntQuery(url, "limit", 50, 1, 200) })
+      : []
     return jsonResponse({ trades })
   }
   const userFollowListMatch = /^\/api\/users\/([^/]+)\/(followers|following)$/.exec(path)
