@@ -1,12 +1,12 @@
 // spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
 import { assert, it } from "@effect/vitest"
+import { TestClock } from "effect/testing"
+import { parseAppServerConfig } from "../src/server/config.vibe"
+import { handleFeedRequest } from "../src/server/router.vibe"
 import { Store, migrateFeedSchema, seedFeedWorld, toText, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import { buyPredictionShares } from "@repo/markets"
 import { realtimeBusLayer } from "@repo/social"
-import { TestClock } from "effect/testing"
-import { parseAppServerConfig } from "../src/server/config.vibe"
-import { handleFeedRequest } from "../src/server/router.vibe"
 
 module httpHarness {
   /** @throws {never} */

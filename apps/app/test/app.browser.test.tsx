@@ -1,43 +1,33 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
+import { type Root } from "react-dom/client";
+import { expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
-import { App } from "../src/web/App.tsx";
 import { reconnectRealtime, storeActions } from "../src/web/store.ts";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { hydrateAuth } from "../src/web/store-auth.ts";
-import type { ViewerSession } from "../src/web/types.ts";
+import {
+  installAppTestLifecycle,
+  installStubEventSource,
+  makeViewerSession,
+  mountApp as mountAppRoot,
+  requestUrl,
+} from "./app-test-helpers.tsx";
 
 const opened: Root[] = [];
 const predictionBuyBodies: string[] = [];
 const phoneStartRequests: Array<Record<string, unknown>> = [];
 const createdEventSources: Array<EventTarget> = [];
-const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
-const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
 const liveEventSources: EventTarget[] = [];
 let profileShouldFail = false;
 let profileShould404 = false;
 let explorePosts: typeof SAMPLE_POSTS = [];
 const fetchPaths: string[] = [];
-const POST_DELETED_VIEWER: ViewerSession = {
+const POST_DELETED_VIEWER = makeViewerSession({
   accountId: "ailon-musk",
   handle: "ailonmusk",
   displayName: "AIlon Musk",
-  bio: "",
-  avatarUrl: null,
-  bannerUrl: null,
-  phoneLast2: null,
-  phoneVerifiedAt: null,
-  emailMasked: null,
-  emailVerifiedAt: null,
-  uiMode: "game",
-  balanceCents: 0,
-  startingGrantCents: 0,
-  isAdmin: false,
-  isReviewer: false,
-  agentGrant: null,
-};
+});
 
 const SAMPLE_POSTS = [
   {
@@ -237,16 +227,16 @@ function profilePayload(id: string, handle: string, displayName: string) {
   };
 }
 
-function replyItem(id: string, authorId: string, authorHandle: string, authorDisplayName: string, content: string) {
+function makePostRecord(overrides: Record<string, unknown>) {
   return {
-    id,
-    authorId,
+    id: "post-1",
+    authorId: "acc-bob",
     authorKind: "user",
-    authorHandle,
-    authorDisplayName,
+    authorHandle: "bob",
+    authorDisplayName: "Bob Badger",
     avatarUrl: null,
-    content,
-    replyToPostId: "parent-post-1",
+    content: "",
+    replyToPostId: null,
     quotePostId: null,
     viaClientName: null,
     marketId: null,
@@ -259,7 +249,19 @@ function replyItem(id: string, authorId: string, authorHandle: string, authorDis
     likedByViewer: false,
     repostedByViewer: false,
     createdAt: Date.now() - 60_000,
+    ...overrides,
   };
+}
+
+function replyItem(id: string, authorId: string, authorHandle: string, authorDisplayName: string, content: string) {
+  return makePostRecord({
+    id,
+    authorId,
+    authorHandle,
+    authorDisplayName,
+    content,
+    replyToPostId: "parent-post-1",
+  });
 }
 
 function installMockNetwork(
@@ -306,15 +308,15 @@ function installMockNetwork(
   let viewerIsReviewer = true;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, window.location.origin);
+    const url = requestUrl(input);
     const path = url.pathname;
     fetchPaths.push(path);
     const delayedThread = options.threadFetch?.(path) ?? null;
     if (delayedThread) return delayedThread;
     if (path === "/api/auth/phone/start") {
       try {
-        phoneStartRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        const rawBody = typeof init?.body === "string" ? init.body : "{}";
+        phoneStartRequests.push(JSON.parse(rawBody) as Record<string, unknown>);
       } catch {
         phoneStartRequests.push({});
       }
@@ -682,29 +684,52 @@ function installMockNetwork(
 }
 
 async function renderApp() {
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountAppRoot(opened);
 }
 
-beforeAll(() => {
-  environment.IS_REACT_ACT_ENVIRONMENT = true;
-});
-
-afterEach(async () => {
-  for (const root of opened.splice(0)) {
-    await act(() => Promise.resolve(root.unmount()));
-  }
+installAppTestLifecycle(opened, async () => {
   storeActions.setJoinSheetOpen(false);
   await act(() => storeActions.logout());
-  vi.unstubAllGlobals();
-  window.history.replaceState(null, "", "/");
 });
 
-afterAll(() => {
-  environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
-});
+async function mountCustomMockApp(options: {
+  readonly authenticated?: boolean;
+  readonly handle: (path: string, url: URL, init?: RequestInit) => Promise<Response> | undefined;
+}) {
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input, init) => {
+    const url = requestUrl(input);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: options.authenticated ?? false,
+        viewer: options.authenticated ? { accountId: "acc-me", handle: "me", displayName: "Me" } : null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    const custom = options.handle(path, url, init);
+    if (custom !== undefined) return custom;
+    if (path === "/api/chats") return json({ chats: [] });
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/notifications") return json({ notifications: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  installStubEventSource(liveEventSources);
+  await renderApp();
+  if (options.authenticated) {
+    await act(() => hydrateAuth());
+    expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+  }
+}
 
 async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
   const network = installMockNetwork(options ?? {});
@@ -925,19 +950,25 @@ it('Market refresh in flight loads the newly selected market (spec/markets/predi
   expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
 });
 
-it('Late trades never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  const network = await mountApp({ holdTradesFor: "alice" });
-
+async function openAliceTabThenNavigateBob(
+  tabName: string,
+  wasRequested: (handle: string) => boolean,
+) {
   await act(() => storeActions.navigate("/u/alice"));
   await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: tabName })));
   await act(() => Promise.resolve());
-  expect(network.tradesRequested("alice")).toBe(true);
+  expect(wasRequested("alice")).toBe(true);
 
   await act(() => storeActions.navigate("/u/bob"));
   await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
   expect(getStoreSnapshot().profileHandle).toBe("bob");
-  expect(network.tradesRequested("bob")).toBe(false);
+  expect(wasRequested("bob")).toBe(false);
+}
+
+it('Late trades never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdTradesFor: "alice" });
+  await openAliceTabThenNavigateBob("Trades", network.tradesRequested);
 
   network.releaseTrades("alice", [{ ...SAMPLE_TRADES[0], id: "alice-trade-1" }]);
   await act(() => Promise.resolve());
@@ -953,17 +984,7 @@ it('Late trades never land on another profile (spec/app/navigation.md, "Story: B
 
 it('Late likes never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdLikesFor: "alice" });
-
-  await act(() => storeActions.navigate("/u/alice"));
-  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("tab", { name: "Likes" })));
-  await act(() => Promise.resolve());
-  expect(network.likesRequested("alice")).toBe(true);
-
-  await act(() => storeActions.navigate("/u/bob"));
-  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
-  expect(getStoreSnapshot().profileHandle).toBe("bob");
-  expect(network.likesRequested("bob")).toBe(false);
+  await openAliceTabThenNavigateBob("Likes", network.likesRequested);
 
   network.releaseLikes("alice", [
     {
@@ -1061,16 +1082,7 @@ it('Late replies never land on another profile (spec/app/navigation.md, "Story: 
     await act(() => Promise.resolve());
   };
 
-  await act(() => storeActions.navigate("/u/alice"));
-  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
-  await act(() => Promise.resolve());
-  expect(network.repliesRequested("alice")).toBe(true);
-
-  await act(() => storeActions.navigate("/u/bob"));
-  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
-  expect(getStoreSnapshot().profileHandle).toBe("bob");
-  expect(network.repliesRequested("bob")).toBe(false);
+  await openAliceTabThenNavigateBob("Replies", network.repliesRequested);
 
   network.releaseReplies("alice", [replyItem("alice-reply-1", "acc-alice", "alice", "Alice Aardvark", "Alice reply that must not land on Bob")]);
   await act(() => Promise.resolve());
@@ -1097,59 +1109,32 @@ it('Late replies never land on another profile (spec/app/navigation.md, "Story: 
   await expect.element(page.getByText("Newer Bob reply")).toBeInTheDocument();
 });
 
-function r37ProfilePayload(id: string, handle: string, displayName: string) {
-  return {
-    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
-    posts: [],
-    positions: {},
-    nextCursor: null,
-  };
-}
-
 it('Switching profiles never shows the previous profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   let bobRequested = false;
   let bobHeld = true;
   const bobReleases: Array<(res: Response) => void> = [];
   const releaseBob = () => {
-    for (const release of bobReleases.splice(0)) release(Response.json(r37ProfilePayload("acc-bob", "bob", "Bob Badger")));
+    for (const release of bobReleases.splice(0)) release(Response.json(profilePayload("acc-bob", "bob", "Bob Badger")));
   };
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({ authenticated: false, viewer: null, acceptedCountries: ["+1", "+44"], publicAppUrl: window.location.origin });
-    }
-    if (path === "/api/users/alice") return json(r37ProfilePayload("acc-alice", "alice", "Alice Aardvark"));
-    if (path === "/api/users/bob" || path === "/api/users/acc-bob") {
-      bobRequested = true;
-      if (bobHeld) {
-        return new Promise<Response>((resolve) => {
-          bobReleases.push(resolve);
-        });
+  await mountCustomMockApp({
+    handle: (path) => {
+      if (path === "/api/users/alice") return Promise.resolve(Response.json(profilePayload("acc-alice", "alice", "Alice Aardvark")));
+      if (path === "/api/users/bob" || path === "/api/users/acc-bob") {
+        bobRequested = true;
+        if (bobHeld) {
+          return new Promise<Response>((resolve) => {
+            bobReleases.push(resolve);
+          });
+        }
+        return Promise.resolve(Response.json(profilePayload("acc-bob", "bob", "Bob Badger")));
       }
-      return json(r37ProfilePayload("acc-bob", "bob", "Bob Badger"));
-    }
-    if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
-    if (path === "/api/markets") return json({ predictions: SAMPLE_MARKETS.predictions, perps: [] });
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
-    if (path === "/api/leaderboard") return json(SAMPLE_LEADERBOARD_PLAYERS);
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+      if (path === "/api/feed" || path === "/api/posts") return Promise.resolve(Response.json({ items: SAMPLE_POSTS, nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: SAMPLE_MARKETS.predictions, perps: [] }));
+      if (path === "/api/explore") return Promise.resolve(Response.json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } }));
+      if (path === "/api/leaderboard") return Promise.resolve(Response.json(SAMPLE_LEADERBOARD_PLAYERS));
+      return undefined;
+    },
+  });
 
   await act(() => storeActions.navigate("/u/alice"));
   await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
@@ -1184,11 +1169,7 @@ it('Switching profiles never shows the previous profile (spec/app/navigation.md,
 });
 
 it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+  await mountApp();
 
   await act(async () => {
     await storeActions.navigate("/u/ailonmusk");
@@ -1207,29 +1188,22 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   await expect.element(page.getByText("Profile not found")).not.toBeInTheDocument();
   await expect.element(page.getByText("1 post")).toBeInTheDocument();
 
-  profileShouldFail = false;
-  await act(async () => {
-    await storeActions.navigate("/u/ghost");
-  });
-  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
-  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
-  profileShouldFail = false;
-  await act(async () => {
-    await storeActions.navigate("/u/ailonmusk");
-  });
-  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
-  profileShouldFail = true;
-  await act(async () => {
-    await storeActions.navigate("/u/other");
-  });
-  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
-  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
-  profileShouldFail = false;
+  const expectMissingProfile = async (path: string, shouldFail: boolean) => {
+    profileShouldFail = shouldFail;
+    await act(async () => {
+      await storeActions.navigate(path);
+    });
+    await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+    await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+    profileShouldFail = false;
+    await act(async () => {
+      await storeActions.navigate("/u/ailonmusk");
+    });
+    await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  };
 
-  await act(async () => {
-    await storeActions.navigate("/u/ailonmusk");
-  });
-  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  await expectMissingProfile("/u/ghost", false);
+  await expectMissingProfile("/u/other", true);
   profileShould404 = true;
   liveEventSources[0].dispatchEvent(new Event("market.spot"));
   await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
@@ -1237,7 +1211,7 @@ it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "St
   profileShould404 = false;
 });
 
-it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+async function mountExplorePredSearch(tabName: string) {
   installMockNetwork({ perps: [{ ticker: "PRED", name: "Prediction" }] });
   setStoreState({
     viewer: null,
@@ -1257,7 +1231,12 @@ it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigati
   await act(() => userEvent.fill(search, "$PRED"));
   await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
   await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: tabName })));
+  return search;
+}
+
+it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const search = await mountExplorePredSearch("Orgs");
   await expect.element(page.getByText("No matching organizations")).not.toBeInTheDocument();
   await expect.element(page.getByRole("main").getByText("Prediction")).toBeInTheDocument();
   await expect.element(page.getByText("Organization")).toBeInTheDocument();
@@ -1271,26 +1250,7 @@ it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigati
 });
 
 it('Explore search "$PRED" lists the PRED market in the Markets tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  installMockNetwork({ perps: [{ ticker: "PRED", name: "Prediction" }] });
-  setStoreState({
-    viewer: null,
-    localUiMode: "game",
-    route: "Home",
-    exploreQuery: "",
-    activeTrendingTag: null,
-    activeArticleId: null,
-    perps: [],
-    predictions: [],
-  });
-  await renderApp();
-
-  await act(() => userEvent.click(page.getByRole("button", { name: "Explore" }).first()));
-  const search = page.getByPlaceholder("Search posts, @people, #tags, or $tickers");
-  await expect.element(search).toBeInTheDocument();
-  await act(() => userEvent.fill(search, "$PRED"));
-  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
-  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("tab", { name: "Markets" })));
+  await mountExplorePredSearch("Markets");
   await expect.element(page.getByText("No matching markets")).not.toBeInTheDocument();
   await expect.element(page.getByText("Max 20x")).toBeInTheDocument();
 });
@@ -1298,92 +1258,53 @@ it('Explore search "$PRED" lists the PRED market in the Markets tab (spec/app/na
 // spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
 it('Stale chats response is dropped when a newer load lands first', async () => {
   const chatSummary = (id: string, title: string) => ({ id, title, kind: "direct" });
-  const chatMessage = (id: string, content: string) => ({
-    id,
-    senderId: "acc-alice",
-    senderHandle: "alice",
-    senderDisplayName: "Alice Aardvark",
-    senderKind: "user",
-    content,
-    createdAt: Date.now() - 60_000,
-    reactions: [],
-  });
   const messageRequests: string[] = [];
   let holdChats = false;
   let resolveHeld: (() => void) | undefined;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: true,
-        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/chats") {
-      if (holdChats) {
-        return new Promise<Response>((resolve) => {
-          resolveHeld = () => resolve(Response.json({ chats: [chatSummary("chat-stale", "Stale Chat")] }));
-        });
+  await mountCustomMockApp({
+    authenticated: true,
+    handle: (path) => {
+      if (path === "/api/chats") {
+        if (holdChats) {
+          return new Promise<Response>((resolve) => {
+            resolveHeld = () => resolve(Response.json({ chats: [chatSummary("chat-stale", "Stale Chat")] }));
+          });
+        }
+        return json({ chats: [chatSummary("chat-fresh-a", "Fresh Chat A"), chatSummary("chat-fresh-b", "Fresh Chat B")] });
       }
-      return json({ chats: [chatSummary("chat-fresh-a", "Fresh Chat A"), chatSummary("chat-fresh-b", "Fresh Chat B")] });
-    }
-    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
-    if (path === "/api/chats/chat-fresh-a/messages") {
-      messageRequests.push("chat-fresh-a");
-      return json({ messages: [chatMessage("msg-fa1", "Fresh A message")] });
-    }
-    if (path === "/api/chats/chat-fresh-b/messages") {
-      messageRequests.push("chat-fresh-b");
-      return json({ messages: [chatMessage("msg-fb1", "Fresh B message")] });
-    }
-    if (path === "/api/chats/chat-stale/messages") {
-      messageRequests.push("chat-stale");
-      return json({ messages: [chatMessage("msg-st1", "Stale chat message")] });
-    }
-    if (path === "/api/notifications") return json({ notifications: [] });
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
+      if (path === "/api/chats/chat-fresh-a/messages") {
+        messageRequests.push("chat-fresh-a");
+        return json({ messages: [chatMessage("msg-fa1", "Fresh A message")] });
+      }
+      if (path === "/api/chats/chat-fresh-b/messages") {
+        messageRequests.push("chat-fresh-b");
+        return json({ messages: [chatMessage("msg-fb1", "Fresh B message")] });
+      }
+      if (path === "/api/chats/chat-stale/messages") {
+        messageRequests.push("chat-stale");
+        return json({ messages: [chatMessage("msg-st1", "Stale chat message")] });
+      }
+      return undefined;
+    },
+  });
 
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-  await act(() => hydrateAuth());
-  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+  const expectFreshChats = () => {
+    expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
+    expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
+    expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+  };
 
   holdChats = true;
   const loading = storeActions.loadChats();
   holdChats = false;
   await act(() => storeActions.loadChats());
-  expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
-  expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
-  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+  expectFreshChats();
 
   resolveHeld?.();
   await act(() => loading);
 
-  expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
-  expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
-  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+  expectFreshChats();
   expect(messageRequests).not.toContain("chat-stale");
   expect(getStoreSnapshot().chatsLoading).toBe(false);
 });
@@ -1420,47 +1341,19 @@ it('Stale markets response is dropped when a newer load lands first', async () =
   });
   let holdMarkets = false;
   let resolveHeld: (() => void) | undefined;
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: false,
-        viewer: null,
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/markets") {
-      if (holdMarkets) {
-        return new Promise<Response>((resolve) => {
-          resolveHeld = () => resolve(Response.json(marketPayload("seed-market-stale", "Stale market question?")));
-        });
+  await mountCustomMockApp({
+    handle: (path) => {
+      if (path === "/api/markets") {
+        if (holdMarkets) {
+          return new Promise<Response>((resolve) => {
+            resolveHeld = () => resolve(Response.json(marketPayload("seed-market-stale", "Stale market question?")));
+          });
+        }
+        return Promise.resolve(Response.json(marketPayload("seed-market-fresh", "Fresh market question?")));
       }
-      return json(marketPayload("seed-market-fresh", "Fresh market question?"));
-    }
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+      return undefined;
+    },
+  });
 
   holdMarkets = true;
   const loading = storeActions.loadMarkets();
@@ -1488,54 +1381,22 @@ it('Stale notifications response is dropped after mark all read', async () => {
   };
   let holdNotifications = false;
   let resolveHeld: (() => void) | undefined;
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: true,
-        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/notifications/read") return json({});
-    if (path === "/api/notifications") {
-      if (init?.method === "POST") return json({});
-      if (holdNotifications) {
-        return new Promise<Response>((resolve) => {
-          resolveHeld = () => resolve(Response.json({ notifications: [unreadItem] }));
-        });
+  await mountCustomMockApp({
+    authenticated: true,
+    handle: (path, _url, init) => {
+      if (path === "/api/notifications/read") return Promise.resolve(Response.json({}));
+      if (path === "/api/notifications") {
+        if (init?.method === "POST") return Promise.resolve(Response.json({}));
+        if (holdNotifications) {
+          return new Promise<Response>((resolve) => {
+            resolveHeld = () => resolve(Response.json({ notifications: [unreadItem] }));
+          });
+        }
+        return Promise.resolve(Response.json({ notifications: [unreadItem] }));
       }
-      return json({ notifications: [unreadItem] });
-    }
-    if (path === "/api/chats") return json({ chats: [] });
-    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-  await act(() => hydrateAuth());
-  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+      return undefined;
+    },
+  });
 
   await act(() => storeActions.loadNotifications());
   expect(getStoreSnapshot().unreadNotifications).toBe(1);
@@ -1638,54 +1499,21 @@ function chatMessage(id: string, content: string) {
 it('Stale chat messages are dropped after switching chats', async () => {
   let chatARequested = false;
   let resolveChatA: (() => void) | undefined;
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: true,
-        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/chats/chat-a/messages") {
-      chatARequested = true;
-      return new Promise<Response>((resolve) => {
-        resolveChatA = () => resolve(Response.json({ messages: [chatMessage("msg-a1", "Chat A message")] }));
-      });
-    }
-    if (path === "/api/chats/chat-b/messages") {
-      return json({ messages: [chatMessage("msg-b1", "Chat B message")] });
-    }
-    if (path === "/api/chats") return json({ chats: [] });
-    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
-    if (path === "/api/notifications") return json({ notifications: [] });
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-  await act(() => hydrateAuth());
-  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+  await mountCustomMockApp({
+    authenticated: true,
+    handle: (path) => {
+      if (path === "/api/chats/chat-a/messages") {
+        chatARequested = true;
+        return new Promise<Response>((resolve) => {
+          resolveChatA = () => resolve(Response.json({ messages: [chatMessage("msg-a1", "Chat A message")] }));
+        });
+      }
+      if (path === "/api/chats/chat-b/messages") {
+        return Promise.resolve(Response.json({ messages: [chatMessage("msg-b1", "Chat B message")] }));
+      }
+      return undefined;
+    },
+  });
 
   const loadingA = storeActions.selectChat("chat-a");
   await act(() => Promise.resolve());
@@ -1711,60 +1539,28 @@ it('Chat switch survives a background refresh of the old chat', async () => {
       release(Response.json({ messages: [chatMessage("msg-b1", "Chat B message")] }));
     }
   };
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: true,
-        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/chats/chat-a/messages") {
-      return json({ messages: [chatMessage("msg-a1", "Chat A message")] });
-    }
-    if (path === "/api/chats/chat-b/messages") {
-      return new Promise<Response>((resolve) => {
-        chatBReleases.push(resolve);
-      });
-    }
-    if (path === "/api/chats") {
-      return json({
-        chats: [
-          { id: "chat-a", title: "Chat A", kind: "direct" },
-          { id: "chat-b", title: "Chat B", kind: "direct" },
-        ],
-      });
-    }
-    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
-    if (path === "/api/notifications") return json({ notifications: [] });
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-  await act(() => hydrateAuth());
-  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+  await mountCustomMockApp({
+    authenticated: true,
+    handle: (path) => {
+      if (path === "/api/chats/chat-a/messages") {
+        return Promise.resolve(Response.json({ messages: [chatMessage("msg-a1", "Chat A message")] }));
+      }
+      if (path === "/api/chats/chat-b/messages") {
+        return new Promise<Response>((resolve) => {
+          chatBReleases.push(resolve);
+        });
+      }
+      if (path === "/api/chats") {
+        return Promise.resolve(Response.json({
+          chats: [
+            { id: "chat-a", title: "Chat A", kind: "direct" },
+            { id: "chat-b", title: "Chat B", kind: "direct" },
+          ],
+        }));
+      }
+      return undefined;
+    },
+  });
 
   await act(() => storeActions.selectChat("chat-a"));
   await act(() => storeActions.navigate("/chats"));
@@ -1781,17 +1577,18 @@ it('Chat switch survives a background refresh of the old chat', async () => {
   releaseChatB();
   await act(() => refreshing);
 
-  await expect.element(page.getByRole("heading", { name: "Chat B" })).toBeInTheDocument();
+  const expectChatBSelected = async () => {
+    await expect.element(page.getByRole("heading", { name: "Chat B" })).toBeInTheDocument();
+    await expect.element(page.getByText("Chat A message")).not.toBeInTheDocument();
+    expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+    expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+  };
+
   await expect.element(page.getByText("Chat B message")).toBeInTheDocument();
-  await expect.element(page.getByText("Chat A message")).not.toBeInTheDocument();
-  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
-  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+  await expectChatBSelected();
 
   await act(() => storeActions.loadChatMessages("chat-a"));
-  await expect.element(page.getByRole("heading", { name: "Chat B" })).toBeInTheDocument();
-  await expect.element(page.getByText("Chat A message")).not.toBeInTheDocument();
-  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
-  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+  await expectChatBSelected();
 });
 
 it('Stale profile response is dropped after navigating on (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
@@ -1800,110 +1597,48 @@ it('Stale profile response is dropped after navigating on (spec/app/navigation.m
   const releaseAlice = (res: Response) => {
     for (const release of aliceReleases.splice(0)) release(res);
   };
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, window.location.origin).pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: false,
-        viewer: null,
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/users/alice") {
-      aliceRequested = true;
-      return new Promise<Response>((resolve) => {
-        aliceReleases.push(resolve);
-      });
-    }
-    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
+  await mountCustomMockApp({
+    handle: (path) => {
+      if (path === "/api/users/alice") {
+        aliceRequested = true;
+        return new Promise<Response>((resolve) => {
+          aliceReleases.push(resolve);
+        });
+      }
+      if (path === "/api/users/bob") return Promise.resolve(Response.json(profilePayload("acc-bob", "bob", "Bob Badger")));
+      return undefined;
+    },
+  });
+
+  const navigateAliceThenBob = async (lateResponse: Response) => {
+    const navAlice = storeActions.navigate("/u/alice");
+    await act(() => Promise.resolve());
+    await act(() => Promise.resolve());
+    expect(aliceRequested).toBe(true);
+    expect(getStoreSnapshot().profileHandle).toBe("alice");
+
+    await act(() => storeActions.navigate("/u/bob"));
+    await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+    expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+    releaseAlice(lateResponse);
+    await act(() => navAlice);
+
+    await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+    expect(getStoreSnapshot().profileHandle).toBe("bob");
+    expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+    expect(getStoreSnapshot().profileLoading).toBe(false);
   };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
 
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-
-  const navAlice = storeActions.navigate("/u/alice");
-  await act(() => Promise.resolve());
-  await act(() => Promise.resolve());
-  expect(aliceRequested).toBe(true);
-  expect(getStoreSnapshot().profileHandle).toBe("alice");
-
-  await act(() => storeActions.navigate("/u/bob"));
-  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
-  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
-
-  releaseAlice(Response.json(profilePayload("acc-alice", "alice", "Alice Aardvark")));
-  await act(() => navAlice);
-
-  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  await navigateAliceThenBob(Response.json(profilePayload("acc-alice", "alice", "Alice Aardvark")));
   await expect.element(page.getByText("Alice Aardvark")).not.toBeInTheDocument();
-  expect(getStoreSnapshot().profileHandle).toBe("bob");
-  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
-  expect(getStoreSnapshot().profileLoading).toBe(false);
 
-  const navAliceAgain = storeActions.navigate("/u/alice");
-  await act(() => Promise.resolve());
-  await act(() => Promise.resolve());
-  expect(getStoreSnapshot().profileHandle).toBe("alice");
-
-  await act(() => storeActions.navigate("/u/bob"));
-  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
-  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
-
-  releaseAlice(new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } }));
-  await act(() => navAliceAgain);
-
-  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
-  expect(getStoreSnapshot().profileHandle).toBe("bob");
-  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
-  expect(getStoreSnapshot().profileLoading).toBe(false);
+  await navigateAliceThenBob(new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } }));
   expect(getStoreSnapshot().errorMessage).toBeNull();
 });
 
 function profilePost(id: string, content: string) {
-  return {
-    id,
-    authorId: "acc-bob",
-    authorKind: "user",
-    authorHandle: "bob",
-    authorDisplayName: "Bob Badger",
-    avatarUrl: null,
-    isParody: false,
-    parodyLabel: null,
-    content,
-    replyToPostId: null,
-    quotePostId: null,
-    viaClientName: null,
-    marketId: null,
-    ticker: null,
-    cashtags: [],
-    hashtags: [],
-    likeCount: 0,
-    repostCount: 0,
-    replyCount: 0,
-    likedByViewer: false,
-    repostedByViewer: false,
-    createdAt: Date.now() - 60_000,
-  };
+  return makePostRecord({ id, content, isParody: false, parodyLabel: null });
 }
 
 function profilePayloadWithPosts(posts: unknown[], nextCursor: string | null) {
@@ -1921,50 +1656,23 @@ it('Stale profile page is dropped after a profile refresh (spec/app/navigation.m
   const stalePost = profilePost("bob-stale", "Bob stale page post.");
   let refreshed = false;
   let resolveStalePage: (() => void) | undefined;
-  const json = (body: unknown) => Promise.resolve(Response.json(body));
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, window.location.origin);
-    const path = url.pathname;
-    if (path === "/api/auth/me") {
-      return json({
-        authenticated: false,
-        viewer: null,
-        acceptedCountries: ["+1", "+44"],
-        publicAppUrl: window.location.origin,
-      });
-    }
-    if (path === "/api/users/bob") {
-      if (url.searchParams.get("cursor")) {
-        return new Promise<Response>((resolve) => {
-          resolveStalePage = () => resolve(Response.json(profilePayloadWithPosts([stalePost], "bob-cursor-stale")));
-        });
+  await mountCustomMockApp({
+    handle: (path, url) => {
+      if (path === "/api/users/bob") {
+        if (url.searchParams.get("cursor")) {
+          return new Promise<Response>((resolve) => {
+            resolveStalePage = () => resolve(Response.json(profilePayloadWithPosts([stalePost], "bob-cursor-stale")));
+          });
+        }
+        return Promise.resolve(Response.json(
+          refreshed
+            ? profilePayloadWithPosts([bobNew, bobOne], "bob-cursor-2")
+            : profilePayloadWithPosts([bobNew], "bob-cursor-1"),
+        ));
       }
-      return refreshed
-        ? json(profilePayloadWithPosts([bobNew, bobOne], "bob-cursor-2"))
-        : json(profilePayloadWithPosts([bobNew], "bob-cursor-1"));
-    }
-    if (path === "/api/feed") return json(SAMPLE_POSTS);
-    if (path === "/api/markets") return json(SAMPLE_MARKETS);
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
-    if (path === "/api/leaderboard") return json({ leaderboard: [] });
-    if (path === "/api/economy/packs") return json({ packs: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  class StubEventSource extends EventTarget {
-    close() {
-      const idx = liveEventSources.indexOf(this);
-      if (idx >= 0) liveEventSources.splice(idx, 1);
-    }
-  }
-  vi.stubGlobal("EventSource", StubEventSource);
-
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+      return undefined;
+    },
+  });
 
   await act(() => storeActions.loadProfile("bob"));
   expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new"]);
@@ -2016,12 +1724,15 @@ it('Phone SMS door sends national numbers as E.164 (spec/app/onboarding.md, "Sto
   expect(phoneStartRequests[1]?.phoneE164).toBe("+33612345678");
 });
 
-it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
-  await mountApp();
-
+async function clickHomeAndExpectFeedPost() {
   const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
   await act(() => userEvent.click(homeButton));
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+}
+
+it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  await mountApp();
+  await clickHomeAndExpectFeedPost();
 
   const marketsButton = page.getByRole("button", { name: "Markets", exact: true }).first();
   await act(() => userEvent.click(marketsButton));
@@ -2077,10 +1788,7 @@ const SAMPLE_THREAD_B = {
 
 async function openThreadDetail() {
   await renderApp();
-
-  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
-  await act(() => userEvent.click(homeButton));
-  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await clickHomeAndExpectFeedPost();
   const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
   await act(() => userEvent.click(replyButton));
   await expect.element(page.getByRole("heading", { name: "Post", exact: true }).first()).toBeInTheDocument();

@@ -4,26 +4,10 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import { loadChatMessages, selectChat } from "../src/web/store-world.ts";
-import type { AppChatSummary, ViewerSession } from "../src/web/types.ts";
+import type { AppChatSummary } from "../src/web/types.ts";
+import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
-const viewer: ViewerSession = {
-  accountId: "alice",
-  handle: "alice",
-  displayName: "Alice",
-  bio: "",
-  avatarUrl: null,
-  bannerUrl: null,
-  phoneLast2: null,
-  phoneVerifiedAt: null,
-  emailMasked: null,
-  emailVerifiedAt: null,
-  uiMode: "game",
-  balanceCents: 0,
-  startingGrantCents: 0,
-  isAdmin: false,
-  isReviewer: false,
-  agentGrant: null,
-};
+const viewer = makeViewerSession({ displayName: "Alice" });
 
 function seedChat(unreadCount: number): AppChatSummary {
   return {
@@ -60,23 +44,18 @@ let roomMessages: Array<Record<string, unknown>> = [bobMessage];
 beforeEach(() => {
   readPosts = [];
   roomMessages = [bobMessage];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      const url = new URL(raw, "http://localhost");
-      if (url.pathname === "/api/chats/chat-1/messages" && (init?.method ?? "GET") === "GET") {
-        return Promise.resolve(Response.json({ messages: roomMessages }));
-      }
-      if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
-        readPosts.push(url.pathname);
-        return Promise.resolve(
-          Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
-        );
-      }
-      return Promise.resolve(Response.json({}, { status: 404 }));
-    }),
-  );
+  stubFetchByUrl((url, init) => {
+    if (url.pathname === "/api/chats/chat-1/messages" && (init?.method ?? "GET") === "GET") {
+      return Promise.resolve(Response.json({ messages: roomMessages }));
+    }
+    if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
+      readPosts.push(url.pathname);
+      return Promise.resolve(
+        Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
+      );
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  }, "http://localhost");
   setStoreState({
     viewer,
     chats: [seedChat(0)],
@@ -138,12 +117,8 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
     return sseTarget;
   }
   vi.stubGlobal("EventSource", StubEventSource);
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      const url = new URL(raw, "http://localhost");
-      if (url.pathname === "/api/chats" && (init?.method ?? "GET") === "GET") {
+  stubFetchByUrl((url, init) => {
+    if (url.pathname === "/api/chats" && (init?.method ?? "GET") === "GET") {
         gate.response = Response.json({
           chats: [
             {
@@ -194,8 +169,7 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
         );
       }
       return Promise.resolve(Response.json({}, { status: 404 }));
-    }),
-  );
+  }, "http://localhost");
   setStoreState({ route: "Chats", chats: [seedChat(0)], selectedChatId: "chat-1" });
   reconnectRealtime();
   sseTarget.dispatchEvent(

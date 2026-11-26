@@ -1230,60 +1230,35 @@ it.effect('REST perp idempotency: same Idempotency-Key replays the open/close re
 
     const alice = try onboardPhonePlayer("+14155550156", "perp_idem_alice")
 
-    const open1 = try callApp("/api/markets/perp/XTRPC/open", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-open-1" },
-      json: { side: "long", collateralCents: 1000, leverage: 2 }
-    })
-    const open1Body = try readJson(open1)
-    const openReplay = try callApp("/api/markets/perp/XTRPC/open", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-open-1" },
-      json: { side: "long", collateralCents: 1000, leverage: 2 }
-    })
-    const openReplayBody = try readJson(openReplay)
-    const openConflict = try callApp("/api/markets/perp/XTRPC/open", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-open-1" },
-      json: { side: "long", collateralCents: 2000, leverage: 2 }
-    })
-    const openConflictBody = try readJson(openConflict)
-    const openInvalid = try callApp("/api/markets/perp/XTRPC/open", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "k".repeat(260) },
-      json: { side: "long", collateralCents: 1000, leverage: 2 }
-    })
-    const openInvalidBody = try readJson(openInvalid)
+    const openPerp = effect (key: string, collateralCents = 1000) => {
+      const res = try callApp("/api/markets/perp/XTRPC/open", {
+        cookie: alice.cookie,
+        headers: { "Idempotency-Key": key },
+        json: { side: "long", collateralCents, leverage: 2 }
+      })
+      return { res, body: try readJson(res) }
+    }
+    const closePerp = effect (id: string, key: string) => {
+      const res = try callApp(`/api/markets/perp/positions/${encodeURIComponent(id)}/close`, {
+        method: "POST",
+        cookie: alice.cookie,
+        headers: { "Idempotency-Key": key },
+        json: {}
+      })
+      return { res, body: try readJson(res) }
+    }
+
+    const { res: open1, body: open1Body } = try openPerp("rest-perp-open-1")
+    const { res: openReplay, body: openReplayBody } = try openPerp("rest-perp-open-1")
+    const { res: openConflict, body: openConflictBody } = try openPerp("rest-perp-open-1", 2000)
+    const { res: openInvalid, body: openInvalidBody } = try openPerp("k".repeat(260))
 
     const positionId = String(open1Body.positionId ?? "")
-    const close1 = try callApp(`/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`, {
-      method: "POST",
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-close-1" },
-      json: {}
-    })
-    const close1Body = try readJson(close1)
-    const closeReplay = try callApp(`/api/markets/perp/positions/${encodeURIComponent(positionId)}/close`, {
-      method: "POST",
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-close-1" },
-      json: {}
-    })
-    const closeReplayBody = try readJson(closeReplay)
-    const open2 = try callApp("/api/markets/perp/XTRPC/open", {
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-open-2" },
-      json: { side: "long", collateralCents: 1000, leverage: 2 }
-    })
-    const open2Body = try readJson(open2)
+    const { res: close1, body: close1Body } = try closePerp(positionId, "rest-perp-close-1")
+    const { res: closeReplay, body: closeReplayBody } = try closePerp(positionId, "rest-perp-close-1")
+    const { res: open2, body: open2Body } = try openPerp("rest-perp-open-2")
     const positionId2 = String(open2Body.positionId ?? "")
-    const closeConflict = try callApp(`/api/markets/perp/positions/${encodeURIComponent(positionId2)}/close`, {
-      method: "POST",
-      cookie: alice.cookie,
-      headers: { "Idempotency-Key": "rest-perp-close-1" },
-      json: {}
-    })
-    const closeConflictBody = try readJson(closeConflict)
+    const { res: closeConflict, body: closeConflictBody } = try closePerp(positionId2, "rest-perp-close-1")
 
     try check(() => assert.deepStrictEqual(
       {

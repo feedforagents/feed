@@ -3,26 +3,10 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import type { AppChatSummary, ViewerSession } from "../src/web/types.ts";
+import type { AppChatSummary } from "../src/web/types.ts";
+import { makeViewerSession } from "./app-test-helpers.tsx";
 
-const viewer: ViewerSession = {
-  accountId: "alice",
-  handle: "alice",
-  displayName: "Alice",
-  bio: "",
-  avatarUrl: null,
-  bannerUrl: null,
-  phoneLast2: null,
-  phoneVerifiedAt: null,
-  emailMasked: null,
-  emailVerifiedAt: null,
-  uiMode: "game",
-  balanceCents: 0,
-  startingGrantCents: 0,
-  isAdmin: false,
-  isReviewer: false,
-  agentGrant: null,
-};
+const viewer = makeViewerSession({ displayName: "Alice" });
 
 function member(memberId: string, handle: string) {
   return { memberId, memberKind: "user", handle, displayName: handle, avatarUrl: null, role: "member" };
