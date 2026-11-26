@@ -1531,7 +1531,10 @@ export async function loadMoreProfilePosts(): Promise<void> {
   setErrorNotice(res.ok ? "Profile not found" : res.message);
 }
 
+let followListLoadCount = 0;
+
 export async function loadFollowList(handle: string, kind: "followers" | "following"): Promise<void> {
+  const loadId = ++followListLoadCount;
   setStoreState({
     followListHandle: handle,
     followListKind: kind,
@@ -1541,6 +1544,7 @@ export async function loadFollowList(handle: string, kind: "followers" | "follow
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/${kind}`, {
     parse: decodeFollowList,
   });
+  if (loadId !== followListLoadCount) return;
   if (res.ok) {
     setStoreState({ followListItems: res.data, followListLoading: false });
     return;
