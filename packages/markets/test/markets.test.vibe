@@ -856,6 +856,10 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     const ericEntry = npcBoard.entries.find((e) => e.accountId === "eric-weinstain")
     const politaicoEntry = npcBoard.entries.find((e) => e.accountId === "org-politaico")
 
+    try store.transaction((tx: Tx) =>
+      tx.query("UPDATE feed_accounts SET balance_cents = 5000 WHERE account_id = 'user-carol'")
+    )
+    const boardFinal = try getLeaderboard()
     try check(() => assert.deepStrictEqual(
       {
         fixedStartingGrant: [aliceEconMtm.startingGrantCents, Object.prototype.hasOwnProperty.call(aliceEconMtm, "purchasedCents")],
@@ -905,8 +909,9 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           ericEntry?.avatarUrl,
           ericEntry?.handle,
           politaicoEntry === undefined
-        ]
-      },
+    ],
+    tiedRanksShareRankTwo: boardFinal.entries.map((entry) => [entry.accountId, entry.rank])
+          },
       {
         fixedStartingGrant: [10_000, false],
         slippageAwareMtm: [true, true],
@@ -923,8 +928,9 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
           true,
           "/images/actors/eric-weinstain.jpg",
           "ericrweinstain",
-          true
-        ]
+      true
+    ],
+    tiedRanksShareRankTwo: [["user-alice", 1], ["user-bob", 2], ["user-dave", 2], ["user-email-only", 2], ["user-carol", 5]]
       }
     ))
   })
