@@ -928,3 +928,47 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     ))
   })
 )
+
+it.effect('Open positions stop marking expired prediction markets to market (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+    const buy = try buyPredictionShares({
+      actorId: "user-alice",
+      actorKind: "user",
+      marketId: "seed-market-1",
+      side: "yes",
+      amountCents: 2_000
+    })
+    const expectedMtm = markToMarketPredictionCents("yes", buy.shares, buy.market.yesShares, buy.market.noShares)
+    const beforeExpiry = try getUserPositions("user-alice")
+    const beforeItem = beforeExpiry.predictionPositions[0]
+    try TestClock.adjust(Duration.seconds(4 * 86_400))
+    const afterExpiry = try getUserPositions("user-alice")
+    const afterItem = afterExpiry.predictionPositions[0]
+    try check(() => assert.deepStrictEqual(
+      {
+        listedBeforeExpiry: beforeExpiry.predictionPositions.length,
+        estimatedBeforeExpiry: beforeItem?.estimatedValueCents,
+        expectedMtm,
+        estimatedMatchesMtmBeforeExpiry: beforeItem?.estimatedValueCents === expectedMtm,
+        mtmPositiveBeforeExpiry: (beforeItem?.estimatedValueCents ?? 0) > 0,
+        stillListedAfterExpiry: afterExpiry.predictionPositions.length,
+        sharesAfterExpiry: afterItem?.shares,
+        marketStatusAfterExpiry: afterItem?.marketStatus,
+        estimatedAfterExpiry: afterItem?.estimatedValueCents
+      },
+      {
+        listedBeforeExpiry: 1,
+        estimatedBeforeExpiry: expectedMtm,
+        expectedMtm,
+        estimatedMatchesMtmBeforeExpiry: true,
+        mtmPositiveBeforeExpiry: true,
+        stillListedAfterExpiry: 1,
+        sharesAfterExpiry: buy.shares,
+        marketStatusAfterExpiry: "open",
+        estimatedAfterExpiry: 0
+      }
+    ))
+  })
+)
+
