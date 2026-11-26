@@ -1763,6 +1763,19 @@ async function toggleModeration(
   }
   const verb = isBlock ? (active ? "Unblocked" : "Blocked") : (active ? "Unmuted" : "Muted");
   setStatusNotice(`${verb} @${handle}.`);
+  if (active) {
+    await loadFeed();
+    const latest = getStoreSnapshot();
+    const viewingProfile = latest.route === "Profile"
+      && (latest.profileHandle?.toLowerCase() === lower
+        || latest.profileBundle?.summary.handle.toLowerCase() === lower);
+    if (viewingProfile) {
+      await loadProfile(handle);
+      if (getStoreSnapshot().profileBundle?.summary.handle.toLowerCase() === lower) {
+        await loadProfileReplies(handle);
+      }
+    }
+  }
 }
 
 export function toggleBlock(handle: string, currentBlocked?: boolean): Promise<void> {
