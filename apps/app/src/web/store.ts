@@ -275,7 +275,7 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
         }
       : {}),
     ...(parsed.marketKind && parsed.marketId
-      ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId }
+      ? { selectedMarketKind: parsed.marketKind, selectedMarketId: parsed.marketId, selectedMarketSide: parsed.marketSide ?? "YES" }
       : parsed.queryTicker
         ? { selectedMarketKind: "perp" as const, selectedMarketId: parsed.queryTicker }
         : {}),

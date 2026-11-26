@@ -262,6 +262,8 @@ export interface PredictionOrderPanelProps {
   yesPositionShares?: number;
   /** Owned NO shares on this market (used for Sell + Max button). */
   noPositionShares?: number;
+  /** Side the ticket opens on (default `YES`). */
+  initialSide?: "YES" | "NO";
   /** Submits a buy or sell prediction order. */
   onSubmitOrder: (order: PredictionOrderInput) => void;
   /** Invoked when clicking the resolution article link in the info modal. */
@@ -309,6 +311,8 @@ export type MarketsTradingTerminalProps = Omit<ComponentProps<"div">, "children"
   onRebalancePerp?: (order: PerpRebalanceOrderInput) => void;
   /** Closes an open perp position by ID. */
   onClosePerp?: (positionId: string) => void;
+  /** Side the prediction ticket opens on (default `YES`). */
+  initialPredictionSide?: "YES" | "NO";
   /** Submits a prediction buy or sell order. */
   onSubmitPrediction?: (order: PredictionOrderInput) => void;
   /** Invoked when the user clicks a resolution article link. */
@@ -1419,6 +1423,7 @@ export function PredictionOrderPanel({
   balancePts,
   yesPositionShares = 0,
   noPositionShares = 0,
+  initialSide = "YES",
   onSubmitOrder,
   onOpenResolutionArticle,
   confirmBeforeSubmit = true,
@@ -1430,7 +1435,7 @@ export function PredictionOrderPanel({
   const maxOddsMovePct = (market.maxOddsMoveBps ?? 2000) / 100;
 
   const [action, setAction] = useState<"buy" | "sell">("buy");
-  const [side, setSide] = useState<"YES" | "NO">("YES");
+  const [side, setSide] = useState<"YES" | "NO">(initialSide);
   const [amountText, setAmountText] = useState("10");
   const [resolutionOpen, setResolutionOpen] = useState(false);
   const [pendingConfirm, setPendingConfirm] = useState<TradeConfirmationDetails | null>(null);
@@ -1830,6 +1835,7 @@ export function MarketsTradingTerminal({
   onOpenPerp,
   onRebalancePerp,
   onClosePerp,
+  initialPredictionSide,
   onSubmitPrediction,
   onOpenResolutionArticle,
   submitting = false,
@@ -1880,6 +1886,7 @@ export function MarketsTradingTerminal({
         balancePts={balancePts}
         yesPositionShares={yesSharesOwned}
         noPositionShares={noSharesOwned}
+        initialSide={initialPredictionSide}
         onSubmitOrder={(order) => onSubmitPrediction?.(order)}
         onOpenResolutionArticle={onOpenResolutionArticle}
         confirmBeforeSubmit={confirmBeforeSubmit}
