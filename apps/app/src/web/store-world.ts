@@ -22,6 +22,7 @@ import {
   setStatusNotice,
   setStoreState,
   toSpecTab,
+  type StoreState,
   type ThreadReplySort,
   type UiFeedTab,
 } from "./store-core.ts";
@@ -125,6 +126,23 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
   });
 }
 
+function cleanedPostLists(
+  cur: StoreState,
+  cleanList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost>,
+  cleanProfileList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost> = cleanList,
+): Pick<StoreState, "feedPosts" | "explore" | "profileBundle" | "profileReplies" | "profileLikes" | "marketSocialPosts"> {
+  return {
+    feedPosts: cleanList(cur.feedPosts),
+    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
+    profileBundle: cur.profileBundle
+      ? { ...cur.profileBundle, posts: cleanProfileList(cur.profileBundle.posts) }
+      : null,
+    profileReplies: cleanProfileList(cur.profileReplies),
+    profileLikes: cleanList(cur.profileLikes),
+    marketSocialPosts: cleanList(cur.marketSocialPosts),
+  };
+}
+
 export function removePostAcrossStore(
   postId: string,
   parentInfo?: { readonly replyToPostId?: string | null; readonly parentReplyCount?: number | null },
@@ -146,19 +164,15 @@ export function removePostAcrossStore(
     && existing !== undefined
     && existing.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase()
     && (bundle.posts.some((p) => p.card.id === postId) || cur.profileReplies.some((p) => p.card.id === postId));
+  const cleaned = cleanedPostLists(cur, cleanList);
   setStoreState({
-    feedPosts: cleanList(cur.feedPosts),
-    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
-    profileBundle: bundle
+    ...cleaned,
+    profileBundle: cleaned.profileBundle
       ? {
-          ...bundle,
-          posts: cleanList(bundle.posts),
-          postsCount: removedFromProfile ? Math.max(0, bundle.postsCount - 1) : bundle.postsCount,
+          ...cleaned.profileBundle,
+          postsCount: removedFromProfile ? Math.max(0, cleaned.profileBundle.postsCount - 1) : cleaned.profileBundle.postsCount,
         }
       : null,
-    profileReplies: cleanList(cur.profileReplies),
-    profileLikes: cleanList(cur.profileLikes),
-    marketSocialPosts: cleanList(cur.marketSocialPosts),
     activeThread: thread
       ? thread.post.card.id === postId
         ? null
@@ -174,19 +188,47 @@ export function removePostAcrossStore(
 
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
-  const keep = (p: AppPost) => p.card.authorHandle.toLowerCase() !== normalized;
+  const isBlockedHandle = (value: string): boolean => value.toLowerCase() === normalized;
+  const reposterHandle = (p: AppPost): string | undefined => p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+  const isBlockedReposter = (p: AppPost): boolean => {
+    const reposter = reposterHandle(p);
+    return reposter !== undefined && isBlockedHandle(reposter);
+  };
+  const cleanPost = (p: AppPost): AppPost => {
+    const stripRepost = isBlockedReposter(p);
+    const stripQuote = p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle);
+    if (!stripRepost && !stripQuote) return p;
+    return {
+      ...p,
+      card: {
+        ...p.card,
+        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
+        ...(stripQuote ? { quotePost: undefined } : {}),
+      },
+    };
+  };
+  const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
+    list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);
   const cur = getStoreSnapshot();
+  const profileOwnerBlocked = cur.profileBundle !== null && isBlockedHandle(cur.profileBundle.summary.handle);
+  const cleanProfileList = profileOwnerBlocked
+    ? (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
+        list.filter((p) => !isBlockedHandle(p.card.authorHandle) && !isBlockedReposter(p)).map(cleanPost)
+    : cleanList;
+  const thread = cur.activeThread;
   setStoreState({
-    feedPosts: cur.feedPosts.filter(keep),
-    explore: { ...cur.explore, posts: cur.explore.posts.filter(keep) },
-    profileReplies: cur.profileReplies.filter(keep),
-    profileLikes: cur.profileLikes.filter(keep),
-    marketSocialPosts: cur.marketSocialPosts.filter(keep),
-    activeThread: cur.activeThread
-      ? {
-          ...cur.activeThread,
-          replies: cur.activeThread.replies.filter(keep),
-        }
+    ...cleanedPostLists(cur, cleanList, cleanProfileList),
+    activeThread: thread
+      ? isBlockedHandle(thread.post.card.authorHandle)
+        ? null
+        : {
+            post: cleanPost(thread.post),
+            parentPost: thread.parentPost && !isBlockedHandle(thread.parentPost.card.authorHandle)
+              ? cleanPost(thread.parentPost)
+              : null,
+            ancestors: cleanList(thread.ancestors),
+            replies: cleanList(thread.replies),
+          }
       : null,
   });
 }
@@ -1780,6 +1822,9 @@ async function toggleModeration(
   }
   if (!active) {
     filterAuthorOutOfFeeds(handle);
+    if (getStoreSnapshot().feedTab === "following") {
+      void loadFeed();
+    }
   }
   const cur = getStoreSnapshot();
   if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {
