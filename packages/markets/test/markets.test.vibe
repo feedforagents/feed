@@ -21,6 +21,7 @@ import {
   getPredictionMarket,
   getUserPositions,
   liquidateEligiblePositions,
+  listClosedPositions,
   listMarketTrades,
   listPerpMarkets,
   listPerpPositions,
@@ -928,3 +929,78 @@ it.effect('Fixed $100 economy, slippage-aware MTM, leaderboard filtering, pagina
     ))
   })
 )
+
+it.effect('Closed perp positions report payout equal to cash credited with open fees in cost basis (spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    const store = try Store
+    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_organizations (id, name, ticker, org_type, description, post_style, can_be_involved, initial_price_cents, created_at)
+         VALUES ('org-hundred', 'Hundred Corp', 'HUND', 'company', 'Synthetic $100 org', 'neutral', true, 10000, $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_spot_pools (ticker, organization_id, base_reserve, quote_reserve_cents, index_price_cents, updated_at)
+         VALUES ('HUND', 'org-hundred', 50000, 5000000, 10000, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+      try tx.query(
+        `INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents, max_leverage, funding_rate_bps, last_funding_period, updated_at)
+         VALUES ('HUND', 10000, 10000, 0, 0, 20, 0, 0, $1)
+         ON CONFLICT (ticker) DO NOTHING`,
+        [now]
+      )
+    })
+
+    const longOpen = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
+    })
+    const longClose = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: longOpen.positionId
+    })
+    const closed = try listClosedPositions({ accountId: "user-alice" })
+    const ledger = try getPointLedger("user-alice", 10)
+    const closeLedgerDelta = ledger.find((entry) => entry.kind === "perp_close")?.deltaCents ?? null
+    const item = closed.items[0]
+
+    try check(() => assert.deepStrictEqual(
+      {
+        totalCount: closed.totalCount,
+        itemKind: item?.kind,
+        itemTicker: item?.ticker,
+        itemSide: item?.side,
+        itemCostBasisCents: item?.costBasisCents,
+        itemPayoutCents: item?.payoutCents,
+        itemRealizedPnlCents: item?.realizedPnlCents,
+        payoutEqualsCashCredited: item?.payoutCents === longClose.netCreditCents,
+        payoutEqualsLedgerCloseCredit: item?.payoutCents === closeLedgerDelta,
+        payoutMinusCostEqualsRealizedPnl: (item?.payoutCents ?? 0) - (item?.costBasisCents ?? 0) === item?.realizedPnlCents,
+        realizedMatchesReceipt: item?.realizedPnlCents === longClose.realizedPnlCents
+      },
+      {
+        totalCount: 1,
+        itemKind: "perp",
+        itemTicker: "HUND",
+        itemSide: "long",
+        itemCostBasisCents: 510,
+        itemPayoutCents: longClose.netCreditCents,
+        itemRealizedPnlCents: longClose.realizedPnlCents,
+        payoutEqualsCashCredited: true,
+        payoutEqualsLedgerCloseCredit: true,
+        payoutMinusCostEqualsRealizedPnl: true,
+        realizedMatchesReceipt: true
+      }
+    ))
+  })
+)
+
