@@ -93,7 +93,6 @@ export function PredictionProbabilityChart({
   const hasVisible = visible.length > 0;
   const yesLabel = hasVisible ? `${yesPct.toFixed(1)}%` : "—";
   const noLabel = hasVisible ? `${noPct.toFixed(1)}%` : "—";
-  const emptyMessage = timeRange === "ALL" ? "No probability history yet." : `No probability history in the last ${timeRange}.`;
 
   const series = useMemo<readonly LightweightChartSeriesSpec[]>(() => {
     if (visible.length === 0) return [];
@@ -152,7 +151,7 @@ export function PredictionProbabilityChart({
       fillHeight={fillHeight}
       loading={loading}
       error={error}
-      emptyMessage={emptyMessage}
+      emptyMessage="No probability history yet."
       className={cn(className)}
       {...props}
     />

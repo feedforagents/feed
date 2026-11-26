@@ -111,7 +111,7 @@ export function PerpPriceChart({
       fillHeight={fillHeight}
       loading={loading}
       error={error}
-      emptyMessage={timeRange === "ALL" ? `No price history for $${ticker} yet.` : `No price history for $${ticker} in the last ${timeRange}.`}
+      emptyMessage={`No price history for $${ticker} yet.`}
       className={cn(className)}
       {...props}
     />
