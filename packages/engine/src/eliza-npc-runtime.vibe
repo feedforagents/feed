@@ -538,7 +538,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       const ticker = String(p.ticker ?? "")
       const side = p.side === "sell" ? "sell" : "buy"
       const quoteCents = Math.max(100, Math.round(Number(p.quoteCents ?? 2500)))
-      const spotReceipt = try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents })
+      const spotReceipt = try executeNpcSpotTrade({ actorId: actor.id, ticker, side, quoteCents, nowMs })
       try maybePublishFeedEvent({
         type: "market.spot",
         actorId: actor.id,
@@ -556,7 +556,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       const leverage = Math.max(1, Math.min(20, Math.round(Number(p.leverage ?? 3))))
       const minCollateral = Math.max(500, Math.ceil(1_000 / leverage))
       const collateralCents = Math.max(minCollateral, Math.round(Number(p.collateralCents ?? 2500)))
-      const opened = try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc" })
+      const opened = try openPerpPosition({ ownerId: actor.id, ownerKind: "npc", ticker, side, collateralCents, leverage, viaClientName: "eliza-npc", nowMs })
       try maybePublishFeedEvent({
         type: "market.perp",
         action: "open",
@@ -587,6 +587,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
         ownerId: actor.id,
         ...(rawPct === undefined ? {} : { closePct: rawPct }),
         viaClientName: "eliza-npc",
+        nowMs,
       })
       try maybePublishFeedEvent({
         type: "market.perp",
@@ -609,7 +610,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       const marketId = String(p.marketId ?? "")
       const side = p.side === "no" ? "no" : "yes"
       const amountCents = Math.max(100, Math.round(Number(p.amountCents ?? 1500)))
-      const receipt = try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc" })
+      const receipt = try buyPredictionShares({ actorId: actor.id, actorKind: "npc", marketId, side, amountCents, viaClientName: "eliza-npc", nowMs })
       try maybePublishFeedEvent({
         type: "market.prediction",
         marketId: receipt.marketId,
@@ -647,6 +648,7 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
         side,
         shares: sellShares,
         viaClientName: "eliza-npc",
+        nowMs,
       })
       try maybePublishFeedEvent({
         type: "market.prediction",
@@ -669,14 +671,14 @@ function buildNpcActions(actor: DbActorRow, runWithStore: StoreEffectRunner, now
       if (content.length === 0) return { success: false, text: "Empty post" }
       const marketId = typeof p.marketId === "string" ? p.marketId : undefined
       const ticker = typeof p.ticker === "string" ? p.ticker : undefined
-      try createPost({ authorId: actor.id, authorKind: "npc", content, ...(marketId ? { marketId } : {}), ...(ticker ? { ticker } : {}) })
+      try createPost({ authorId: actor.id, authorKind: "npc", content, ...(marketId ? { marketId } : {}), ...(ticker ? { ticker } : {}), nowMs })
       return { success: true, text: content, data: { marketId, ticker } }
     }),
     wrap("CREATE_REPLY", "Reply to an existing Feed post", effect (p) => {
       const replyToPostId = String(p.replyToPostId ?? "")
       const content = sanitizeNarrativeText(stripLeadingSelfPrefix(String(p.content ?? ""), actor.name, actor.username), 250)
       if (!replyToPostId || !content) return { success: false, text: "Invalid reply" }
-      try createPost({ authorId: actor.id, authorKind: "npc", content, replyToPostId })
+      try createPost({ authorId: actor.id, authorKind: "npc", content, replyToPostId, nowMs })
       return { success: true, text: content, data: { replyToPostId } }
     }),
     wrap("LIKE_POST", "Like a Feed post as the NPC", effect (p) => {

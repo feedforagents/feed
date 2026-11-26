@@ -183,6 +183,7 @@ export interface CreatePostInput {
   readonly marketId?: string | null
   readonly ticker?: string | null
   readonly viaClientName?: string | null
+  readonly nowMs?: number
 }
 
 export interface LikeResult {
@@ -1169,7 +1170,7 @@ export effect function createPost(input: CreatePostInput): PostView!(SocialFailu
     throw new SocialFailure({ code: "Forbidden", message: "Non-user authors cannot specify viaClientName" })
   }
   const store = try Store
-  const now = try Clock.currentTimeMillis
+  const now = input.nowMs !== undefined && Number.isFinite(input.nowMs) ? Math.trunc(input.nowMs) : try Clock.currentTimeMillis
   const committed = try store.transaction(effect (tx: Tx) => {
     try ensureAuthorExistsTx(tx, input.authorId, input.authorKind)
     if (input.authorKind === "user" && viaClientName !== null) {

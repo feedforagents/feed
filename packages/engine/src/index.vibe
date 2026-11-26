@@ -87,6 +87,7 @@ export {
 } from "./eliza-npc-runtime.vibe"
 export {
   DEFAULT_RSS_URLS,
+  extractRssHeadlinesFromXml,
   fastForwardSimulatedHours,
   getEngineAdminStatus,
   interleaveRssFeedItems,

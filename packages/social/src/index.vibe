@@ -141,6 +141,7 @@ export { validateProfileImageUrl } from "./shared.vibe"
 export {
   RealtimeBus,
   canDeliverRealtimeEventToViewer,
+  createDbBackedRealtimeBusLayer,
   createSseResponse,
   encodeSseEvent,
   personalizePostDeletedEvent,
@@ -149,6 +150,7 @@ export {
   subscribeFeedEvents,
   subscribeViewerFeedEvents,
   toSseReadableStream,
+  type DbRealtimeBusOptions,
   type FeedRealtimeEvent,
   type SseResponseOptions,
   type SseStreamOptions
