@@ -12,6 +12,9 @@ const predictionBuyBodies: string[] = [];
 const createdEventSources: Array<EventTarget> = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+const liveEventSources: EventTarget[] = [];
+let profileShouldFail = false;
+let profileShould404 = false;
 
 const SAMPLE_POSTS = [
   {
@@ -264,6 +267,8 @@ function installMockNetwork(
   const requestedPnlRanges = new Set<string>();
   const heldReplies = new Map<string, Array<(res: Response) => void>>();
   const requestedReplies = new Set<string>();
+  profileShouldFail = false;
+  profileShould404 = false;
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -557,6 +562,40 @@ function installMockNetwork(
     }
     if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    if (path === "/api/posts") return json({ items: [], nextCursor: null });
+    if (path.startsWith("/api/users/")) {
+      const userHandle = decodeURIComponent(path.slice("/api/users/".length));
+      if (userHandle !== "ailonmusk") {
+        if (profileShouldFail) {
+          return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
+      if (profileShould404) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
+      if (profileShouldFail) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+      }
+      return json({
+        profile: {
+          id: "ailonmusk",
+          handle: "ailonmusk",
+          displayName: "AIlon Musk",
+          bio: "",
+          isParody: true,
+          followersCount: 10,
+          followingCount: 5,
+          postsCount: 1,
+          viewerFollows: false,
+          viewerMutes: false,
+          viewerBlocks: false,
+        },
+        posts: SAMPLE_POSTS,
+        nextCursor: null,
+        positions: [],
+      });
+    }
     return json({});
   };
   vi.stubGlobal("fetch", fetchMock);
@@ -565,6 +604,7 @@ function installMockNetwork(
     constructor() {
       super();
       createdEventSources.push(this);
+      liveEventSources.push(this);
     }
     close() {}
   }
@@ -1112,4 +1152,56 @@ it('Switching profiles never shows the previous profile (spec/app/navigation.md,
   releaseBob();
   await act(() => refreshBob);
   expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+});
+
+it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await expect.element(page.getByText("1 post")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
+
+  profileShouldFail = true;
+  liveEventSources[0].dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileLoading).toBe(false));
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
+  expect(getStoreSnapshot().profileBundle?.posts.length).toBe(1);
+  expect(getStoreSnapshot().errorMessage).not.toBeNull();
+  await expect.element(page.getByText("Profile not found")).not.toBeInTheDocument();
+  await expect.element(page.getByText("1 post")).toBeInTheDocument();
+
+  profileShouldFail = false;
+  await act(async () => {
+    await storeActions.navigate("/u/ghost");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShouldFail = false;
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  profileShouldFail = true;
+  await act(async () => {
+    await storeActions.navigate("/u/other");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShouldFail = false;
+
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  profileShould404 = true;
+  liveEventSources[0].dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShould404 = false;
 });

@@ -1503,6 +1503,12 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     setStoreState({ profileBundle: res.data, profileLoading: false });
     return;
   }
+  const cur = getStoreSnapshot().profileBundle;
+  if (!res.ok && res.status !== 404 && cur !== null && cur.summary.handle.toLowerCase() === handle.toLowerCase()) {
+    setStoreState({ profileLoading: false });
+    setErrorNotice(res.message);
+    return;
+  }
   setStoreState({ profileBundle: null, profileLoading: false });
   setErrorNotice(res.ok ? "Profile not found" : res.message);
 }
