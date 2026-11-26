@@ -694,9 +694,19 @@ lemma FilterAllKeep(xs: seq<PerpPosition>, traderId: string)
   }
 }
 
+lemma ComputeMarkPos(indexCents: int, longOI: int, shortOI: int)
+  requires indexCents > 0
+  ensures computeMarkPriceCents(indexCents, longOI, shortOI) >= 1
+{
+  hide *;
+  reveal computeMarkPriceCents, shared__money_maxInt;
+}
+
 lemma lawPerpRoundTripStrictlyDecreasesCash_ensures(indexCents: int, longOI: int, shortOI: int, perpSide: PerpSide, perpSizeCents: int, leverage: int)
   ensures (lawPerpRoundTripStrictlyDecreasesCash(indexCents, longOI, shortOI, perpSide, perpSizeCents, leverage) == true)
 {
+  hide *;
+  reveal lawPerpRoundTripStrictlyDecreasesCash, unrealizedPnlAtMark, positionEquityAtMark, shared__money_clampMin0, MIN_ORDER_SIZE_CENTS, MAX_LEVERAGE;
   if indexCents > 0 && longOI >= 0 && shortOI >= 0 && perpSizeCents >= MIN_ORDER_SIZE_CENTS && leverage >= 1 && leverage <= MAX_LEVERAGE {
     var openLong := if perpSide.Long? then longOI + perpSizeCents else longOI;
     var openShort := if perpSide.Short? then shortOI + perpSizeCents else shortOI;
@@ -705,17 +715,22 @@ lemma lawPerpRoundTripStrictlyDecreasesCash_ensures(indexCents: int, longOI: int
     var margin := shared__money_ceilDiv(perpSizeCents, leverage);
     var openFee := shared__money_canonicalTradingFee(perpSizeCents);
     var closeFee := shared__money_canonicalTradingFee(perpSizeCents);
+    ComputeMarkPos(indexCents, openLong, openShort);
     CeilDivMulGe(perpSizeCents, leverage);
     CanonicalTradingFeePos(perpSizeCents);
     if perpSide.Long? {
       BoundedPremiumMonotonicLong(longOI, openLong, shortOI);
       ComputeMarkMonotonic(indexCents, longOI, shortOI, openLong, openShort);
       assert exitPrice <= entryPrice;
+      MulLe(exitPrice - entryPrice, 0, perpSizeCents);
+      assert perpSizeCents * (exitPrice - entryPrice) == (exitPrice - entryPrice) * perpSizeCents;
       FloorCentsNonPos(perpSizeCents * (exitPrice - entryPrice), entryPrice);
     } else {
       BoundedPremiumMonotonicShort(longOI, shortOI, openShort);
       ComputeMarkMonotonic(indexCents, openLong, openShort, longOI, shortOI);
       assert entryPrice <= exitPrice;
+      MulLe(entryPrice - exitPrice, 0, perpSizeCents);
+      assert perpSizeCents * (entryPrice - exitPrice) == (entryPrice - exitPrice) * perpSizeCents;
       FloorCentsNonPos(perpSizeCents * (entryPrice - exitPrice), entryPrice);
     }
     var pos := PerpPosition(1, "alice", perpSide, perpSizeCents, leverage, margin, entryPrice, 0, 0, 0);
@@ -731,6 +746,8 @@ lemma lawPerpRoundTripStrictlyDecreasesCash_ensures(indexCents: int, longOI: int
 lemma lawPerpMarketRoundTripStrictlyDecreasesCash_ensures(mkt: SpotPerpMarket, traderId: string, perpSide: PerpSide, perpSizeCents: int, leverage: int, by_: Sender)
   ensures (lawPerpMarketRoundTripStrictlyDecreasesCash(mkt, traderId, perpSide, perpSizeCents, leverage, by_) == true)
 {
+  hide *;
+  reveal lawPerpMarketRoundTripStrictlyDecreasesCash, lawPerpRoundTripStrictlyDecreasesCash, alwaysSpotAndPricesConsistent, alwaysOpenInterestMatchesPositions, canOpenPerp, openPerp, closePerp, positionFor, spotBalanceFor, hasSpotAccount, hasOpenPosition, creditBalance, unrealizedPnlAtMark, positionEquityAtMark, MIN_ORDER_SIZE_CENTS, MAX_LEVERAGE;
   if alwaysSpotAndPricesConsistent(mkt) && alwaysOpenInterestMatchesPositions(mkt) && alwaysPositionsWithin20xAndUnique(mkt) && canOpenPerp(mkt, traderId, perpSide, perpSizeCents, leverage, by_) {
     var afterOpen := openPerp(mkt, traderId, perpSide, perpSizeCents, leverage, by_);
     var afterClose := closePerp(afterOpen, traderId, by_);

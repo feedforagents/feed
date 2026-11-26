@@ -122,12 +122,24 @@ lemma playTrade_ensures(e: EconomyState, playerId: string, cashDeltaCents: int, 
 lemma initialHolds_ensures()
   ensures inv(initialHolds())
 {
+  hide *;
+  reveal inv, initialHolds, initial, INITIAL_GRANT_CENTS, equityCents, netProfitCents;
   var s := initialHolds();
   EconomyFilterBridge(s);
-  ProofLib.FilterOne((q: PlayerLedger) => (q.id == s.players[0].id), s.players, 0);
-  ProofLib.FilterOne((q: PlayerLedger) => (q.id == s.players[1].id), s.players, 1);
-  assert s.players[1..] == [s.players[1]];
-  assert [s.players[1]][1..] == [];
-  assert forall p :: p in s.players ==> p == s.players[0] || p == s.players[1];
-  assert netProfitCents(s.players[1]) == equityCents(s.players[1]) - INITIAL_GRANT_CENTS;
+  assert s.players[0].id[0] != s.players[1].id[0];
+  forall p | p in s.players
+    ensures p.cashCents >= 0
+    ensures p.positionValueCents >= 0
+    ensures p.verified == (p.grantClaimed && (p.startingGrantCents == INITIAL_GRANT_CENTS))
+    ensures !(p.verified) || (netProfitCents(p) == (equityCents(p) - INITIAL_GRANT_CENTS))
+    ensures !(!(p.verified)) || (((!(p.grantClaimed) && (p.cashCents == 0)) && (p.positionValueCents == 0)) && (p.startingGrantCents == 0))
+    ensures |ProofLib.Filter((q: PlayerLedger) => (q.id == p.id), s.players)| == 1
+  {
+    if p == s.players[0] {
+      ProofLib.FilterOne((q: PlayerLedger) => (q.id == p.id), s.players, 0);
+    } else {
+      assert p == s.players[1];
+      ProofLib.FilterOne((q: PlayerLedger) => (q.id == p.id), s.players, 1);
+    }
+  }
 }
