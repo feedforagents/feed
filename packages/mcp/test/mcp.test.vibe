@@ -1169,3 +1169,161 @@ it.effect('MCP start_sign_in enforces the same 30/hr per-IP device-code budget a
     { firstThirtyLimitedOk: true, thirtyFirstLimited: "rate_limited", unlimitedAllOk: true }
   ))
 }))
+
+it.effect(
+  'get_market returns related articles for a perp ticker (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (ticker) DO NOTHING",
+        ["OPENAGI", 100, 100, now]
+      )
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["perp-related-article", "OpenAGI perp scoop", "OpenAGI perp summary", "OpenAGI perp body", "the-new-york-taimes", "seed-market-1", false, now]
+      )
+    })
+    const marketRes = try callMcpTool(201, "get_market", { marketId: "OPENAGI", kind: "perp" }, authConfig)
+    const marketPayload = unwrapToolPayload(marketRes)
+    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(relatedArticles.some((a) => a.id === "perp-related-article"), true)
+    })
+  })
+)
+
+it.effect(
+  'get_market does not return a memecoin-index article for the COIN perp (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_perp_markets (ticker, index_price_cents, mark_price_cents, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (ticker) DO NOTHING",
+        ["COIN", 100, 100, now]
+      )
+      try tx.query(
+        "INSERT INTO feed_prediction_markets (id, slot_index, question, description, category, timeframe, phase, yes_shares, no_shares, liquidity_cents, secret_outcome, status, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, 'opening', 50000, 50000, 50000, $7, 'open', $8, $9)",
+        ["perp-memecoin-market", 99, "Will the memecoin index rise this hour?", "Resolves YES if the memecoin index closes higher at the end of the hour.", "crypto", "1h", "yes", now + 3600000, now]
+      )
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["perp-memecoin-article", "Memecoin index watch", "Memecoin index summary", "Memecoin index body", "the-new-york-taimes", "perp-memecoin-market", false, now]
+      )
+    })
+    const marketRes = try callMcpTool(202, "get_market", { marketId: "COIN", kind: "perp" }, authConfig)
+    const marketPayload = unwrapToolPayload(marketRes)
+    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(relatedArticles.some((a) => a.id === "perp-memecoin-article"), false)
+      assert.strictEqual(relatedArticles.some((a) => a.id === "seed-article-4"), true)
+    })
+    const fallbackRes = try callMcpTool(203, "get_market", { marketId: "COIN", kind: "prediction" }, authConfig)
+    const fallbackPayload = unwrapToolPayload(fallbackRes)
+    const fallbackArticles = (fallbackPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(fallbackArticles.some((a) => a.id === "perp-memecoin-article"), false)
+      assert.strictEqual(fallbackArticles.some((a) => a.id === "seed-article-4"), true)
+    })
+  })
+)
+
+it.effect('list_markets with status resolved returns no perp markets', () =>
+  withSeededWorld(effect (authConfig) => {
+    const openPerps = unwrapToolPayload(try callMcpTool(201, "list_markets", { kind: "perp", status: "open", limit: 10 }, authConfig))
+    const resolvedPerps = unwrapToolPayload(try callMcpTool(202, "list_markets", { kind: "perp", status: "resolved", limit: 10 }, authConfig))
+    const resolvedAll = unwrapToolPayload(try callMcpTool(203, "list_markets", { kind: "all", status: "resolved", limit: 10 }, authConfig))
+    const allPerps = unwrapToolPayload(try callMcpTool(204, "list_markets", { kind: "perp", status: "all", limit: 10 }, authConfig))
+    try check(() => {
+      assert.isAbove((openPerps.perpMarkets as ReadonlyArray<unknown>).length, 0)
+      assert.deepStrictEqual(resolvedPerps.perpMarkets, [])
+      assert.deepStrictEqual(resolvedAll.perpMarkets, [])
+      assert.isAbove((allPerps.perpMarkets as ReadonlyArray<unknown>).length, 0)
+    })
+  })
+)
+
+it.effect(
+  'get_market returns a related article older than the 50 newest articles (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["buried-market-article", "Buried market scoop", "Buried summary", "Buried body", "the-new-york-taimes", "seed-market-1", false, now - 1_000_000]
+      )
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        ["buried-proof-article", "Unreleased proof", "Proof summary", "Proof body", "the-new-york-taimes", "seed-market-1", true, now - 2_000_000]
+      )
+      for (let i = 1; i <= 60; i += 1) {
+        try tx.query(
+          "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+          [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
+        )
+      }
+    })
+    const marketRes = try callMcpTool(201, "get_market", { marketId: "seed-market-1" }, authConfig)
+    const marketPayload = unwrapToolPayload(marketRes)
+    const relatedArticles = (marketPayload.relatedArticles ?? []) as ReadonlyArray<{ readonly id: string; readonly relatedMarketId: string | null }>
+    try check(() => {
+      assert.strictEqual(relatedArticles.some((a) => a.id === "buried-market-article"), true)
+      assert.strictEqual(relatedArticles.every((a) => a.relatedMarketId === "seed-market-1"), true)
+      assert.strictEqual(relatedArticles.some((a) => a.id === "buried-proof-article"), false)
+    })
+  })
+)
+
+it.effect(
+  'search "$TICKER" returns the matching prediction and perp markets (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const dollarOpen = try callMcpTool(202, "search", { query: "$OPENAGI", kind: "markets", limit: 10 }, authConfig)
+    const dollarOpenPayload = unwrapToolPayload(dollarOpen)
+    const dollarPreds = (dollarOpenPayload.predictionMarkets ?? []) as ReadonlyArray<{ readonly id: string }>
+    const dollarPerps = (dollarOpenPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>
+    const dollarNv = try callMcpTool(203, "search", { query: "$NVDAI", kind: "markets", limit: 10 }, authConfig)
+    const dollarNvPayload = unwrapToolPayload(dollarNv)
+    const dollarNvPerps = (dollarNvPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>
+    const bareDollar = try callMcpTool(204, "search", { query: "$", kind: "markets", limit: 10 }, authConfig)
+    const bareDollarPayload = unwrapToolPayload(bareDollar)
+    const bareDollarPreds = (bareDollarPayload.predictionMarkets ?? []) as ReadonlyArray<{ readonly id: string }>
+    const bareDollarPerps = (bareDollarPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>
+    try check(() => {
+      assert.strictEqual(dollarPreds.some((m) => m.id === "seed-market-1"), true)
+      assert.strictEqual(dollarPerps.some((m) => m.ticker === "OPENAGI"), true)
+      assert.strictEqual(dollarNvPerps.some((m) => m.ticker === "NVDAI"), true)
+      assert.strictEqual(bareDollarPreds.length, 1)
+      assert.strictEqual(bareDollarPerps.length, 0)
+    })
+  })
+)
+
+it.effect(
+  'search returns articles older than the 50 newest (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")',
+  () => withSeededWorld(effect (authConfig) => {
+    const now = try Clock.currentTimeMillis
+    const store = try Store
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+        ["buried-article-1", "Buried Quibberton scoop", "Quibberton summary", "Quibberton body", "the-new-york-taimes", null, now - 1_000_000]
+      )
+      for (let i = 1; i <= 60; i += 1) {
+        try tx.query(
+          "INSERT INTO feed_articles (id, title, summary, body, author_org_id, related_market_id, is_resolution_proof, published_at) VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
+          [`filler-article-${i}`, `Filler article ${i}`, "Filler summary", "Filler body", "the-new-york-taimes", null, now + i]
+        )
+      }
+    })
+    const searchRes = try callMcpTool(201, "search", { query: "Quibberton", kind: "articles", limit: 10 }, authConfig)
+    const searchPayload = unwrapToolPayload(searchRes)
+    const articles = (searchPayload.articles ?? []) as ReadonlyArray<{ readonly id: string }>
+    try check(() => {
+      assert.strictEqual(articles.some((a) => a.id === "buried-article-1"), true)
+      assert.strictEqual(articles.length, 1)
+    })
+  })
+)

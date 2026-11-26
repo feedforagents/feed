@@ -644,7 +644,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
       status: {
         kind: "enum",
         values: ["open", "resolved", "all"],
-        description: "Prediction market status filter."
+        description: "Prediction market status filter. Perpetual markets are listed only when status is open or all, and are hidden when status is resolved.",
       },
       limit: {
         kind: "integer",
