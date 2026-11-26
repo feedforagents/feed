@@ -968,5 +968,14 @@ it.effect('Session cookie slides with the server session (spec/app/index.md, "St
     const meStill = try callApp("/api/auth/me", { cookie: player.cookie })
     const meStillBody = try readJson(meStill)
     try check(() => assert.strictEqual(meStillBody.authenticated, true))
+  try TestClock.adjust("20 days")
+  const marketsDay70 = try callApp("/api/markets", { cookie: player.cookie })
+  try check(() => assert.strictEqual(marketsDay70.status, 200))
+  const cappedMaxAge = sessionCookieMaxAge(marketsDay70.headers.get("set-cookie"))
+  const cappedPair = extractSessionCookie(marketsDay70)
+  try check(() => assert.deepStrictEqual(
+   { cappedMaxAge, sameToken: cappedPair === player.cookie },
+   { cappedMaxAge: 20 * 86_400, sameToken: true }
+  ))
   }
 }, 180_000)
