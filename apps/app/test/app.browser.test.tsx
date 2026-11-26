@@ -571,7 +571,7 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
 
-  await act(() => {
+  act(() => {
     void storeActions.loadPnlHistory("1D");
   });
   await act(() => Promise.resolve());
