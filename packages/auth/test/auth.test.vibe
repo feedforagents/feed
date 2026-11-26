@@ -52,14 +52,19 @@ import {
 import { insertCloudAccountTx } from "../src/phone-auth.vibe"
 
 module node {
-  import { createHash } from "node:crypto"
+  import { createHash, createHmac } from "node:crypto"
 
   /** @throws {never} */
   export function pkceChallengeS256(verifier: string): string {
     return createHash("sha256").update(verifier, "utf8").digest("base64url")
   }
+
+  /** @throws {never} */
+  export function hmacSha256Hex(key: string, input: string): string {
+    return createHmac("sha256", key).update(input, "utf8").digest("hex")
+  }
 }
-import { pkceChallengeS256 } from node
+import { hmacSha256Hex, pkceChallengeS256 } from node
 
 const localnetConfig: AuthRuntimeConfig = {
   digestKey: "dev-digest-key-change-in-production-32-bytes",
@@ -466,6 +471,26 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
     if (postCooldownCode === undefined) return try Effect.die("Missing post-cooldown loopback code")
     const postCooldownVerified = try verifyPhoneCode({ phoneE164: newPhone, code: postCooldownCode, config: localnetConfig })
 
+    const racePhone = "+14155550155"
+    const raceOutcomes = try Effect.all(
+      [
+        Effect.either(startPhoneVerification({ phoneE164: racePhone, config: localnetConfig })),
+        Effect.either(startPhoneVerification({ phoneE164: racePhone, config: localnetConfig }))
+      ],
+      { concurrency: "unbounded" }
+    )
+    const raceResults = [...raceOutcomes.map((outcome) =>
+      outcome._tag === "Left" ? failureCode(outcome.left) : "ok"
+    )].sort()
+    const racePhoneHash = hmacSha256Hex(localnetConfig.digestKey, racePhone)
+    const raceRows = try sqlQuery(
+      "SELECT key, phase FROM code_challenges WHERE method = 'sms' AND destination_digest = $1 ORDER BY sent_at",
+      [racePhoneHash]
+    )
+    const raceCode = getLoopbackCode(racePhone, localnetConfig)
+    if (raceCode === undefined) return try Effect.die("Missing race loopback code")
+    const raceVerified = try verifyPhoneCode({ phoneE164: racePhone, code: raceCode, config: localnetConfig })
+
     try check(() => assert.deepStrictEqual(
       {
         disallowedCountry,
@@ -535,7 +560,12 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
           notifications: remainingNotifications.map((row) => toText(row.id))
         },
         turnstileSiteKeyConfigured: localnetConfig.turnstileSiteKey,
-        postCooldownOnboarding: postCooldownVerified.needsOnboarding
+        postCooldownOnboarding: postCooldownVerified.needsOnboarding,
+        phoneParallelRace: {
+          results: raceResults,
+          rows: raceRows.map((row) => toText(row.phase)),
+          verifiedNeedsOnboarding: raceVerified.needsOnboarding
+        }
       },
       {
         disallowedCountry: "country_not_allowed",
@@ -582,7 +612,12 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
           notifications: ["notif-peer"]
         },
         turnstileSiteKeyConfigured: "0x4AAAAAAA_localnet_site_key",
-        postCooldownOnboarding: true
+        postCooldownOnboarding: true,
+        phoneParallelRace: {
+          results: ["ok", "rate_limited:sms_send"],
+          rows: ["open"],
+          verifiedNeedsOnboarding: true
+        }
       }
     ))
   })
