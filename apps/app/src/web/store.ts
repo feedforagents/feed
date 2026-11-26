@@ -105,6 +105,7 @@ import {
   loadChats,
   loadClosedPositions,
   loadEconomy,
+  selectChat,
   loadExplore,
   loadFeed,
   loadFollowList,
@@ -256,6 +257,9 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
 }
 
 function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
+  if (getStoreSnapshot().route === "PostDetail" && parsed.route !== "PostDetail") {
+    closeThread();
+  }
   const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
   setStoreState({
     route: parsed.route,
@@ -307,8 +311,14 @@ function guardRouteAccess(parsed: ReturnType<typeof parseLocation>, rawPath: str
   return "allow";
 }
 
-async function redirectToHome(): Promise<void> {
-  pushBrowserRoute("Home");
+async function redirectToHome(options?: { readonly replace?: boolean }): Promise<void> {
+  if (options?.replace) {
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", "/");
+    }
+  } else {
+    pushBrowserRoute("Home");
+  }
   sendNav({ type: "navigateTo", targetRoute: "Home" });
   sendApp({ type: "navigateApp", targetRoute: "Home" });
   setStoreState({
@@ -487,8 +497,11 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
         await loadMarkets();
         if (s.walletView && s.viewer) {
           await Promise.all([loadEconomy(), loadClosedPositions(), loadPnlHistory()]);
-        } else if (s.marketsViewMode === "terminal" && s.selectedMarketId) {
-          await loadMarketDetails(s.selectedMarketKind, s.selectedMarketId);
+        } else {
+          const latest = getStoreSnapshot();
+          if (latest.marketsViewMode === "terminal" && latest.selectedMarketId) {
+            await loadMarketDetails(latest.selectedMarketKind, latest.selectedMarketId);
+          }
         }
       });
     }
@@ -508,10 +521,12 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     if (!s.viewer) return;
     const chatId = data ? optStr(data.chatId) : null;
     void runDomainRefresh("chats", async () => {
-      if (s.route === "Chats" && chatId && chatId === s.selectedChatId) {
-        await loadChats(true, chatId);
+      const live = getStoreSnapshot();
+      if (live.route === "Chats" && chatId && chatId === live.selectedChatId) {
+        await loadChatMessages(chatId);
+        await loadChats(false);
       } else {
-        await loadChats(s.route === "Chats");
+        await loadChats(live.route === "Chats");
       }
     });
     return;
@@ -596,7 +611,7 @@ export function bootStore(): void {
       const guard = guardRouteAccess(parsed, `${window.location.pathname}${window.location.search}`);
       if (guard === "blocked_auth") return;
       if (guard === "blocked_redirect") {
-        void redirectToHome();
+        void redirectToHome({ replace: true });
         return;
       }
       sendNav({ type: "navigateTo", targetRoute: parsed.route });
@@ -622,14 +637,25 @@ export function bootStore(): void {
     await Promise.all([hydrateAuth(), loadSkillsHosts()]);
     reconnectRealtime();
     const afterAuth = getStoreSnapshot();
-    const tasks: Promise<void>[] = [loadDataForRoute(afterAuth.route, initialSearch)];
-    if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {
+    if (
+      !afterAuth.viewer &&
+      afterAuth.localUiMode === "social" &&
+      (afterAuth.route === "Markets" || afterAuth.route === "Leaderboard" || afterAuth.walletView)
+    ) {
+      setStoreState({ route: "Home", walletView: false });
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", "/");
+      }
+    }
+    const route = getStoreSnapshot().route;
+    const tasks: Promise<void>[] = [loadDataForRoute(route, initialSearch)];
+    if (route !== "Markets" && route !== "Leaderboard") {
       tasks.push(loadWorldStatus());
     }
-    if (afterAuth.route !== "Explore" || afterAuth.activeArticleId) {
+    if (route !== "Explore" || afterAuth.activeArticleId) {
       tasks.push(loadTrending());
     }
-    if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {
+    if (route !== "Markets" && route !== "Leaderboard") {
       if (currentUiMode(afterAuth) === "GameMode") {
         tasks.push(loadMarkets());
       } else {
@@ -637,8 +663,8 @@ export function bootStore(): void {
       }
     }
     if (afterAuth.viewer !== null) {
-      if (afterAuth.route !== "Notifications") tasks.push(loadNotifications());
-      if (afterAuth.route !== "Chats") tasks.push(loadChats(false));
+      if (route !== "Notifications") tasks.push(loadNotifications());
+      if (route !== "Chats") tasks.push(loadChats(false));
     }
     await Promise.all(tasks);
   })();
@@ -709,6 +735,7 @@ export const storeActions = {
   loadChats,
   loadChatMessages,
   markChatRead,
+  selectChat,
   startDirectChat,
   createGroupChat,
   inviteToGroupChat,

@@ -10,6 +10,7 @@ import {
   notifyAuthChanged,
   persistExplainerDismissed,
   persistPendingAction,
+  persistUiMode,
   pushBrowserRoute,
   pushToast,
   readPersistedPendingAction,
@@ -66,6 +67,15 @@ const COUNTRY_PREFIX: Record<string, string> = {
   IE: "+353",
   AU: "+61",
   NZ: "+64",
+  FR: "+33",
+  DE: "+49",
+  NL: "+31",
+  ES: "+34",
+  IT: "+39",
+  SE: "+46",
+  DK: "+45",
+  NO: "+47",
+  FI: "+358",
   EU: "+",
 };
 
@@ -78,14 +88,16 @@ function syncMachineUiMode(targetMode: "game" | "social"): void {
   sendApp({ type: "switchUiMode" });
 }
 
+const TRUNK_ZERO_COUNTRIES = new Set(["UK", "IE", "AU", "NZ", "FR", "DE", "NL", "ES", "SE", "DK", "NO", "FI"]);
+
 export function formatPhoneToE164(country: string, rawPhone: string): string {
   const cleaned = rawPhone.trim().replace(/[\s\-().]/g, "");
   if (cleaned.startsWith("+")) return cleaned;
   if (cleaned.startsWith("00")) return `+${cleaned.slice(2)}`;
   const prefix = COUNTRY_PREFIX[country] ?? "+1";
   const digits = cleaned.replace(/\D/g, "");
-  if (prefix === "+") return `+${digits}`;
-  return `${prefix}${digits}`;
+  const national = TRUNK_ZERO_COUNTRIES.has(country) && digits.startsWith("0") ? digits.slice(1) : digits;
+  return `${prefix}${national}`;
 }
 
 export async function loadSkillsHosts(): Promise<void> {
@@ -97,6 +109,7 @@ export async function loadSkillsHosts(): Promise<void> {
 
 export async function hydrateAuth(): Promise<void> {
   const prevViewerId = getStoreSnapshot().viewer?.accountId ?? null;
+  const prevUiMode = getStoreSnapshot().viewer?.uiMode ?? null;
   const res = await requestJson("/api/auth/me", { parse: decodeAuthMe });
   if (!res.ok) {
     setStoreState({ authLoaded: true });
@@ -143,6 +156,8 @@ export async function hydrateAuth(): Promise<void> {
     });
     if (prevViewerId !== viewer.accountId) {
       notifyAuthChanged();
+    } else if (prevUiMode !== viewer.uiMode) {
+      await loadNotifications();
     }
     return;
   }
@@ -674,6 +689,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   const leavingGameRoute = nextMode === "social" && (s.route === "Markets" || s.route === "Leaderboard" || s.walletView);
   if (!s.viewer) {
     syncMachineUiMode(nextMode);
+    persistUiMode(nextMode);
     if (leavingGameRoute) {
       pushBrowserRoute("Home");
     }

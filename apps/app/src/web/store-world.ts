@@ -11,6 +11,7 @@ import { passThrough, requestJson } from "./api.ts";
 import {
   appendAnonymousModeParam,
   clearNotices,
+  currentUiMode,
   getStoreSnapshot,
   incrementSpaNavDepth,
   pushBrowserRoute,
@@ -22,6 +23,7 @@ import {
   setStatusNotice,
   setStoreState,
   toSpecTab,
+  type StoreState,
   type ThreadReplySort,
   type UiFeedTab,
 } from "./store-core.ts";
@@ -58,6 +60,7 @@ import {
   decodeTrendingList,
   decodeUsersSearch,
   decodeWorldStatus,
+  isNotificationVisibleInMode,
   isRecord,
   arr,
   optStr,
@@ -70,6 +73,9 @@ const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
+let marketDetailsRequestSeq = 0;
+let leaderboardRequestSeq = 0;
+let pnlHistoryRequestSeq = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -122,6 +128,23 @@ export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost
   });
 }
 
+function cleanedPostLists(
+  cur: StoreState,
+  cleanList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost>,
+  cleanProfileList: (list: ReadonlyArray<AppPost>) => ReadonlyArray<AppPost> = cleanList,
+): Pick<StoreState, "feedPosts" | "explore" | "profileBundle" | "profileReplies" | "profileLikes" | "marketSocialPosts"> {
+  return {
+    feedPosts: cleanList(cur.feedPosts),
+    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
+    profileBundle: cur.profileBundle
+      ? { ...cur.profileBundle, posts: cleanProfileList(cur.profileBundle.posts) }
+      : null,
+    profileReplies: cleanProfileList(cur.profileReplies),
+    profileLikes: cleanList(cur.profileLikes),
+    marketSocialPosts: cleanList(cur.marketSocialPosts),
+  };
+}
+
 export function removePostAcrossStore(
   postId: string,
   parentInfo?: { readonly replyToPostId?: string | null; readonly parentReplyCount?: number | null },
@@ -143,19 +166,15 @@ export function removePostAcrossStore(
     && existing !== undefined
     && existing.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase()
     && (bundle.posts.some((p) => p.card.id === postId) || cur.profileReplies.some((p) => p.card.id === postId));
+  const cleaned = cleanedPostLists(cur, cleanList);
   setStoreState({
-    feedPosts: cleanList(cur.feedPosts),
-    explore: { ...cur.explore, posts: cleanList(cur.explore.posts) },
-    profileBundle: bundle
+    ...cleaned,
+    profileBundle: cleaned.profileBundle
       ? {
-          ...bundle,
-          posts: cleanList(bundle.posts),
-          postsCount: removedFromProfile ? Math.max(0, bundle.postsCount - 1) : bundle.postsCount,
+          ...cleaned.profileBundle,
+          postsCount: removedFromProfile ? Math.max(0, cleaned.profileBundle.postsCount - 1) : cleaned.profileBundle.postsCount,
         }
       : null,
-    profileReplies: cleanList(cur.profileReplies),
-    profileLikes: cleanList(cur.profileLikes),
-    marketSocialPosts: cleanList(cur.marketSocialPosts),
     activeThread: thread
       ? thread.post.card.id === postId
         ? null
@@ -171,19 +190,47 @@ export function removePostAcrossStore(
 
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
-  const keep = (p: AppPost) => p.card.authorHandle.toLowerCase() !== normalized;
+  const isBlockedHandle = (value: string): boolean => value.toLowerCase() === normalized;
+  const reposterHandle = (p: AppPost): string | undefined => p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+  const isBlockedReposter = (p: AppPost): boolean => {
+    const reposter = reposterHandle(p);
+    return reposter !== undefined && isBlockedHandle(reposter);
+  };
+  const cleanPost = (p: AppPost): AppPost => {
+    const stripRepost = isBlockedReposter(p);
+    const stripQuote = p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle);
+    if (!stripRepost && !stripQuote) return p;
+    return {
+      ...p,
+      card: {
+        ...p.card,
+        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
+        ...(stripQuote ? { quotePost: undefined } : {}),
+      },
+    };
+  };
+  const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
+    list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);
   const cur = getStoreSnapshot();
+  const profileOwnerBlocked = cur.profileBundle !== null && isBlockedHandle(cur.profileBundle.summary.handle);
+  const cleanProfileList = profileOwnerBlocked
+    ? (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
+        list.filter((p) => !isBlockedHandle(p.card.authorHandle) && !isBlockedReposter(p)).map(cleanPost)
+    : cleanList;
+  const thread = cur.activeThread;
   setStoreState({
-    feedPosts: cur.feedPosts.filter(keep),
-    explore: { ...cur.explore, posts: cur.explore.posts.filter(keep) },
-    profileReplies: cur.profileReplies.filter(keep),
-    profileLikes: cur.profileLikes.filter(keep),
-    marketSocialPosts: cur.marketSocialPosts.filter(keep),
-    activeThread: cur.activeThread
-      ? {
-          ...cur.activeThread,
-          replies: cur.activeThread.replies.filter(keep),
-        }
+    ...cleanedPostLists(cur, cleanList, cleanProfileList),
+    activeThread: thread
+      ? isBlockedHandle(thread.post.card.authorHandle)
+        ? null
+        : {
+            post: cleanPost(thread.post),
+            parentPost: thread.parentPost && !isBlockedHandle(thread.parentPost.card.authorHandle)
+              ? cleanPost(thread.parentPost)
+              : null,
+            ancestors: cleanList(thread.ancestors),
+            replies: cleanList(thread.replies),
+          }
       : null,
   });
 }
@@ -291,16 +338,21 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   await loadFeed(tab);
 }
 
+let threadRequestSeq = 0;
+
 export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
   const s = getStoreSnapshot();
   const sort = sortOverride ?? s.threadSort;
   const viewerId = s.viewer?.accountId ?? null;
+  threadRequestSeq += 1;
+  const requestSeq = threadRequestSeq;
   setStoreState({ threadLoading: true, activePostId: postId, threadSort: sort });
   recordPublicView("PostDetail");
   const baseUrl = `/api/posts/${encodeURIComponent(postId)}?sort=${encodeURIComponent(sort)}`;
   const res = await requestJson(appendAnonymousModeParam(baseUrl, s), {
     parse: (raw) => decodePostThread(raw, viewerId),
   });
+  if (requestSeq !== threadRequestSeq) return;
   if (res.ok && res.data) {
     setStoreState({ activeThread: res.data, threadLoading: false });
     return;
@@ -310,7 +362,8 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
 }
 
 export function closeThread(): void {
-  setStoreState({ activeThread: null, activePostId: null });
+  threadRequestSeq += 1;
+  setStoreState({ activeThread: null, activePostId: null, threadLoading: false });
 }
 
 export async function loadArticle(articleId: string): Promise<void> {
@@ -325,6 +378,7 @@ export async function loadArticle(articleId: string): Promise<void> {
   const res = await requestJson(appendAnonymousModeParam(`/api/articles/${encodeURIComponent(articleId)}`, s), {
     parse: decodeArticle,
   });
+  if (getStoreSnapshot().activeArticleId !== articleId) return;
   if (res.ok && res.data) {
     setStoreState({ activeArticle: res.data, articleLoading: false });
     return;
@@ -613,6 +667,7 @@ export async function loadLeaderboard(options?: {
   const metric = options?.metric ?? s.leaderboardMetric;
   const page = Math.max(1, options?.page ?? s.leaderboardPage);
   const pageSize = options?.pageSize ?? 25;
+  const reqSeq = ++leaderboardRequestSeq;
   setStoreState({
     leaderboardLoading: true,
     leaderboardAudience: audience,
@@ -634,6 +689,7 @@ export async function loadLeaderboard(options?: {
   const res = await requestJson(`/api/leaderboard?${params.toString()}`, {
     parse: (raw) => decodeLeaderboardPage(raw, scope, metric),
   });
+  if (reqSeq !== leaderboardRequestSeq) return;
   if (res.ok) {
     setStoreState({
       leaderboard: res.data.entries,
@@ -709,10 +765,12 @@ export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<v
   const s = getStoreSnapshot();
   if (!s.viewer) return;
   const range = rangeOverride ?? s.pnlTimeRange;
+  const reqSeq = ++pnlHistoryRequestSeq;
   setStoreState({ pnlHistoryLoading: true, pnlTimeRange: range });
   const res = await requestJson(`/api/economy/me/pnl-history?range=${encodeURIComponent(range)}`, {
     parse: decodePnlHistory,
   });
+  if (reqSeq !== pnlHistoryRequestSeq) return;
   if (res.ok) {
     setStoreState({ pnlHistory: res.data, pnlHistoryLoading: false });
     return;
@@ -741,6 +799,7 @@ export async function loadMarketDetails(
   const s = getStoreSnapshot();
   const viewerId = s.viewer?.accountId ?? null;
   const range = rangeOverride ?? s.marketTimeRange;
+  const reqSeq = ++marketDetailsRequestSeq;
   setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
   const basePath = kind === "perp"
     ? `/api/markets/perp/${encodeURIComponent(id)}`
@@ -756,6 +815,7 @@ export async function loadMarketDetails(
     requestJson(`${basePath}/trades?limit=40`, { parse: decodeMarketTrades }),
     requestJson(feedUrl, { parse: (raw) => decodeFeedPage(raw, viewerId) }),
   ]);
+  if (reqSeq !== marketDetailsRequestSeq) return;
   const latest = getStoreSnapshot();
   if (latest.selectedMarketKind !== kind || latest.selectedMarketId !== id) return;
   setStoreState({
@@ -806,9 +866,13 @@ export async function previewPerpOrder(
   setStoreState({ perpPreview: res.ok ? res.data : null });
 }
 
+let marketsLoadCount = 0;
+
 export async function loadMarkets(): Promise<void> {
+  const loadId = ++marketsLoadCount;
   setStoreState({ marketsLoading: true });
   const mktRes = await requestJson("/api/markets", { parse: passThrough });
+  if (loadId !== marketsLoadCount) return;
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
@@ -1087,14 +1151,18 @@ export async function markChatRead(chatId: string): Promise<void> {
   });
 }
 
+let chatsLoadCount = 0;
+
 export async function loadChats(loadMessages = true, preferredChatId?: string | null): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
+  const loadId = ++chatsLoadCount;
   if (loadMessages) setStoreState({ chatsLoading: true });
   const [chatsRes, invitesRes] = await Promise.all([
     requestJson("/api/chats", { parse: (raw) => decodeChats(raw, viewerId) }),
     requestJson("/api/chats/invites", { parse: decodeAlphaInvites }),
   ]);
+  if (loadId !== chatsLoadCount) return;
   const s = getStoreSnapshot();
   const nextChats = chatsRes.ok ? chatsRes.data : s.chats;
   const preferred = preferredChatId ?? s.selectedChatId;
@@ -1113,16 +1181,27 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
   }
 }
 
+let chatMessagesLoadCount = 0;
+
 export async function loadChatMessages(chatId: string): Promise<void> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
   if (!viewerId) return;
+  const loadId = ++chatMessagesLoadCount;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
     parse: (raw) => decodeChatMessages(raw, viewerId),
   });
-  if (res.ok) {
-    setStoreState({ selectedChatId: chatId, chatMessages: res.data });
-    void markChatRead(chatId);
+  if (loadId !== chatMessagesLoadCount) return;
+  if (res.ok && getStoreSnapshot().selectedChatId === chatId) {
+    setStoreState({ chatMessages: res.data });
+    if (res.data.length > 0) {
+      await markChatRead(chatId);
+    }
   }
+}
+
+export async function selectChat(chatId: string): Promise<void> {
+  setStoreState({ selectedChatId: chatId });
+  await loadChatMessages(chatId);
 }
 
 export async function startDirectChat(targetHandleOrId: string): Promise<boolean> {
@@ -1146,7 +1225,7 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
   }
   await loadChats(false, createdId);
   if (createdId) {
-    await loadChatMessages(createdId);
+    await selectChat(createdId);
   }
   return true;
 }
@@ -1166,7 +1245,7 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
   const chatId = optStr(rec.id);
   setStatusNotice(`Created group "${title}".`);
   await loadChats(false, chatId);
-  if (chatId) await loadChatMessages(chatId);
+  if (chatId) await selectChat(chatId);
   return true;
 }
 
@@ -1343,10 +1422,17 @@ export async function respondGroupInvite(inviteId: string, accept: boolean): Pro
   await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
 
+let notificationsLoadCount = 0;
+
 export async function loadNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const loadId = ++notificationsLoadCount;
   setStoreState({ notificationsLoading: true });
   const res = await requestJson("/api/notifications", { parse: decodeNotifications });
+  if (loadId !== notificationsLoadCount) {
+    setStoreState({ notificationsLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({
       notifications: res.data.items,
@@ -1381,19 +1467,32 @@ export async function markNotificationRead(notificationId: string): Promise<void
 }
 
 export async function markAllNotificationsRead(): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+  const initial = getStoreSnapshot();
+  const accountId = initial.viewer?.accountId;
+  if (!accountId) return;
+  const mode = currentUiMode(initial);
+  notificationsLoadCount += 1;
   const res = await requestJson("/api/notifications/read", {
     method: "POST",
     body: {},
     parse: passThrough,
   });
+  const s = getStoreSnapshot();
+  if (s.viewer?.accountId !== accountId) return;
   if (!res.ok) {
     setErrorNotice(res.message);
     return;
   }
+  if (currentUiMode(s) !== mode) {
+    await loadNotifications();
+    return;
+  }
+  const notifications = s.notifications.map((n) =>
+    isNotificationVisibleInMode(n, mode) ? { ...n, item: { ...n.item, read: true } } : n,
+  );
   setStoreState({
-    notifications: getStoreSnapshot().notifications.map((n) => ({ ...n, item: { ...n.item, read: true } })),
-    unreadNotifications: 0,
+    notifications,
+    unreadNotifications: notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length,
   });
 }
 
@@ -1414,6 +1513,8 @@ export async function clearNotifications(): Promise<void> {
   setStatusNotice("Notifications cleared.");
 }
 
+let profileLoadCount = 0;
+
 export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
@@ -1428,29 +1529,45 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     });
     return;
   }
-  const switchingProfile = s.profileBundle?.summary.handle.toLowerCase() !== handle.toLowerCase();
+  const loadId = ++profileLoadCount;
+  const lower = handle.toLowerCase();
+  const bundle = s.profileBundle;
+  const sameProfile =
+    bundle !== null &&
+    (bundle.summary.handle.toLowerCase() === lower ||
+      bundle.id.toLowerCase() === lower ||
+      bundle.orgMeta?.ticker?.toLowerCase() === lower);
   setStoreState({
     profileLoading: true,
     profileHandle: handle,
-    ...(switchingProfile ? { profileReplies: [], profileLikes: [], profileTrades: [] } : {}),
+    ...(sameProfile ? {} : { profileBundle: null, profileReplies: [], profileLikes: [], profileTrades: [] }),
   });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
-  if (getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
+  if (loadId !== profileLoadCount || getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
     setStoreState({ profileBundle: res.data, profileLoading: false });
+    return;
+  }
+  const cur = getStoreSnapshot().profileBundle;
+  if (!res.ok && res.status !== 404 && cur !== null && cur.summary.handle.toLowerCase() === handle.toLowerCase()) {
+    setStoreState({ profileLoading: false });
+    setErrorNotice(res.message);
     return;
   }
   setStoreState({ profileBundle: null, profileLoading: false });
   setErrorNotice(res.ok ? "Profile not found" : res.message);
 }
 
+let profileRepliesLoadCount = 0;
+
 export async function loadProfileReplies(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileRepliesLoadCount;
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -1460,6 +1577,11 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   const res = await requestJson(url, {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
+  if (loadId !== profileRepliesLoadCount) return;
+  if (!isProfileHandleCurrent(handle)) {
+    setStoreState({ profileRepliesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileReplies: res.data.items, profileRepliesLoading: false });
     return;
@@ -1467,16 +1589,38 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   setStoreState({ profileRepliesLoading: false });
 }
 
+function isProfileHandleCurrent(handle: string): boolean {
+  const cur = getStoreSnapshot();
+  const lower = handle.toLowerCase();
+  const bundle = cur.profileBundle;
+  const bundleMatches = (key: string | null) =>
+    bundle !== null &&
+    key !== null &&
+    (bundle.summary.handle.toLowerCase() === key || bundle.id.toLowerCase() === key || bundle.orgMeta?.ticker?.toLowerCase() === key);
+  return (
+    cur.route === "Profile" &&
+    (cur.profileHandle?.toLowerCase() === lower || (bundleMatches(lower) && (cur.profileHandle === null || bundleMatches(cur.profileHandle.toLowerCase()))))
+  );
+}
+
+let profileLikesLoadCount = 0;
+
 export async function loadProfileLikes(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileLikesLoadCount;
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileLikesLoading: true });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
   const res = await requestJson(url, {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
+  if (loadId !== profileLikesLoadCount) return;
+  if (!isProfileHandleCurrent(handle)) {
+    setStoreState({ profileLikesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileLikes: res.data.items, profileLikesLoading: false });
     return;
@@ -1484,14 +1628,22 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
   setStoreState({ profileLikesLoading: false });
 }
 
+let profileTradesLoadCount = 0;
+
 export async function loadProfileTrades(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileTradesLoadCount;
   setStoreState({ profileTradesLoading: true });
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/trades?limit=50`, {
     parse: decodeMarketTrades,
   });
+  if (loadId !== profileTradesLoadCount) return;
+  if (!isProfileHandleCurrent(handle)) {
+    setStoreState({ profileTradesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileTrades: res.data, profileTradesLoading: false });
     return;
@@ -1503,6 +1655,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const s = getStoreSnapshot();
   const bundle = s.profileBundle;
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
+  const loadId = profileLoadCount;
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
@@ -1511,6 +1664,10 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
+  if (loadId !== profileLoadCount) {
+    setStoreState({ profileLoadingMore: false });
+    return;
+  }
   if (res.ok && res.data) {
     const latest = getStoreSnapshot().profileBundle;
     if (latest && latest.id === res.data.id) {
@@ -1740,6 +1897,9 @@ async function toggleModeration(
   }
   if (!active) {
     filterAuthorOutOfFeeds(handle);
+    if (getStoreSnapshot().feedTab === "following") {
+      void loadFeed();
+    }
   }
   const cur = getStoreSnapshot();
   if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {

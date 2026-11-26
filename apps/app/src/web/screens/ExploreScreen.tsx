@@ -146,7 +146,7 @@ function buildExploreOrgItems(
     });
   }
 
-  const qLower = s.exploreQuery.trim().toLowerCase();
+  const qLower = s.exploreQuery.trim().toLowerCase().replace(/^\$(?=.)/, "");
   for (const perp of s.perps) {
     const orgId = perp.organizationId ?? perp.ticker;
     if (seenIds.has(orgId.toLowerCase()) || seenTickers.has(perp.ticker.toUpperCase())) continue;
@@ -251,7 +251,7 @@ function ExploreOrgsList({
 
 function ExploreMarketsList() {
   const s = useAppStore();
-  const qLower = s.exploreQuery.trim().toLowerCase();
+  const qLower = s.exploreQuery.trim().toLowerCase().replace(/^\$(?=.)/, "");
   const matchedPreds = qLower
     ? s.predictions.filter((m) => m.card.question.toLowerCase().includes(qLower) || m.category.toLowerCase().includes(qLower))
     : s.predictions;

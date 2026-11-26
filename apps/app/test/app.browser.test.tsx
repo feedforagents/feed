@@ -1,15 +1,43 @@
-// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
+// spec/app/navigation.md, "Story: Browse public world content without a login wall"; spec/app/navigation.md, "Story: Switch between Game mode and Social mode"; spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/auth/email.md, "Story: Request and consume a single-use email magic link safely"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { hydrateAuth } from "../src/web/store-auth.ts";
+import type { ViewerSession } from "../src/web/types.ts";
 
 const opened: Root[] = [];
 const predictionBuyBodies: string[] = [];
+const phoneStartRequests: Array<Record<string, unknown>> = [];
+const createdEventSources: Array<EventTarget> = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+const liveEventSources: EventTarget[] = [];
+let profileShouldFail = false;
+let profileShould404 = false;
+let explorePosts: typeof SAMPLE_POSTS = [];
+const fetchPaths: string[] = [];
+const POST_DELETED_VIEWER: ViewerSession = {
+  accountId: "ailon-musk",
+  handle: "ailonmusk",
+  displayName: "AIlon Musk",
+  bio: "",
+  avatarUrl: null,
+  bannerUrl: null,
+  phoneLast2: null,
+  phoneVerifiedAt: null,
+  emailMasked: null,
+  emailVerifiedAt: null,
+  uiMode: "game",
+  balanceCents: 0,
+  startingGrantCents: 0,
+  isAdmin: false,
+  isReviewer: false,
+  agentGrant: null,
+};
 
 const SAMPLE_POSTS = [
   {
@@ -57,30 +85,38 @@ const SAMPLE_POSTS = [
   },
 ];
 
+const SEED_MARKET_1 = {
+  id: "seed-market-1",
+  slotIndex: 0,
+  question: "Will OpenAGI ship Strawberry-9000 before Friday?",
+  description: "Virtual prediction market",
+  category: "tech",
+  timeframe: "1d",
+  phase: "opening",
+  yesShares: 5000,
+  noShares: 5000,
+  liquidityCents: 100_000,
+  yesPriceBps: 5000,
+  noPriceBps: 5000,
+  status: "open",
+  resolvedOutcome: null,
+  resolutionProof: null,
+  resolutionArticleId: null,
+  expiresAt: Date.now() + 3_600_000,
+  resolvedAt: null,
+  createdAt: Date.now() - 300_000,
+};
+
+const SEED_MARKET_2 = {
+  ...SEED_MARKET_1,
+  id: "seed-market-2",
+  slotIndex: 1,
+  question: "Will the city marathon break its course record this year?",
+  category: "sports",
+};
+
 const SAMPLE_MARKETS = {
-  predictions: [
-    {
-      id: "seed-market-1",
-      slotIndex: 0,
-      question: "Will OpenAGI ship Strawberry-9000 before Friday?",
-      description: "Virtual prediction market",
-      category: "tech",
-      timeframe: "1d",
-      phase: "opening",
-      yesShares: 5000,
-      noShares: 5000,
-      liquidityCents: 100_000,
-      yesPriceBps: 5000,
-      noPriceBps: 5000,
-      status: "open",
-      resolvedOutcome: null,
-      resolutionProof: null,
-      resolutionArticleId: null,
-      expiresAt: Date.now() + 3_600_000,
-      resolvedAt: null,
-      createdAt: Date.now() - 300_000,
-    },
-  ],
+  predictions: [SEED_MARKET_1, SEED_MARKET_2],
   perps: [],
   positions: {
     predictionPositions: [
@@ -192,7 +228,74 @@ const SAMPLE_TRADES = [
   },
 ];
 
-function installMockNetwork() {
+function profilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+function replyItem(id: string, authorId: string, authorHandle: string, authorDisplayName: string, content: string) {
+  return {
+    id,
+    authorId,
+    authorKind: "user",
+    authorHandle,
+    authorDisplayName,
+    avatarUrl: null,
+    content,
+    replyToPostId: "parent-post-1",
+    quotePostId: null,
+    viaClientName: null,
+    marketId: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: [],
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  };
+}
+
+function installMockNetwork(
+  options: {
+    holdHistoryRange?: string;
+    holdTradesFor?: string;
+    holdLikesFor?: string;
+    holdArticleId?: string;
+    holdLeaderboardScope?: string;
+    holdPnlRange?: string;
+    holdProfileReplies?: boolean;
+    readonly perps?: ReadonlyArray<Record<string, unknown>>;
+    readonly threadFetch?: (path: string) => Promise<Response> | null;
+  } = {},
+) {
+  const heldHistory = new Map<string, Array<() => void>>();
+  const requestedHistoryRanges = new Set<string>();
+  const heldMarkets: Array<() => void> = [];
+  let marketsHeld = false;
+  let marketsRequestedCount = 0;
+  const heldTrades = new Map<string, Array<(items: unknown[]) => void>>();
+  const requestedTrades = new Set<string>();
+  const heldLikes = new Map<string, Array<(items: unknown[]) => void>>();
+  const requestedLikes = new Set<string>();
+  const heldArticles = new Map<string, Array<() => void>>();
+  const requestedArticleIds = new Set<string>();
+  const heldLeaderboard = new Map<string, Array<() => void>>();
+  const requestedLeaderboardScopes = new Set<string>();
+  const heldPnl = new Map<string, Array<() => void>>();
+  const requestedPnlRanges = new Set<string>();
+  const heldReplies = new Map<string, Array<(res: Response) => void>>();
+  const requestedReplies = new Set<string>();
+  profileShouldFail = false;
+  profileShould404 = false;
+  explorePosts = [];
+  fetchPaths.length = 0;
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -201,14 +304,23 @@ function installMockNetwork() {
   let viewerPhoneLast2: string | null = "01";
   let viewerBalanceCents = 10500;
   let viewerIsReviewer = true;
-
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(raw, window.location.origin);
     const path = url.pathname;
+    fetchPaths.push(path);
+    const delayedThread = options.threadFetch?.(path) ?? null;
+    if (delayedThread) return delayedThread;
+    if (path === "/api/auth/phone/start") {
+      try {
+        phoneStartRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      } catch {
+        phoneStartRequests.push({});
+      }
+      return json({});
+    }
     if (path === "/api/auth/logout") {
-      signedIn = false;
       return json({ ok: true });
     }
     if (path === "/api/auth/reviewer/login") {
@@ -295,11 +407,44 @@ function installMockNetwork() {
         devSmsCodeEnabled: true,
       });
     }
+    if (path === "/api/users/alice") return json(profilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
+    if (options.holdProfileReplies && path === "/api/posts" && url.searchParams.get("filter") === "replies") {
+      const handle = url.searchParams.get("authorHandle") ?? "";
+      requestedReplies.add(handle);
+      return new Promise<Response>((resolve) => {
+        const pending = heldReplies.get(handle) ?? [];
+        pending.push(resolve);
+        heldReplies.set(handle, pending);
+      });
+    }
     if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
     if (path === "/api/articles") return json({ articles: [] });
-    if (path === "/api/markets") return json(signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: [] });
+    if (path.startsWith("/api/articles/")) {
+      const id = decodeURIComponent(path.slice("/api/articles/".length));
+      const body = { id, title: `Article ${id}`, summary: `Summary of ${id}`, body: `Body of ${id}`, publishedAt: Date.now() - 60_000 };
+      if (options.holdArticleId === id) {
+        requestedArticleIds.add(id);
+        return new Promise<Response>((resolve) => {
+          const pending = heldArticles.get(id) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldArticles.set(id, pending);
+        });
+      }
+      return json(body);
+    }
+    if (path === "/api/markets") {
+      marketsRequestedCount += 1;
+      const body = signedIn ? SAMPLE_MARKETS : { predictions: SAMPLE_MARKETS.predictions, perps: options.perps ?? [] };
+      if (marketsHeld) {
+        return new Promise<Response>((resolve) => {
+          heldMarkets.push(() => resolve(Response.json(body)));
+        });
+      }
+      return json(body);
+    }
     if (path === "/api/world/status") {
       return json({
         currentDay: 3,
@@ -313,20 +458,54 @@ function installMockNetwork() {
       });
     }
     if (path.endsWith("/history")) {
-      return json({
-        range: "1D",
+      const range = url.searchParams.get("range") ?? "1D";
+      const marketId = path.split("/")[4] ?? "";
+      const finalPriceCents = marketId === "seed-market-2" ? 3333 : range === "1D" ? 1111 : range === "1W" ? 2222 : 50;
+      const body = {
+        range,
         points: [
           { timestamp: Date.now() - 3_600_000, recordedAt: Date.now() - 3_600_000, priceCents: 46, yesPriceBps: 4600, volumeCents: 1000 },
-          { timestamp: Date.now(), recordedAt: Date.now(), priceCents: 50, yesPriceBps: 5000, volumeCents: 2500 },
+          { timestamp: Date.now(), recordedAt: Date.now(), priceCents: finalPriceCents, yesPriceBps: 5000, volumeCents: 2500 },
         ],
-      });
+      };
+      if (options.holdHistoryRange === range) {
+        requestedHistoryRanges.add(range);
+        return new Promise<Response>((resolve) => {
+          const pending = heldHistory.get(range) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldHistory.set(range, pending);
+        });
+      }
+      return json(body);
     }
     if (path.endsWith("/likes")) {
+      const handle = decodeURIComponent(path.slice("/api/users/".length, path.length - "/likes".length));
+      if (options.holdLikesFor === handle) {
+        requestedLikes.add(handle);
+        return new Promise<Response>((resolve) => {
+          const pending = heldLikes.get(handle) ?? [];
+          pending.push((items) => resolve(Response.json({ posts: items, nextCursor: null })));
+          heldLikes.set(handle, pending);
+        });
+      }
       return json({ posts: SAMPLE_POSTS, nextCursor: null });
     }
     if (path.endsWith("/trades")) {
+      if (path.startsWith("/api/users/")) {
+        const handle = decodeURIComponent(path.slice("/api/users/".length, path.length - "/trades".length));
+        if (options.holdTradesFor === handle) {
+          requestedTrades.add(handle);
+          return new Promise<Response>((resolve) => {
+            const pending = heldTrades.get(handle) ?? [];
+            pending.push((items) => resolve(Response.json({ trades: items })));
+            heldTrades.set(handle, pending);
+          });
+        }
+      }
       return json({ trades: SAMPLE_TRADES });
     }
+    if (path === "/api/users/alice") return json(profilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
     if (path.startsWith("/api/users/")) {
       const handle = decodeURIComponent(path.slice("/api/users/".length));
       return json({
@@ -350,14 +529,25 @@ function installMockNetwork() {
     }
     if (path === "/api/markets/positions/closed") return json({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
     if (path === "/api/economy/me/pnl-history") {
-      return json({
-        range: "ALL",
+      const range = url.searchParams.get("range") ?? "ALL";
+      const finalPnlCents = range === "1D" ? 11_100 : range === "1W" ? 22_200 : 1528;
+      const body = {
+        range,
         points: [
           { timestamp: Date.now() - 3_600_000, pnlCents: 0, cumulativePnlCents: 0, deltaCents: 0, kind: "baseline" },
-          { timestamp: Date.now(), pnlCents: 1528, cumulativePnlCents: 1528, deltaCents: 1528, kind: "mark_to_market" },
+          { timestamp: Date.now(), pnlCents: finalPnlCents, cumulativePnlCents: finalPnlCents, deltaCents: finalPnlCents, kind: "mark_to_market" },
         ],
-        currentNetProfitCents: 1528,
-      });
+        currentNetProfitCents: finalPnlCents,
+      };
+      if (options.holdPnlRange === range) {
+        requestedPnlRanges.add(range);
+        return new Promise<Response>((resolve) => {
+          const pending = heldPnl.get(range) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldPnl.set(range, pending);
+        });
+      }
+      return json(body);
     }
     if (path === "/api/economy/me") {
       return json({
@@ -382,10 +572,27 @@ function installMockNetwork() {
         ],
       });
     }
-    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+    if (path === "/api/explore") {
+      const query = url.searchParams.get("q") ?? "";
+      return json({
+        trending: [],
+        articles: [],
+        search: { posts: query === "" ? [] : explorePosts, accounts: [], actors: [], organizations: [], tags: [] },
+      });
+    }
     if (path === "/api/leaderboard") {
       const isChars = url.searchParams.get("scope") === "characters" || url.searchParams.get("filter") === "npcs";
-      return json(isChars ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS);
+      const scope = isChars ? "characters" : "players";
+      const body = isChars ? SAMPLE_LEADERBOARD_CHARACTERS : SAMPLE_LEADERBOARD_PLAYERS;
+      if (options.holdLeaderboardScope === scope) {
+        requestedLeaderboardScopes.add(scope);
+        return new Promise<Response>((resolve) => {
+          const pending = heldLeaderboard.get(scope) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldLeaderboard.set(scope, pending);
+        });
+      }
+      return json(body);
     }
     if (path === "/api/leaderboard/me") {
       return json({ position: { rank: 1, page: 1, totalCount: 1, totalPages: 1, entry: SAMPLE_LEADERBOARD_PLAYERS.currentUser } });
@@ -399,14 +606,116 @@ function installMockNetwork() {
     }
     if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
     if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    if (path === "/api/posts") return json({ items: [], nextCursor: null });
+    if (path.startsWith("/api/users/")) {
+      const userHandle = decodeURIComponent(path.slice("/api/users/".length));
+      if (userHandle !== "ailonmusk") {
+        if (profileShouldFail) {
+          return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
+      if (profileShould404) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "not_found", code: "not_found", message: "Profile not found." }), { status: 404 }));
+      }
+      if (profileShouldFail) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+      }
+      return json({
+        profile: {
+          id: "ailonmusk",
+          handle: "ailonmusk",
+          displayName: "AIlon Musk",
+          bio: "",
+          isParody: true,
+          followersCount: 10,
+          followingCount: 5,
+          postsCount: 1,
+          viewerFollows: false,
+          viewerMutes: false,
+          viewerBlocks: false,
+        },
+        posts: SAMPLE_POSTS,
+        nextCursor: null,
+        positions: [],
+      });
+    }
     return json({});
   };
   vi.stubGlobal("fetch", fetchMock);
 
   class StubEventSource extends EventTarget {
+    constructor() {
+      super();
+      createdEventSources.push(this);
+      liveEventSources.push(this);
+    }
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
+
+  return {
+    historyRequested: (range: string) => requestedHistoryRanges.has(range),
+    releaseHistory: (range: string) => {
+      for (const release of heldHistory.get(range)?.splice(0) ?? []) release();
+    },
+    holdMarkets: () => {
+      marketsHeld = true;
+    },
+    releaseMarkets: () => {
+      marketsHeld = false;
+      for (const release of heldMarkets.splice(0)) release();
+    },
+    marketsRequestedCount: () => marketsRequestedCount,
+    dispatchSse: (type: string, data: unknown) => {
+      const source = createdEventSources.at(-1);
+      if (!source) throw new Error("no EventSource created yet");
+      source.dispatchEvent(new MessageEvent(type, { data }));
+    },
+    tradesRequested: (handle: string) => requestedTrades.has(handle),
+    releaseTrades: (handle: string, items: unknown[]) => {
+      for (const release of heldTrades.get(handle)?.splice(0) ?? []) release(items);
+    },
+    likesRequested: (handle: string) => requestedLikes.has(handle),
+    releaseLikes: (handle: string, items: unknown[]) => {
+      for (const release of heldLikes.get(handle)?.splice(0) ?? []) release(items);
+    },
+    articleRequested: (id: string) => requestedArticleIds.has(id),
+    releaseArticle: (id: string) => {
+      for (const release of heldArticles.get(id)?.splice(0) ?? []) release();
+    },
+    leaderboardRequested: (scope: string) => requestedLeaderboardScopes.has(scope),
+    releaseLeaderboard: (scope: string) => {
+      for (const release of heldLeaderboard.get(scope)?.splice(0) ?? []) release();
+    },
+    pnlRequested: (range: string) => requestedPnlRanges.has(range),
+    releasePnl: (range: string) => {
+      for (const release of heldPnl.get(range)?.splice(0) ?? []) release();
+    },
+    repliesRequested: (handle: string) => requestedReplies.has(handle),
+    releaseReplies: (handle: string, items: unknown[]) => {
+      for (const release of heldReplies.get(handle)?.splice(0) ?? []) {
+        release(Response.json({ items, nextCursor: null }));
+      }
+    },
+    releaseLatestReplies: (handle: string, items: unknown[]) => {
+      heldReplies.get(handle)?.pop()?.(Response.json({ items, nextCursor: null }));
+    },
+  };
+}
+
+async function renderApp() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+}
+
+async function renderApp() {
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
 }
 
 beforeAll(() => {
@@ -426,17 +735,16 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
-async function mountApp() {
-  installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
+async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
+  const network = installMockNetwork(options ?? {});
+  await renderApp();
+  return network;
 }
 
-async function mountAppAtHome() {
-  await mountApp();
+async function mountAppAtHome(options?: Parameters<typeof installMockNetwork>[0]) {
+  const network = await mountApp(options);
   await act(() => storeActions.navigate("/"));
+  return network;
 }
 
 async function signInAsReviewer() {
@@ -526,7 +834,6 @@ it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/market
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));
   await signInAsReviewer();
-
   await act(() => storeActions.navigate("/"));
   await act(() => userEvent.click(page.getByRole("button", { name: /BUY NO/ }).first()));
 
@@ -573,4 +880,1285 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
   await act(() => storeActions.navigate("/settings?tab=account"));
   await expect.element(page.getByText("e***@example.com")).toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Change email" })).toBeInTheDocument();
+});
+
+it('Stale market history is dropped after switching ranges (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
+  const network = await mountApp({ holdHistoryRange: "1D" });
+
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await act(() => Promise.resolve());
+  expect(network.historyRequested("1D")).toBe(true);
+  expect(getStoreSnapshot().marketTimeRange).toBe("1D");
+
+  await act(() => storeActions.setMarketTimeRange("1W"));
+  expect(getStoreSnapshot().marketTimeRange).toBe("1W");
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(2222);
+
+  network.releaseHistory("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().marketTimeRange).toBe("1W");
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(2222);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+});
+
+it('Market refresh in flight loads the newly selected market (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
+  const network = await mountApp({ holdHistoryRange: "1D" });
+
+  await act(() => storeActions.navigate("/markets"));
+  expect(getStoreSnapshot().route).toBe("Markets");
+  await act(() => storeActions.setMarketTimeRange("1D"));
+
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await act(() => Promise.resolve());
+  expect(network.historyRequested("1D")).toBe(true);
+
+  network.releaseHistory("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-1");
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(1111);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+
+  const marketsBefore = network.marketsRequestedCount();
+  network.holdMarkets();
+  act(() => {
+    network.dispatchSse("world.tick", "{}");
+  });
+  await act(() => Promise.resolve());
+  expect(network.marketsRequestedCount()).toBe(marketsBefore + 1);
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-1");
+
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-2");
+  });
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-2");
+  expect(getStoreSnapshot().marketHistory).toEqual([]);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(true);
+
+  network.releaseMarkets();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().selectedMarketId).toBe("seed-market-2");
+
+  network.releaseHistory("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(3333);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+});
+
+it('Late trades never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdTradesFor: "alice" });
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => Promise.resolve());
+  expect(network.tradesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.tradesRequested("bob")).toBe(false);
+
+  network.releaseTrades("alice", [{ ...SAMPLE_TRADES[0], id: "alice-trade-1" }]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileTrades).toEqual([]);
+  expect(getStoreSnapshot().profileTradesLoading).toBe(false);
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileTrades.map((t) => t.id)).toEqual(["trade-1"]);
+});
+
+it('Late likes never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdLikesFor: "alice" });
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Likes" })));
+  await act(() => Promise.resolve());
+  expect(network.likesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.likesRequested("bob")).toBe(false);
+
+  network.releaseLikes("alice", [
+    {
+      ...SAMPLE_POSTS[0],
+      id: "alice-like-1",
+      content: "Stale liked post from Alice profile",
+    },
+  ]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileLikes).toEqual([]);
+  expect(getStoreSnapshot().profileLikesLoading).toBe(false);
+  await expect.element(page.getByText("Stale liked post from Alice profile")).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Likes" })));
+  await act(() => Promise.resolve());
+  expect(network.likesRequested("bob")).toBe(false);
+  expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["browser-post-1"]);
+});
+
+it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdArticleId: "article-a" });
+
+  act(() => {
+    void storeActions.loadArticle("article-a");
+  });
+  await act(() => Promise.resolve());
+  expect(network.articleRequested("article-a")).toBe(true);
+  expect(getStoreSnapshot().activeArticleId).toBe("article-a");
+
+  await act(() => storeActions.loadArticle("article-b"));
+  expect(getStoreSnapshot().activeArticleId).toBe("article-b");
+  expect(getStoreSnapshot().activeArticle?.id).toBe("article-b");
+
+  network.releaseArticle("article-a");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().activeArticleId).toBe("article-b");
+  expect(getStoreSnapshot().activeArticle?.id).toBe("article-b");
+  expect(getStoreSnapshot().articleLoading).toBe(false);
+});
+
+it('Stale leaderboard is dropped after switching filters (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountApp({ holdLeaderboardScope: "players" });
+
+  act(() => {
+    void storeActions.loadLeaderboard({ scope: "players" });
+  });
+  await act(() => Promise.resolve());
+  expect(network.leaderboardRequested("players")).toBe(true);
+
+  await act(() => storeActions.loadLeaderboard({ scope: "characters" }));
+  expect(getStoreSnapshot().leaderboardScope).toBe("characters");
+  expect(getStoreSnapshot().leaderboard[0]?.handle).toBe("ailonmusk");
+
+  network.releaseLeaderboard("players");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().leaderboardScope).toBe("characters");
+  expect(getStoreSnapshot().leaderboard[0]?.handle).toBe("ailonmusk");
+  expect(getStoreSnapshot().leaderboardLoading).toBe(false);
+});
+
+it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountApp({ holdPnlRange: "1D" });
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await signInAsReviewer();
+
+  act(() => {
+    void storeActions.loadPnlHistory("1D");
+  });
+  await act(() => Promise.resolve());
+  expect(network.pnlRequested("1D")).toBe(true);
+
+  await act(() => storeActions.loadPnlHistory("1W"));
+  expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
+  expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
+
+  network.releasePnl("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
+  expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
+  expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
+});
+
+it('Late replies never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdProfileReplies: true });
+  const openRepliesTab = async () => {
+    await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+    await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
+    await act(() => Promise.resolve());
+  };
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
+  await act(() => Promise.resolve());
+  expect(network.repliesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.repliesRequested("bob")).toBe(false);
+
+  network.releaseReplies("alice", [replyItem("alice-reply-1", "acc-alice", "alice", "Alice Aardvark", "Alice reply that must not land on Bob")]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileReplies).toEqual([]);
+  expect(getStoreSnapshot().profileRepliesLoading).toBe(false);
+  await expect.element(page.getByText("Alice reply that must not land on Bob")).not.toBeInTheDocument();
+
+  await openRepliesTab();
+  expect(network.repliesRequested("bob")).toBe(true);
+  network.releaseReplies("bob", [replyItem("bob-reply-1", "acc-bob", "bob", "Bob Badger", "Bob reply on Bob profile")]);
+  await expect.element(page.getByText("Bob reply on Bob profile")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.authorHandle)).toEqual(["bob"]);
+
+  await openRepliesTab();
+  await openRepliesTab();
+  network.releaseLatestReplies("bob", [replyItem("bob-reply-2", "acc-bob", "bob", "Bob Badger", "Newer Bob reply")]);
+  await expect.element(page.getByText("Newer Bob reply")).toBeInTheDocument();
+  network.releaseReplies("bob", [replyItem("bob-reply-stale", "acc-bob", "bob", "Bob Badger", "Stale Bob reply must not replace newer")]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.id)).toEqual(["bob-reply-2"]);
+  await expect.element(page.getByText("Stale Bob reply must not replace newer")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Newer Bob reply")).toBeInTheDocument();
+});
+
+function r37ProfilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+it('Switching profiles never shows the previous profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  let bobRequested = false;
+  let bobHeld = true;
+  const bobReleases: Array<(res: Response) => void> = [];
+  const releaseBob = () => {
+    for (const release of bobReleases.splice(0)) release(Response.json(r37ProfilePayload("acc-bob", "bob", "Bob Badger")));
+  };
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({ authenticated: false, viewer: null, acceptedCountries: ["+1", "+44"], publicAppUrl: window.location.origin });
+    }
+    if (path === "/api/users/alice") return json(r37ProfilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob" || path === "/api/users/acc-bob") {
+      bobRequested = true;
+      if (bobHeld) {
+        return new Promise<Response>((resolve) => {
+          bobReleases.push(resolve);
+        });
+      }
+      return json(r37ProfilePayload("acc-bob", "bob", "Bob Badger"));
+    }
+    if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
+    if (path === "/api/markets") return json({ predictions: SAMPLE_MARKETS.predictions, perps: [] });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], actors: [], organizations: [], tags: [] } });
+    if (path === "/api/leaderboard") return json(SAMPLE_LEADERBOARD_PLAYERS);
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("alice");
+
+  const navBob = storeActions.navigate("/u/bob");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(bobRequested).toBe(true);
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(getStoreSnapshot().profileBundle?.summary.handle).not.toBe("alice");
+  await expect.element(page.getByText("Alice Aardvark")).not.toBeInTheDocument();
+
+  bobHeld = false;
+  releaseBob();
+  await act(() => navBob);
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+  bobHeld = true;
+  bobRequested = false;
+  const refreshBob = storeActions.loadProfile();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(bobRequested).toBe(true);
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  bobHeld = false;
+  releaseBob();
+  await act(() => refreshBob);
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+});
+
+it('A failed profile refetch keeps the open profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork();
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await expect.element(page.getByText("1 post")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
+
+  profileShouldFail = true;
+  liveEventSources[0].dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileLoading).toBe(false));
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk");
+  expect(getStoreSnapshot().profileBundle?.posts.length).toBe(1);
+  expect(getStoreSnapshot().errorMessage).not.toBeNull();
+  await expect.element(page.getByText("Profile not found")).not.toBeInTheDocument();
+  await expect.element(page.getByText("1 post")).toBeInTheDocument();
+
+  profileShouldFail = false;
+  await act(async () => {
+    await storeActions.navigate("/u/ghost");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShouldFail = false;
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  profileShouldFail = true;
+  await act(async () => {
+    await storeActions.navigate("/u/other");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShouldFail = false;
+
+  await act(async () => {
+    await storeActions.navigate("/u/ailonmusk");
+  });
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("ailonmusk"));
+  profileShould404 = true;
+  liveEventSources[0].dispatchEvent(new Event("market.spot"));
+  await vi.waitFor(() => expect(getStoreSnapshot().profileBundle).toBeNull());
+  await expect.element(page.getByText("Profile not found")).toBeInTheDocument();
+  profileShould404 = false;
+});
+
+it('Explore search "$PRED" lists the PRED org in the Orgs tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork({ perps: [{ ticker: "PRED", name: "Prediction" }] });
+  setStoreState({
+    viewer: null,
+    localUiMode: "game",
+    route: "Home",
+    exploreQuery: "",
+    activeTrendingTag: null,
+    activeArticleId: null,
+    perps: [],
+    predictions: [],
+  });
+  await renderApp();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore" }).first()));
+  const search = page.getByPlaceholder("Search posts, @people, #tags, or $tickers");
+  await expect.element(search).toBeInTheDocument();
+  await act(() => userEvent.fill(search, "$PRED"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await expect.element(page.getByText("No matching organizations")).not.toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByText("Prediction")).toBeInTheDocument();
+  await expect.element(page.getByText("Organization")).toBeInTheDocument();
+
+  await act(() => userEvent.fill(search, "$"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Orgs" })));
+  await expect.element(page.getByText("No matching organizations")).toBeInTheDocument();
+  await expect.element(page.getByRole("main").getByText("Prediction")).not.toBeInTheDocument();
+});
+
+it('Explore search "$PRED" lists the PRED market in the Markets tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork({ perps: [{ ticker: "PRED", name: "Prediction" }] });
+  setStoreState({
+    viewer: null,
+    localUiMode: "game",
+    route: "Home",
+    exploreQuery: "",
+    activeTrendingTag: null,
+    activeArticleId: null,
+    perps: [],
+    predictions: [],
+  });
+  await renderApp();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore" }).first()));
+  const search = page.getByPlaceholder("Search posts, @people, #tags, or $tickers");
+  await expect.element(search).toBeInTheDocument();
+  await act(() => userEvent.fill(search, "$PRED"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Search", exact: true })));
+  await expect.element(page.getByRole("tab", { name: "Top" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Markets" })));
+  await expect.element(page.getByText("No matching markets")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Max 20x")).toBeInTheDocument();
+});
+
+// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+it('Stale chats response is dropped when a newer load lands first', async () => {
+  const chatSummary = (id: string, title: string) => ({ id, title, kind: "direct" });
+  const chatMessage = (id: string, content: string) => ({
+    id,
+    senderId: "acc-alice",
+    senderHandle: "alice",
+    senderDisplayName: "Alice Aardvark",
+    senderKind: "user",
+    content,
+    createdAt: Date.now() - 60_000,
+    reactions: [],
+  });
+  const messageRequests: string[] = [];
+  let holdChats = false;
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/chats") {
+      if (holdChats) {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json({ chats: [chatSummary("chat-stale", "Stale Chat")] }));
+        });
+      }
+      return json({ chats: [chatSummary("chat-fresh-a", "Fresh Chat A"), chatSummary("chat-fresh-b", "Fresh Chat B")] });
+    }
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/chats/chat-fresh-a/messages") {
+      messageRequests.push("chat-fresh-a");
+      return json({ messages: [chatMessage("msg-fa1", "Fresh A message")] });
+    }
+    if (path === "/api/chats/chat-fresh-b/messages") {
+      messageRequests.push("chat-fresh-b");
+      return json({ messages: [chatMessage("msg-fb1", "Fresh B message")] });
+    }
+    if (path === "/api/chats/chat-stale/messages") {
+      messageRequests.push("chat-stale");
+      return json({ messages: [chatMessage("msg-st1", "Stale chat message")] });
+    }
+    if (path === "/api/notifications") return json({ notifications: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  holdChats = true;
+  const loading = storeActions.loadChats();
+  holdChats = false;
+  await act(() => storeActions.loadChats());
+  expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().chats.map((c) => c.id)).toEqual(["chat-fresh-a", "chat-fresh-b"]);
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-fresh-a");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Fresh A message"]);
+  expect(messageRequests).not.toContain("chat-stale");
+  expect(getStoreSnapshot().chatsLoading).toBe(false);
+});
+
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
+it('Stale markets response is dropped when a newer load lands first', async () => {
+  const marketPayload = (id: string, question: string) => ({
+    predictions: [
+      {
+        id,
+        slotIndex: 0,
+        question,
+        description: "Virtual prediction market",
+        category: "tech",
+        timeframe: "1d",
+        phase: "opening",
+        yesShares: 500,
+        noShares: 500,
+        liquidityCents: 100_000,
+        yesProbabilityBps: 5000,
+        noProbabilityBps: 5000,
+        status: "open",
+        resolvedOutcome: null,
+        resolutionProof: null,
+        resolutionArticleId: null,
+        expiresAt: Date.now() + 3_600_000,
+        resolvedAt: null,
+        createdAt: Date.now() - 300_000,
+      },
+    ],
+    perps: [],
+    positions: [],
+    economy: null,
+  });
+  let holdMarkets = false;
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/markets") {
+      if (holdMarkets) {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json(marketPayload("seed-market-stale", "Stale market question?")));
+        });
+      }
+      return json(marketPayload("seed-market-fresh", "Fresh market question?"));
+    }
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  holdMarkets = true;
+  const loading = storeActions.loadMarkets();
+  holdMarkets = false;
+  await act(() => storeActions.loadMarkets());
+  expect(getStoreSnapshot().predictions.map((m) => m.card.id)).toEqual(["seed-market-fresh"]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().predictions.map((m) => m.card.id)).toEqual(["seed-market-fresh"]);
+  expect(getStoreSnapshot().predictions.map((m) => m.card.question)).toEqual(["Fresh market question?"]);
+  expect(getStoreSnapshot().marketsLoading).toBe(false);
+});
+
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"
+it('Stale notifications response is dropped after mark all read', async () => {
+  const unreadItem = {
+    id: "notif-race-1",
+    kind: "like",
+    title: "AIlon Musk liked your post",
+    actorHandle: "ailonmusk",
+    isRead: false,
+    createdAt: Date.now() - 60_000,
+  };
+  let holdNotifications = false;
+  let resolveHeld: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input, init) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/notifications/read") return json({});
+    if (path === "/api/notifications") {
+      if (init?.method === "POST") return json({});
+      if (holdNotifications) {
+        return new Promise<Response>((resolve) => {
+          resolveHeld = () => resolve(Response.json({ notifications: [unreadItem] }));
+        });
+      }
+      return json({ notifications: [unreadItem] });
+    }
+    if (path === "/api/chats") return json({ chats: [] });
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  await act(() => storeActions.loadNotifications());
+  expect(getStoreSnapshot().unreadNotifications).toBe(1);
+  expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([false]);
+
+  holdNotifications = true;
+  const loading = storeActions.loadNotifications();
+  await act(() => storeActions.markAllNotificationsRead());
+  expect(getStoreSnapshot().unreadNotifications).toBe(0);
+  expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([true]);
+
+  resolveHeld?.();
+  await act(() => loading);
+
+  expect(getStoreSnapshot().unreadNotifications).toBe(0);
+  expect(getStoreSnapshot().notifications.map((n) => n.item.read)).toEqual([true]);
+  expect(getStoreSnapshot().notificationsLoading).toBe(false);
+});
+
+it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  installMockNetwork();
+  explorePosts = [SAMPLE_POSTS[0]];
+  await renderApp();
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+  const dispatchPostDeletedAndExpectGone = async () => {
+    liveEventSources[0].dispatchEvent(
+      new MessageEvent("post.deleted", {
+        data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
+      }),
+    );
+    await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+  };
+  const feedFetchesBefore = fetchPaths.filter((path) => path === "/api/feed").length;
+  await dispatchPostDeletedAndExpectGone();
+  expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedFetchesBefore);
+  await act(async () => {
+    await storeActions.navigate("/explore");
+    await storeActions.loadExplore("XTRPC");
+  });
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+
+  act(() => {
+    setStoreState({ viewer: POST_DELETED_VIEWER, profileHandle: "ailonmusk" });
+  });
+  await act(async () => {
+    await storeActions.loadProfile("ailonmusk");
+  });
+  const loaded = getStoreSnapshot().profileBundle;
+  expect(loaded?.posts?.length).toBe(1);
+  expect(loaded?.posts[0]?.card.id).toBe(SAMPLE_POSTS[0].id);
+  const firstPost = loaded?.posts[0];
+  if (firstPost !== undefined) {
+    const secondPost = { ...firstPost, card: { ...firstPost.card, id: "browser-post-2" } };
+    act(() => {
+      const bundle = getStoreSnapshot().profileBundle;
+      if (bundle !== null) {
+        setStoreState({ profileBundle: { ...bundle, posts: [...bundle.posts, secondPost] } });
+      }
+    });
+  }
+  expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(2);
+
+  const fetchCallsBefore = fetchPaths.length;
+  await dispatchPostDeletedAndExpectGone();
+  expect(getStoreSnapshot().profileBundle).not.toBeNull();
+  expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
+  expect(fetchPaths.length).toBe(fetchCallsBefore);
+
+  liveEventSources[0].dispatchEvent(
+    new MessageEvent("post.created", {
+      data: JSON.stringify({
+        type: "post.created",
+        postId: "browser-post-2",
+        authorId: "ailonmusk",
+        authorKind: "npc",
+        replyToPostId: null,
+        quotePostId: null,
+        createdAt: Date.now(),
+      }),
+    }),
+  );
+  expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
+  expect(fetchPaths.length).toBe(fetchCallsBefore);
+});
+
+function chatMessage(id: string, content: string) {
+  return {
+    id,
+    senderId: "acc-alice",
+    senderHandle: "alice",
+    senderDisplayName: "Alice Aardvark",
+    senderKind: "user",
+    content,
+    createdAt: Date.now() - 60_000,
+    reactions: [],
+  };
+}
+
+// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+it('Stale chat messages are dropped after switching chats', async () => {
+  let chatARequested = false;
+  let resolveChatA: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/chats/chat-a/messages") {
+      chatARequested = true;
+      return new Promise<Response>((resolve) => {
+        resolveChatA = () => resolve(Response.json({ messages: [chatMessage("msg-a1", "Chat A message")] }));
+      });
+    }
+    if (path === "/api/chats/chat-b/messages") {
+      return json({ messages: [chatMessage("msg-b1", "Chat B message")] });
+    }
+    if (path === "/api/chats") return json({ chats: [] });
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/notifications") return json({ notifications: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  const loadingA = storeActions.selectChat("chat-a");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(chatARequested).toBe(true);
+
+  await act(() => storeActions.selectChat("chat-b"));
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+
+  resolveChatA?.();
+  await act(() => loadingA);
+
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+});
+
+// spec/app/gameplayJourney.md, "Story: Walk the full Feed gameplay loop from visitor to settlement"
+it('Chat switch survives a background refresh of the old chat', async () => {
+  const chatBReleases: Array<(res: Response) => void> = [];
+  const releaseChatB = () => {
+    for (const release of chatBReleases.splice(0)) {
+      release(Response.json({ messages: [chatMessage("msg-b1", "Chat B message")] }));
+    }
+  };
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: true,
+        viewer: { accountId: "acc-me", handle: "me", displayName: "Me" },
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/chats/chat-a/messages") {
+      return json({ messages: [chatMessage("msg-a1", "Chat A message")] });
+    }
+    if (path === "/api/chats/chat-b/messages") {
+      return new Promise<Response>((resolve) => {
+        chatBReleases.push(resolve);
+      });
+    }
+    if (path === "/api/chats") {
+      return json({
+        chats: [
+          { id: "chat-a", title: "Chat A", kind: "direct" },
+          { id: "chat-b", title: "Chat B", kind: "direct" },
+        ],
+      });
+    }
+    if (path === "/api/chats/alpha-invites") return json({ invites: [] });
+    if (path === "/api/notifications") return json({ notifications: [] });
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], replies: [] });
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+  await act(() => hydrateAuth());
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acc-me");
+
+  await act(() => storeActions.selectChat("chat-a"));
+  await act(() => storeActions.navigate("/chats"));
+  await expect.element(page.getByRole("heading", { name: "Chat A" })).toBeInTheDocument();
+  await expect.element(page.getByText("Chat A message")).toBeInTheDocument();
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-a");
+
+  await act(() => userEvent.click(page.getByRole("button", { name: /Chat B/ })));
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+
+  const refreshing = storeActions.loadChats();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  releaseChatB();
+  await act(() => refreshing);
+
+  await expect.element(page.getByRole("heading", { name: "Chat B" })).toBeInTheDocument();
+  await expect.element(page.getByText("Chat B message")).toBeInTheDocument();
+  await expect.element(page.getByText("Chat A message")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+
+  await act(() => storeActions.loadChatMessages("chat-a"));
+  await expect.element(page.getByRole("heading", { name: "Chat B" })).toBeInTheDocument();
+  await expect.element(page.getByText("Chat A message")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
+});
+
+function profilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+it('Stale profile response is dropped after navigating on (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  let aliceRequested = false;
+  const aliceReleases: Array<(res: Response) => void> = [];
+  const releaseAlice = (res: Response) => {
+    for (const release of aliceReleases.splice(0)) release(res);
+  };
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/users/alice") {
+      aliceRequested = true;
+      return new Promise<Response>((resolve) => {
+        aliceReleases.push(resolve);
+      });
+    }
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const navAlice = storeActions.navigate("/u/alice");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(aliceRequested).toBe(true);
+  expect(getStoreSnapshot().profileHandle).toBe("alice");
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+  releaseAlice(Response.json(profilePayload("acc-alice", "alice", "Alice Aardvark")));
+  await act(() => navAlice);
+
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  await expect.element(page.getByText("Alice Aardvark")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+  expect(getStoreSnapshot().profileLoading).toBe(false);
+
+  const navAliceAgain = storeActions.navigate("/u/alice");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileHandle).toBe("alice");
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+  releaseAlice(new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } }));
+  await act(() => navAliceAgain);
+
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+  expect(getStoreSnapshot().profileLoading).toBe(false);
+  expect(getStoreSnapshot().errorMessage).toBeNull();
+});
+
+function profilePost(id: string, content: string) {
+  return {
+    id,
+    authorId: "acc-bob",
+    authorKind: "user",
+    authorHandle: "bob",
+    authorDisplayName: "Bob Badger",
+    avatarUrl: null,
+    isParody: false,
+    parodyLabel: null,
+    content,
+    replyToPostId: null,
+    quotePostId: null,
+    viaClientName: null,
+    marketId: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: [],
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  };
+}
+
+function profilePayloadWithPosts(posts: unknown[], nextCursor: string | null) {
+  return {
+    profile: { id: "acc-bob", handle: "bob", displayName: "Bob Badger", kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts,
+    positions: {},
+    nextCursor,
+  };
+}
+
+it('Stale profile page is dropped after a profile refresh (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const bobNew = profilePost("bob-new", "Bob newest post.");
+  const bobOne = profilePost("bob-1", "Bob first page post.");
+  const stalePost = profilePost("bob-stale", "Bob stale page post.");
+  let refreshed = false;
+  let resolveStalePage: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw, window.location.origin);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/users/bob") {
+      if (url.searchParams.get("cursor")) {
+        return new Promise<Response>((resolve) => {
+          resolveStalePage = () => resolve(Response.json(profilePayloadWithPosts([stalePost], "bob-cursor-stale")));
+        });
+      }
+      return refreshed
+        ? json(profilePayloadWithPosts([bobNew, bobOne], "bob-cursor-2"))
+        : json(profilePayloadWithPosts([bobNew], "bob-cursor-1"));
+    }
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.loadProfile("bob"));
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new"]);
+  expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-1");
+
+  const loadingMore = storeActions.loadMoreProfilePosts();
+  refreshed = true;
+  await act(() => storeActions.loadProfile("bob"));
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new", "bob-1"]);
+  expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-2");
+
+  resolveStalePage?.();
+  await act(() => loadingMore);
+
+  await expect.element(page.getByText("Bob stale page post.")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new", "bob-1"]);
+  expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-2");
+  expect(getStoreSnapshot().profileLoadingMore).toBe(false);
+});
+
+it('Phone SMS door sends national numbers as E.164 (spec/app/onboarding.md, "Story: Sign in through the Phone SMS door, AI Agent SKILL.md door, or Reviewer link")', async () => {
+  phoneStartRequests.length = 0;
+  await mountApp();
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  const join = page.getByRole("dialog", { name: "Join Feed" });
+  await expect.element(join).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Phone" })));
+
+  await act(() => userEvent.click(page.getByRole("combobox", { name: "Country" })));
+  await act(() => userEvent.click(page.getByRole("option", { name: "United Kingdom (+44)" })));
+  await act(() => userEvent.fill(page.getByLabelText("Mobile number (non-VoIP)"), "07700900123"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Send 6-digit SMS code" })));
+  await expect.element(page.getByLabelText("6-digit SMS code")).toBeInTheDocument();
+  expect(phoneStartRequests).toHaveLength(1);
+  expect(phoneStartRequests[0]?.phoneE164).toBe("+447700900123");
+
+  await act(() => userEvent.click(join.getByRole("button", { name: "Close" })));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await expect.element(page.getByRole("dialog", { name: "Join Feed" })).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Phone" })));
+  await act(() => userEvent.click(page.getByRole("combobox", { name: "Country" })));
+  await act(() => userEvent.click(page.getByRole("option", { name: "France (+33)" })));
+  await act(() => userEvent.fill(page.getByLabelText("Mobile number (non-VoIP)"), "06 12 34 56 78"));
+  await act(() => userEvent.click(page.getByRole("button", { name: "Send 6-digit SMS code" })));
+  await expect.element(page.getByLabelText("6-digit SMS code")).toBeInTheDocument();
+  expect(phoneStartRequests).toHaveLength(2);
+  expect(phoneStartRequests[1]?.phoneE164).toBe("+33612345678");
+});
+
+it('Social-mode Back lands on Home with a matching URL (spec/app/navigation.md, "Story: Switch between Game mode and Social mode")', async () => {
+  await mountApp();
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  const marketsButton = page.getByRole("button", { name: "Markets", exact: true }).first();
+  await act(() => userEvent.click(marketsButton));
+  await expect.element(page.getByRole("heading", { name: "Markets", exact: true }).first()).toBeInTheDocument();
+  await vi.waitFor(() => {
+    expect(window.location.pathname).toBe("/markets");
+  });
+
+  const modeSwitch = page.getByRole("switch", { name: "Social mode" }).first();
+  await act(() => userEvent.click(modeSwitch));
+  await vi.waitFor(() => {
+    expect(window.location.pathname).toBe("/");
+  });
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+
+  const pushState = vi.spyOn(window.history, "pushState");
+  const replaceState = vi.spyOn(window.history, "replaceState");
+  const popped = new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => resolve(), { once: true });
+  });
+  window.history.back();
+  await act(() => popped);
+  expect(window.location.pathname).toBe("/");
+  expect(pushState).not.toHaveBeenCalled();
+  expect(replaceState).toHaveBeenCalledTimes(1);
+  expect(getStoreSnapshot().route).toBe("Home");
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  await expect.element(page.getByRole("heading", { name: "Markets", exact: true }).first()).not.toBeInTheDocument();
+
+  const poppedAgain = new Promise<void>((resolve) => {
+    window.addEventListener("popstate", () => resolve(), { once: true });
+  });
+  window.history.back();
+  await act(() => poppedAgain);
+  expect(window.location.pathname).toBe("/");
+  expect(pushState).not.toHaveBeenCalled();
+  expect(getStoreSnapshot().route).toBe("Home");
+  pushState.mockRestore();
+  replaceState.mockRestore();
+});
+
+const SAMPLE_THREAD = {
+  post: SAMPLE_POSTS[0],
+  parentPost: null,
+  replies: [],
+};
+
+const SAMPLE_THREAD_B = {
+  post: { ...SAMPLE_POSTS[0], id: "browser-post-2", content: "Second post for the stale thread fetch probe.", createdAt: Date.now() - 30_000 },
+  parentPost: null,
+  replies: [],
+};
+
+async function openThreadDetail() {
+  await renderApp();
+
+  const homeButton = page.getByRole("button", { name: "Home", exact: true }).first();
+  await act(() => userEvent.click(homeButton));
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+  const replyButton = page.getByRole("button", { name: /^Reply/ }).first();
+  await act(() => userEvent.click(replyButton));
+  await expect.element(page.getByRole("heading", { name: "Post", exact: true })).toBeInTheDocument();
+}
+
+it('Thread close during load stays closed (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const threadGate = { release: () => {} };
+  let threadConsumed = false;
+  const threadBody = Response.json(SAMPLE_THREAD);
+  const readThreadBody = threadBody.text.bind(threadBody);
+  threadBody.text = async () => {
+    threadConsumed = true;
+    return readThreadBody();
+  };
+  const threadResponse = new Promise<Response>((resolve) => {
+    threadGate.release = () => resolve(threadBody);
+  });
+  installMockNetwork({ threadFetch: (path) => (path.startsWith("/api/posts/") ? threadResponse : null) });
+  await openThreadDetail();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Back" }).first()));
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().route).toBe("Home");
+  });
+
+  threadGate.release();
+  await vi.waitFor(() => {
+    expect(threadConsumed).toBe(true);
+  });
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().activeThread).toBeNull();
+  expect(getStoreSnapshot().threadLoading).toBe(false);
+  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+});
+
+it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const gates = new Map<string, { release: () => void }>();
+  const threadResponses = new Map<string, Promise<Response>>();
+  for (const [id, thread] of [
+    ["browser-post-1", SAMPLE_THREAD],
+    ["browser-post-2", SAMPLE_THREAD_B],
+  ] as const) {
+    const gate = { release: () => {} };
+    threadResponses.set(
+      id,
+      new Promise<Response>((resolve) => {
+        gate.release = () => resolve(Response.json(thread));
+      }),
+    );
+    gates.set(id, gate);
+  }
+  installMockNetwork({
+    threadFetch: (path) => {
+      const id = path.startsWith("/api/posts/") ? decodeURIComponent(path.slice("/api/posts/".length)) : null;
+      return id === null ? null : (threadResponses.get(id) ?? null);
+    },
+  });
+  await openThreadDetail();
+
+  act(() => {
+    void storeActions.openThread("browser-post-2");
+  });
+  gates.get("browser-post-2")?.release();
+  gates.get("browser-post-1")?.release();
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().activeThread?.post.card.id).toBe("browser-post-2");
+  });
+  await expect.element(page.getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
 });
