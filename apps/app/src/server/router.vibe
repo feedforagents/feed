@@ -720,6 +720,7 @@ effect function handleAuthRoute(
       )
     }
     const grant = try getActiveAgentGrant(session.accountId)
+  return jsonResponse(
           {
         authenticated: true,
         viewer: {
@@ -731,7 +732,8 @@ effect function handleAuthRoute(
           bannerUrl: profile.bannerUrl,
           phoneLast2: profile.phoneLast2,
           uiMode: profile.uiMode,
-          startingGrantCents: profile.startingGrantCents,
+          balanceCents: profile.balanceCents,
+    startingGrantCents: profile.startingGrantCents,
           isAdmin: profile.isAdmin,
           isReviewer: profile.isReviewer,
           agentGrant: grant
