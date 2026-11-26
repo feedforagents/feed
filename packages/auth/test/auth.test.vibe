@@ -26,6 +26,7 @@ import {
   getLoopbackCode,
   getLoopbackMagicLink,
   getRateLimitStatus,
+  hashEmail,
   hashReviewerPassword,
   isDisallowedRemoteHost,
   lookupDeviceCodeForUser,
@@ -1174,9 +1175,10 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
       ipAddress: "203.0.113.11",
       config: raceConfig
     })
+    const raceHash = try hashEmail(emailConfig.digestKey, "raceparallel@example.com")
     const raceRows = try sqlQuery(
-      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_masked = $1 ORDER BY created_at",
-      ["r***@example.com"]
+      "SELECT id, superseded_at FROM feed_email_magic_links WHERE email_hash = $1 ORDER BY created_at",
+      [raceHash]
     )
     const raceSends = dispatchedMessages.filter((message) => message.to === "raceparallel@example.com")
 
