@@ -624,6 +624,7 @@ export effect function listClosedPositions(input: {
       const closedAt = toInt(row.closed_at)
       let deployedMarginCents = 0
       let deployedSizeCents = 0
+      let deployedFeeCents = 0
       for (const entry of perpEntryRows) {
         if (requiredText(entry.ticker) !== ticker) continue
         const entryTs = toInt(entry.created_at)
@@ -635,8 +636,9 @@ export effect function listClosedPositions(input: {
           : 0
         deployedMarginCents += entryMargin
         deployedSizeCents += toInt(entry.notional_cents)
+        deployedFeeCents += fee
       }
-      const costBasisCents = Math.max(remainingMarginCents, deployedMarginCents)
+      const costBasisCents = Math.max(remainingMarginCents, deployedMarginCents) + deployedFeeCents
       const totalSizeCents = Math.max(remainingSizeCents, deployedSizeCents)
       const realizedPnlCents = toInt(row.realized_pnl_cents)
       const payoutCents = Math.max(0, costBasisCents + realizedPnlCents)
