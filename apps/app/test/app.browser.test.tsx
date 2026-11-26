@@ -211,7 +211,7 @@ function profilePayload(id: string, handle: string, displayName: string) {
   };
 }
 
-function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?: string } = {}) {
+function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?: string; holdLikesFor?: string } = {}) {
   const heldHistory = new Map<string, Array<() => void>>();
   const requestedHistoryRanges = new Set<string>();
   const heldMarkets: Array<() => void> = [];
@@ -219,6 +219,8 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
   let marketsRequestedCount = 0;
   const heldTrades = new Map<string, Array<(items: unknown[]) => void>>();
   const requestedTrades = new Set<string>();
+  const heldLikes = new Map<string, Array<(items: unknown[]) => void>>();
+  const requestedLikes = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -369,6 +371,15 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
       return json(body);
     }
     if (path.endsWith("/likes")) {
+      const handle = decodeURIComponent(path.slice("/api/users/".length, path.length - "/likes".length));
+      if (options.holdLikesFor === handle) {
+        requestedLikes.add(handle);
+        return new Promise<Response>((resolve) => {
+          const pending = heldLikes.get(handle) ?? [];
+          pending.push((items) => resolve(Response.json({ posts: items, nextCursor: null })));
+          heldLikes.set(handle, pending);
+        });
+      }
       return json({ posts: SAMPLE_POSTS, nextCursor: null });
     }
     if (path.endsWith("/trades")) {
@@ -481,6 +492,7 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
       marketsHeld = true;
     },
     releaseMarkets: () => {
+      marketsHeld = false;
       for (const release of heldMarkets.splice(0)) release();
     },
     marketsRequestedCount: () => marketsRequestedCount,
@@ -492,6 +504,10 @@ function installMockNetwork(options: { holdHistoryRange?: string; holdTradesFor?
     tradesRequested: (handle: string) => requestedTrades.has(handle),
     releaseTrades: (handle: string, items: unknown[]) => {
       for (const release of heldTrades.get(handle)?.splice(0) ?? []) release(items);
+    },
+    likesRequested: (handle: string) => requestedLikes.has(handle),
+    releaseLikes: (handle: string, items: unknown[]) => {
+      for (const release of heldLikes.get(handle)?.splice(0) ?? []) release(items);
     },
   };
 }
@@ -758,4 +774,38 @@ it('Late trades never land on another profile (spec/app/navigation.md, "Story: B
   await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
   await act(() => Promise.resolve());
   expect(getStoreSnapshot().profileTrades.map((t) => t.id)).toEqual(["trade-1"]);
+});
+
+it('Late likes never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdLikesFor: "alice" });
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Likes" })));
+  await act(() => Promise.resolve());
+  expect(network.likesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.likesRequested("bob")).toBe(false);
+
+  network.releaseLikes("alice", [
+    {
+      ...SAMPLE_POSTS[0],
+      id: "alice-like-1",
+      content: "Stale liked post from Alice profile",
+    },
+  ]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileLikes).toEqual([]);
+  expect(getStoreSnapshot().profileLikesLoading).toBe(false);
+  await expect.element(page.getByText("Stale liked post from Alice profile")).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Likes" })));
+  await act(() => Promise.resolve());
+  expect(network.likesRequested("bob")).toBe(false);
+  expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["browser-post-1"]);
 });
