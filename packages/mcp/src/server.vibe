@@ -246,6 +246,15 @@ function clampCount(value: number | undefined, fallback: number, max: number): n
   return value > max ? max : value
 }
 
+function mcpClientIp(request: Request): string | undefined {
+  const cfIp = request.headers.get("cf-connecting-ip")?.trim()
+  if (cfIp !== undefined && cfIp !== "") return cfIp
+  const realIp = request.headers.get("x-real-ip")?.trim()
+  if (realIp !== undefined && realIp !== "") return realIp
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+  return forwarded !== undefined && forwarded !== "" ? forwarded : undefined
+}
+
 function toJsonRpcId(raw: unknown): JsonRpcId {
   if (typeof raw === "string" || typeof raw === "number" || raw === null) return raw
   return null
@@ -549,7 +558,8 @@ effect function executePublicWorldTool(
   toolName: "about_feed" | "how_to_play" | "start_sign_in" | "check_sign_in",
   args: Record<string, unknown>,
   baseOrigin: string,
-  authConfig: AuthRuntimeConfig
+  authConfig: AuthRuntimeConfig,
+  ipAddress: string | undefined
 ): object!(InvalidRpcParamsFailure | McpFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
   switch (toolName) {
     case "about_feed": {
@@ -608,7 +618,8 @@ effect function executePublicWorldTool(
         clientName,
         scope: scopeString,
         resource: `${baseOrigin}/mcp`,
-        origin: baseOrigin
+        origin: baseOrigin,
+        ...(ipAddress === undefined ? {} : { ipAddress, digestKey: authConfig.digestKey })
       })
       return {
         status: "pending",
@@ -951,7 +962,8 @@ effect function executePublicTool(
   args: Record<string, unknown>,
   origin: string,
   authorizationHeader: string | undefined,
-  authConfig: AuthRuntimeConfig
+  authConfig: AuthRuntimeConfig,
+  ipAddress: string | undefined
 ): object!(InvalidRpcParamsFailure | McpFailure | SocialFailure | MarketFailure | AuthFailure | StoreFailure)!Store {
   const baseOrigin = normalizeOrigin(origin)
   const viewer = try resolveOptionalViewer(authorizationHeader, authConfig)
@@ -961,7 +973,7 @@ effect function executePublicTool(
     case "how_to_play":
     case "start_sign_in":
     case "check_sign_in":
-      return try executePublicWorldTool(definition.name, args, baseOrigin, authConfig)
+      return try executePublicWorldTool(definition.name, args, baseOrigin, authConfig, ipAddress)
     case "get_post":
     case "get_replies":
     case "get_user_posts":
@@ -1726,6 +1738,7 @@ effect function handleToolsCall(input: {
   readonly origin: string
   readonly authorizationHeader: string | undefined
   readonly authConfig: AuthRuntimeConfig
+  readonly ipAddress: string | undefined
 }): Response!StoreFailure!Store {
   const toolName = asOptionalString(input.params.name)
   if (toolName === undefined) {
@@ -1743,7 +1756,7 @@ effect function handleToolsCall(input: {
 
   const runTool = effect {
     if (isPublicMcpTool(specTool)) {
-      const payload = try executePublicTool(definition, validated.args, input.origin, input.authorizationHeader, input.authConfig)
+      const payload = try executePublicTool(definition, validated.args, input.origin, input.authorizationHeader, input.authConfig, input.ipAddress)
       const result: CallToolResult = mcpToolResult(payload)
       return jsonRpcSuccessResponse(input.id, result)
     }
@@ -1949,7 +1962,8 @@ export effect function handleMcpRequest(input: {
         params,
         origin: baseOrigin,
         authorizationHeader,
-        authConfig: input.authConfig
+        authConfig: input.authConfig,
+        ipAddress: mcpClientIp(input.request)
       })
     }
     default:

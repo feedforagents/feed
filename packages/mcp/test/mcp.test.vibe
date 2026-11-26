@@ -160,10 +160,11 @@ effect function requireSkillResponse(pathAndQuery: string, method = "GET") {
   return response
 }
 
-effect function callMcp(body: unknown, authConfig: AuthRuntimeConfig, token?: string) {
+effect function callMcp(body: unknown, authConfig: AuthRuntimeConfig, token?: string, extraHeaders?: Record<string, string>) {
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    accept: "application/json, text/event-stream"
+    accept: "application/json, text/event-stream",
+    ...(extraHeaders ?? {})
   }
   if (token !== undefined) {
     headers.authorization = `Bearer ${token}`
@@ -183,7 +184,8 @@ effect function callMcpTool(
   name: string,
   args: Record<string, unknown>,
   authConfig: AuthRuntimeConfig,
-  token?: string
+  token?: string,
+  extraHeaders?: Record<string, string>
 ) {
   return try callMcp(
     {
@@ -193,7 +195,8 @@ effect function callMcpTool(
       params: { name, arguments: args }
     },
     authConfig,
-    token
+    token,
+    extraHeaders
   )
 }
 
@@ -215,6 +218,14 @@ function unwrapToolPayload(res: McpCallResult): Record<string, unknown> {
 
 function unwrapToolError(res: McpCallResult): Record<string, unknown> {
   return unwrapToolResult(res, true)
+}
+
+function isRateLimitedToolResult(res: McpCallResult): boolean {
+  const result = res.body.result as {
+    readonly isError?: boolean
+    readonly structuredContent?: Record<string, unknown>
+  } | undefined
+  return result?.isError === true && result?.structuredContent?.error === "rate_limited"
 }
 
 effect function onboardPhoneUser(
@@ -1088,4 +1099,26 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       assert.isNumber(perpEvents[2]?.markPriceCents)
     })
   }
+}))
+
+it.effect('MCP start_sign_in enforces the same 30/hr per-IP device-code budget as the web route (spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP")', () => withSeededWorld(effect (authConfig) => {
+  const limitedIp = { "cf-connecting-ip": "203.0.113.99" }
+  const limitedOutcomes: Array<string> = []
+  for (let i = 0; i < 31; i += 1) {
+    const res = try callMcpTool(i + 1, "start_sign_in", { clientName: "Rate Limit Probe" }, authConfig, undefined, limitedIp)
+    limitedOutcomes.push(isRateLimitedToolResult(res) ? "rate_limited" : "ok")
+  }
+  const unlimitedOutcomes: Array<string> = []
+  for (let i = 0; i < 31; i += 1) {
+    const res = try callMcpTool(100 + i, "start_sign_in", { clientName: "No IP Probe" }, authConfig)
+    unlimitedOutcomes.push(isRateLimitedToolResult(res) ? "rate_limited" : "ok")
+  }
+  try check(() => assert.deepStrictEqual(
+    {
+      firstThirtyLimitedOk: limitedOutcomes.slice(0, 30).every((outcome) => outcome === "ok"),
+      thirtyFirstLimited: limitedOutcomes[30],
+      unlimitedAllOk: unlimitedOutcomes.every((outcome) => outcome === "ok")
+    },
+    { firstThirtyLimitedOk: true, thirtyFirstLimited: "rate_limited", unlimitedAllOk: true }
+  ))
 }))
