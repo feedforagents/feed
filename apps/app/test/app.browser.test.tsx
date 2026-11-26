@@ -1790,3 +1790,197 @@ it('Chat switch survives a background refresh of the old chat', async () => {
   expect(getStoreSnapshot().selectedChatId).toBe("chat-b");
   expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["Chat B message"]);
 });
+
+function profilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+it('Stale profile response is dropped after navigating on (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  let aliceRequested = false;
+  const aliceReleases: Array<(res: Response) => void> = [];
+  const releaseAlice = (res: Response) => {
+    for (const release of aliceReleases.splice(0)) release(res);
+  };
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw, window.location.origin).pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/users/alice") {
+      aliceRequested = true;
+      return new Promise<Response>((resolve) => {
+        aliceReleases.push(resolve);
+      });
+    }
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  const navAlice = storeActions.navigate("/u/alice");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(aliceRequested).toBe(true);
+  expect(getStoreSnapshot().profileHandle).toBe("alice");
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+  releaseAlice(Response.json(profilePayload("acc-alice", "alice", "Alice Aardvark")));
+  await act(() => navAlice);
+
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  await expect.element(page.getByText("Alice Aardvark")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+  expect(getStoreSnapshot().profileLoading).toBe(false);
+
+  const navAliceAgain = storeActions.navigate("/u/alice");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileHandle).toBe("alice");
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+
+  releaseAlice(new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } }));
+  await act(() => navAliceAgain);
+
+  await expect.element(page.getByText("Bob Badger")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(getStoreSnapshot().profileBundle?.summary.handle).toBe("bob");
+  expect(getStoreSnapshot().profileLoading).toBe(false);
+  expect(getStoreSnapshot().errorMessage).toBeNull();
+});
+
+function profilePost(id: string, content: string) {
+  return {
+    id,
+    authorId: "acc-bob",
+    authorKind: "user",
+    authorHandle: "bob",
+    authorDisplayName: "Bob Badger",
+    avatarUrl: null,
+    isParody: false,
+    parodyLabel: null,
+    content,
+    replyToPostId: null,
+    quotePostId: null,
+    viaClientName: null,
+    marketId: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: [],
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  };
+}
+
+function profilePayloadWithPosts(posts: unknown[], nextCursor: string | null) {
+  return {
+    profile: { id: "acc-bob", handle: "bob", displayName: "Bob Badger", kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts,
+    positions: {},
+    nextCursor,
+  };
+}
+
+it('Stale profile page is dropped after a profile refresh (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const bobNew = profilePost("bob-new", "Bob newest post.");
+  const bobOne = profilePost("bob-1", "Bob first page post.");
+  const stalePost = profilePost("bob-stale", "Bob stale page post.");
+  let refreshed = false;
+  let resolveStalePage: (() => void) | undefined;
+  const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const fetchMock: typeof fetch = (input) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw, window.location.origin);
+    const path = url.pathname;
+    if (path === "/api/auth/me") {
+      return json({
+        authenticated: false,
+        viewer: null,
+        acceptedCountries: ["+1", "+44"],
+        publicAppUrl: window.location.origin,
+      });
+    }
+    if (path === "/api/users/bob") {
+      if (url.searchParams.get("cursor")) {
+        return new Promise<Response>((resolve) => {
+          resolveStalePage = () => resolve(Response.json(profilePayloadWithPosts([stalePost], "bob-cursor-stale")));
+        });
+      }
+      return refreshed
+        ? json(profilePayloadWithPosts([bobNew, bobOne], "bob-cursor-2"))
+        : json(profilePayloadWithPosts([bobNew], "bob-cursor-1"));
+    }
+    if (path === "/api/feed") return json(SAMPLE_POSTS);
+    if (path === "/api/markets") return json(SAMPLE_MARKETS);
+    if (path === "/api/explore") return json({ trending: [], articles: [], search: { posts: [], accounts: [], markets: [] } });
+    if (path === "/api/leaderboard") return json({ leaderboard: [] });
+    if (path === "/api/economy/packs") return json({ packs: [] });
+    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
+    return json({});
+  };
+  vi.stubGlobal("fetch", fetchMock);
+  class StubEventSource extends EventTarget {
+    close() {}
+  }
+  vi.stubGlobal("EventSource", StubEventSource);
+
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.loadProfile("bob"));
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new"]);
+  expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-1");
+
+  const loadingMore = storeActions.loadMoreProfilePosts();
+  refreshed = true;
+  await act(() => storeActions.loadProfile("bob"));
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new", "bob-1"]);
+  expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-2");
+
+  resolveStalePage?.();
+  await act(() => loadingMore);
+
+  await expect.element(page.getByText("Bob stale page post.")).not.toBeInTheDocument();
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["bob-new", "bob-1"]);
+  expect(getStoreSnapshot().profileBundle?.postsNextCursor).toBe("bob-cursor-2");
+  expect(getStoreSnapshot().profileLoadingMore).toBe(false);
+});

@@ -1507,6 +1507,8 @@ export async function clearNotifications(): Promise<void> {
   setStatusNotice("Notifications cleared.");
 }
 
+let profileLoadCount = 0;
+
 export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
@@ -1521,6 +1523,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     });
     return;
   }
+  const loadId = ++profileLoadCount;
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -1537,7 +1540,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
-  if (getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
+  if (loadId !== profileLoadCount || getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
     setStoreState({ profileBundle: res.data, profileLoading: false });
     return;
@@ -1646,6 +1649,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const s = getStoreSnapshot();
   const bundle = s.profileBundle;
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
+  const loadId = profileLoadCount;
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
@@ -1654,6 +1658,10 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const res = await requestJson(url, {
     parse: (raw) => decodeProfileBundle(raw, s.viewer?.accountId ?? null),
   });
+  if (loadId !== profileLoadCount) {
+    setStoreState({ profileLoadingMore: false });
+    return;
+  }
   if (res.ok && res.data) {
     const latest = getStoreSnapshot().profileBundle;
     if (latest && latest.id === res.data.id) {
