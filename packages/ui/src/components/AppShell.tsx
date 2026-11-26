@@ -85,7 +85,7 @@ const navConfig: { id: AppNavRoute; label: string; href: string; icon?: NavIcon;
   { id: "Explore", label: "Explore", href: "/explore", icon: Compass, mobile: true },
   { id: "Markets", label: "Markets", href: "/markets", icon: LineChart, gameOnly: true, mobile: true },
   { id: "Wallet", label: "Wallet", href: "/wallet", icon: Wallet, gameOnly: true },
-  { id: "Leaderboard", label: "Leaderboard", href: "/leaderboard", icon: Trophy, gameOnly: true },
+  { id: "Leaderboard", label: "Leaderboard", href: "/leaderboard", icon: Trophy, gameOnly: true, mobile: true },
   { id: "Chats", label: "Chats", href: "/chats", icon: MessageSquare, authOnly: true, mobile: true },
   { id: "Notifications", label: "Notifications", href: "/notifications", icon: Bell, authOnly: true, mobile: true },
   { id: "Profile", label: "Profile", href: "/profile", icon: User, authOnly: true },
