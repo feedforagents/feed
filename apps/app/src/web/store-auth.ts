@@ -10,6 +10,7 @@ import {
   notifyAuthChanged,
   persistExplainerDismissed,
   persistPendingAction,
+  persistUiMode,
   pushBrowserRoute,
   pushToast,
   readPersistedPendingAction,
@@ -688,6 +689,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   const leavingGameRoute = nextMode === "social" && (s.route === "Markets" || s.route === "Leaderboard" || s.walletView);
   if (!s.viewer) {
     syncMachineUiMode(nextMode);
+    persistUiMode(nextMode);
     if (leavingGameRoute) {
       pushBrowserRoute("Home");
     }

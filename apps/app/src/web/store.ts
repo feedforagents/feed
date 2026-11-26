@@ -637,14 +637,25 @@ export function bootStore(): void {
     await Promise.all([hydrateAuth(), loadSkillsHosts()]);
     reconnectRealtime();
     const afterAuth = getStoreSnapshot();
-    const tasks: Promise<void>[] = [loadDataForRoute(afterAuth.route, initialSearch)];
-    if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {
+    if (
+      !afterAuth.viewer &&
+      afterAuth.localUiMode === "social" &&
+      (afterAuth.route === "Markets" || afterAuth.route === "Leaderboard" || afterAuth.walletView)
+    ) {
+      setStoreState({ route: "Home", walletView: false });
+      if (typeof window !== "undefined") {
+        window.history.replaceState(null, "", "/");
+      }
+    }
+    const route = getStoreSnapshot().route;
+    const tasks: Promise<void>[] = [loadDataForRoute(route, initialSearch)];
+    if (route !== "Markets" && route !== "Leaderboard") {
       tasks.push(loadWorldStatus());
     }
-    if (afterAuth.route !== "Explore" || afterAuth.activeArticleId) {
+    if (route !== "Explore" || afterAuth.activeArticleId) {
       tasks.push(loadTrending());
     }
-    if (afterAuth.route !== "Markets" && afterAuth.route !== "Leaderboard") {
+    if (route !== "Markets" && route !== "Leaderboard") {
       if (currentUiMode(afterAuth) === "GameMode") {
         tasks.push(loadMarkets());
       } else {
@@ -652,8 +663,8 @@ export function bootStore(): void {
       }
     }
     if (afterAuth.viewer !== null) {
-      if (afterAuth.route !== "Notifications") tasks.push(loadNotifications());
-      if (afterAuth.route !== "Chats") tasks.push(loadChats(false));
+      if (route !== "Notifications") tasks.push(loadNotifications());
+      if (route !== "Chats") tasks.push(loadChats(false));
     }
     await Promise.all(tasks);
   })();
