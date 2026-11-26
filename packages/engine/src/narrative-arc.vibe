@@ -1,4 +1,4 @@
-// spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"
+// spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/narrativeArc.md, "Expired markets prepare a private draft proof or enter manual review hold"; spec/engine/narrativeArc.md, "Only admins may approve or resolve markets on manual hold"; spec/engine/narrativeArc.md, "Inductive invariants for 10 slots, unique clues, and secret isolation"
 import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
 import { resolvePredictionMarket, resolvePredictionMarketTx, type MarketFailure } from "@repo/markets"
 import { actors, organizations, type PackActor } from "@repo/pack-default"
@@ -660,6 +660,40 @@ export effect function queryPendingRecovery(tx: Tx): { readonly pendingCount: nu
   return { pendingCount, oldestPendingAt }
 }
 
+effect function moveMarketToManualHold(store: Store.Shape, marketId: string): void!StoreFailure {
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `UPDATE feed_prediction_markets SET status = 'manual_hold', phase = 'manual_hold' WHERE id = $1 AND status IN ('expired', 'awaiting_proof')`,
+      [marketId],
+    )
+    try tx.query("DELETE FROM feed_prediction_resolution_work WHERE market_id = $1", [marketId])
+  })
+}
+
+effect function recordRecoveryFailure(
+  store: Store.Shape,
+  marketId: string,
+  attempts: number,
+  errorMessage: string,
+  retryDelayMs: number,
+  nowMs: number,
+): ("manual_hold" | "retried")!StoreFailure {
+  const nextAttempts = attempts + 1
+  if (nextAttempts >= 3) {
+    try moveMarketToManualHold(store, marketId)
+    return "manual_hold"
+  }
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `UPDATE feed_prediction_resolution_work
+       SET attempts = $2, last_error = $3, next_retry_at = $4, updated_at = $5
+       WHERE market_id = $1`,
+      [marketId, nextAttempts, errorMessage, nowMs + retryDelayMs, nowMs],
+    )
+  })
+  return "retried"
+}
+
 export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!(EngineFailure | StoreFailure)!Store {
   const resolvedNow = try resolveClockNow(nowMs)
   const store = try Store
@@ -714,13 +748,7 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
     const rawSecret = toText(row.secret_outcome)
     const secretSpec = parseSecretOutcome(rawSecret)
     if (secretSpec === "SecretUnset" || attempts >= 3) {
-      try store.transaction(effect (tx: Tx) => {
-        try tx.query(
-          `UPDATE feed_prediction_markets SET status = 'manual_hold', phase = 'manual_hold' WHERE id = $1 AND status IN ('expired', 'awaiting_proof')`,
-          [marketId],
-        )
-        try tx.query("DELETE FROM feed_prediction_resolution_work WHERE market_id = $1", [marketId])
-      })
+      try moveMarketToManualHold(store, marketId)
       manualHolds += 1
       continue
     }
@@ -756,22 +784,16 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
     const body = typeof parsed?.body === "string" && parsed.body.trim().length > 0 ? parsed.body.trim() : ""
     const auditTag = declassifyResolution(secretSpec, draft)
     if (!title || !summary || !body || (auditTag !== "proof-yes" && auditTag !== "proof-no")) {
-      const nextAttempts = attempts + 1
-      const nextRetryAt = resolvedNow + Math.min(300_000, 15_000 * Math.pow(2, attempts))
-      try store.transaction(effect (tx: Tx) => {
-        if (nextAttempts >= 3) {
-          try tx.query(`UPDATE feed_prediction_markets SET status = 'manual_hold', phase = 'manual_hold' WHERE id = $1`, [marketId])
-          try tx.query("DELETE FROM feed_prediction_resolution_work WHERE market_id = $1", [marketId])
-        } else {
-          try tx.query(
-            `UPDATE feed_prediction_resolution_work
-             SET attempts = $2, last_error = $3, next_retry_at = $4, updated_at = $5
-             WHERE market_id = $1`,
-            [marketId, nextAttempts, "Proof preparation incomplete", nextRetryAt, resolvedNow],
-          )
-        }
-      })
-      if (nextAttempts >= 3) manualHolds += 1
+      const retryDelayMs = Math.min(300_000, 15_000 * Math.pow(2, attempts))
+      const failureOutcome = try recordRecoveryFailure(
+        store,
+        marketId,
+        attempts,
+        "Proof preparation incomplete",
+        retryDelayMs,
+        resolvedNow,
+      )
+      if (failureOutcome === "manual_hold") manualHolds += 1
       else retried += 1
       continue
     }
@@ -785,16 +807,16 @@ export effect function recoverExpiredMarkets(nowMs?: number): RecoveryRunResult!
       nowMs: resolvedNow,
     }) catch effect () => null
     if (settled === null) {
-      const nextAttempts = attempts + 1
-      try store.transaction(effect (tx: Tx) => {
-        try tx.query(
-          `UPDATE feed_prediction_resolution_work
-           SET attempts = $2, last_error = $3, next_retry_at = $4, updated_at = $5
-           WHERE market_id = $1`,
-          [marketId, nextAttempts, "Market settlement rejected retry", resolvedNow + 30_000, resolvedNow],
-        )
-      })
-      retried += 1
+      const failureOutcome = try recordRecoveryFailure(
+        store,
+        marketId,
+        attempts,
+        "Market settlement rejected retry",
+        30_000,
+        resolvedNow,
+      )
+      if (failureOutcome === "manual_hold") manualHolds += 1
+      else retried += 1
       continue
     }
     resolved += 1
@@ -845,13 +867,31 @@ effect function resolveHoldCommon(
       throw new EngineFailure({ code: "MANUAL_HOLD_INVALID", message: `Market ${cleanId} is not in manual_hold status.` })
     }
     const storedOutcome = parseSecretOutcome(toText(market.secret_outcome))
-    const chosenOutcome: "yes" | "no" | null =
-      explicitOutcome ?? (storedOutcome === "SecretYes" ? "yes" : storedOutcome === "SecretNo" ? "no" : null)
+    const storedSide: "yes" | "no" | null =
+      storedOutcome === "SecretYes" ? "yes" : storedOutcome === "SecretNo" ? "no" : null
+    if (!requireReason) {
+      if (storedSide === null) {
+        throw new EngineFailure({
+          code: "MANUAL_HOLD_INVALID",
+          message: "Manual hold market has no stored outcome; use overrideManualHold with an audit reason.",
+        })
+      }
+      if (explicitOutcome !== undefined && explicitOutcome !== storedSide) {
+        throw new EngineFailure({
+          code: "MANUAL_HOLD_INVALID",
+          message: "approveManualHold cannot change the stored outcome; use overrideManualHold with an audit reason.",
+        })
+      }
+    }
+    const chosenOutcome: "yes" | "no" | null = requireReason ? (explicitOutcome ?? null) : storedSide
     if (chosenOutcome === null) {
       throw new EngineFailure({ code: "MANUAL_HOLD_INVALID", message: "Manual hold market has no stored outcome; specify yes or no." })
     }
     const question = toText(market.question) ?? cleanId
     const outcomeUpper = chosenOutcome === "yes" ? "YES" : "NO"
+    if (requireReason && storedSide !== chosenOutcome) {
+      try tx.query("UPDATE feed_prediction_markets SET secret_outcome = $2 WHERE id = $1", [cleanId, outcomeUpper])
+    }
     const note = reason ? sanitizeNarrativeText(reason, 280) : "Admin approved manual-hold settlement"
     const cleanTitle = sanitizeNarrativeText(`Admin Resolution: ${sanitizeNarrativeText(question, 96)} (${outcomeUpper})`, 180)
     const cleanSummary = sanitizeNarrativeText(note, 360)
