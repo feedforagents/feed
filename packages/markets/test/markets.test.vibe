@@ -480,6 +480,25 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
       collateralCents: 400,
       leverage: 5
     })
+    const modeFlipPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip"
+    })
+    const modeFlipSlippageBlockedCode = try marketErrorCode(openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "short",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip",
+      maxSlippageBps: 600
+    }))
+    const heldAfterBlockedModeFlip = try listPerpPositions("user-alice")
     const flipped = try openPerpPosition({
       ownerId: "user-alice",
       ownerKind: "user",
@@ -528,6 +547,25 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
     )
     const bobClosed = try listUserClosedPositions("user-bob")
 
+    const modeFlipBackPreview = try previewPerpOrder({
+      ownerId: "user-alice",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip"
+    })
+    const modeFlippedBack = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 5,
+      mode: "flip",
+      maxSlippageBps: modeFlipBackPreview.priceImpactBps
+    })
+
     try check(() => assert.deepStrictEqual(
       {
         initialPrice: initialXtrpc.indexPriceCents,
@@ -553,6 +591,28 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
           flipped.position.sizeCents,
           flipped.closedPositionId === opened.positionId
         ],
+        modeFlipPreview: [
+          modeFlipPreview.action,
+          modeFlipPreview.executionPriceCents,
+          modeFlipPreview.priceImpactBps,
+          modeFlipPreview.feeCents
+        ],
+        modeFlipBlocked: [
+          modeFlipSlippageBlockedCode,
+          heldAfterBlockedModeFlip.length,
+          heldAfterBlockedModeFlip[0]?.side,
+          heldAfterBlockedModeFlip[0]?.sizeCents
+        ],
+        modeFlipBack: [
+          modeFlipBackPreview.action,
+          modeFlipBackPreview.executionPriceCents,
+          modeFlipBackPreview.priceImpactBps,
+          modeFlippedBack.action,
+          modeFlippedBack.position.side,
+          modeFlippedBack.position.sizeCents,
+          modeFlippedBack.feeCents,
+          modeFlippedBack.closedPositionId === flipped.positionId
+        ],
         funding: [
           samePeriodFunding.accruedCount,
           nextPeriodFunding.accruedCount,
@@ -576,6 +636,9 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
         addFlow: ["open", "add", "add", 10_000, 2_000],
         partialAndReduce: [false, 4_000, 6_000, "reduce", 4_000],
         flipFlow: ["flip", "short", 6_000, true],
+        modeFlipPreview: ["flip", 1_140, 952, 14],
+        modeFlipBlocked: ["SLIPPAGE_EXCEEDED", 1, "long", 4_000],
+        modeFlipBack: ["flip", 525, 1_053, "flip", "long", 10_000, 16, true],
         funding: [0, 1, 0, 1],
         liquidation: [1, true, 1, "liquidate", true, 1, "liquidated"]
       }
