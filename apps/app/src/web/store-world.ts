@@ -1480,11 +1480,17 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     });
     return;
   }
-  const switchingProfile = s.profileBundle?.summary.handle.toLowerCase() !== handle.toLowerCase();
+  const lower = handle.toLowerCase();
+  const bundle = s.profileBundle;
+  const sameProfile =
+    bundle !== null &&
+    (bundle.summary.handle.toLowerCase() === lower ||
+      bundle.id.toLowerCase() === lower ||
+      bundle.orgMeta?.ticker?.toLowerCase() === lower);
   setStoreState({
     profileLoading: true,
     profileHandle: handle,
-    ...(switchingProfile ? { profileReplies: [], profileLikes: [], profileTrades: [] } : {}),
+    ...(sameProfile ? {} : { profileBundle: null, profileReplies: [], profileLikes: [], profileTrades: [] }),
   });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}`, s);
   const res = await requestJson(url, {
