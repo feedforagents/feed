@@ -1,0 +1,144 @@
+// spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"
+import { assert, it } from "@effect/vitest"
+import { migrateFeedSchema, seedFeedWorld } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
+import {
+  AuthFailure,
+  fetchClientMetadata,
+  registerDynamicClient,
+} from "../src/index.vibe"
+
+module tcpProbeMod {
+  import { createServer } from "node:net"
+
+  /** @throws {unknown} */
+  export async function startCountingTcpProbe(): Promise<{
+    readonly port: number
+    readonly getHits: () => number
+    readonly close: () => Promise<void>
+  }> {
+    let hits = 0
+    const server = createServer((socket) => {
+      hits += 1
+      socket.destroy()
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => resolve())
+    })
+    const addr = server.address()
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0
+    return {
+      port,
+      getHits: () => hits,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    }
+  }
+}
+import { startCountingTcpProbe } from tcpProbeMod
+
+effect function captureAuthRefusal<A, E, R>(program: A!E!R): string!!R {
+  return effect {
+    const val = try program
+    return `unexpected_ok:${JSON.stringify(val)}`
+  } catch (err) => (err instanceof AuthFailure ? `${err.status}:${err.code}` : String(err))
+}
+
+it.effect(
+  'Refuse trailing-dot local FQDNs, *.localhost, and non-public IPv4 ranges in OAuth DCR and CIMD host checks (spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only")',
+  () => effect {
+    try TestClock.setTime(Date.now())
+    provide Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const blockedRedirects = [
+        "https://localhost./cb",
+        "https://sub.localhost/cb",
+        "https://sub.localhost./cb",
+        "https://metadata.google.internal./cb",
+        "https://redis.local./cb",
+        "https://intranet./cb",
+        "https://router.home.arpa/cb",
+        "https://0.0.0.0/cb",
+        "https://100.64.0.1/cb",
+        "https://100.100.100.200/cb",
+        "https://100.127.255.254/cb",
+        "https://192.0.0.1/cb",
+        "https://192.0.2.1/cb",
+        "https://192.88.99.1/cb",
+        "https://198.18.0.1/cb",
+        "https://198.19.255.254/cb",
+        "https://198.51.100.1/cb",
+        "https://203.0.113.1/cb",
+        "https://224.0.0.1/cb",
+        "https://240.0.0.1/cb",
+        "https://255.255.255.255/cb",
+      ]
+      const blockedResults: Array<string> = []
+      for (const uri of blockedRedirects) {
+        blockedResults.push(
+          try captureAuthRefusal(
+            registerDynamicClient({
+              clientName: "Disallowed Host Probe",
+              redirectUris: [uri],
+            }),
+          ),
+        )
+      }
+
+      const allowedPublicBoundaries = [
+        "https://100.63.255.254/cb",
+        "https://100.128.0.1/cb",
+        "https://172.15.255.254/cb",
+        "https://172.32.0.1/cb",
+        "https://198.17.255.254/cb",
+        "https://198.20.0.1/cb",
+        "https://223.255.255.254/cb",
+      ]
+      const registered = try registerDynamicClient({
+        clientName: "Public Boundary Client",
+        redirectUris: allowedPublicBoundaries,
+      })
+
+      const probe = try tryPromise(() => startCountingTcpProbe())
+      const cimdStatuses: Array<string> = []
+      for (const target of [
+        `https://0.0.0.0:${probe.port}/client.json`,
+        `https://localhost.:${probe.port}/client.json`,
+        `https://sub.localhost:${probe.port}/client.json`,
+      ]) {
+        cimdStatuses.push(try captureAuthRefusal(fetchClientMetadata(target)))
+      }
+      const tcpHits = try Effect.try(() => probe.getHits())
+      try tryPromise(() => probe.close())
+
+      try orDie(
+        Effect.try(() => {
+          assert.deepStrictEqual(
+            {
+              allBlockedRefused: blockedResults.every((code) => code === "400:invalid_redirect_uri"),
+              blockedCount: blockedResults.length,
+              allowedCount: registered.redirect_uris.length,
+              cimdProbe: {
+                statuses: cimdStatuses,
+                tcpHits,
+              },
+            },
+            {
+              allBlockedRefused: true,
+              blockedCount: blockedRedirects.length,
+              allowedCount: allowedPublicBoundaries.length,
+              cimdProbe: {
+                statuses: ["400:invalid_client", "400:invalid_client", "400:invalid_client"],
+                tcpHits: 0,
+              },
+            },
+          )
+        }),
+      )
+    }
+  },
+  60_000,
+)
