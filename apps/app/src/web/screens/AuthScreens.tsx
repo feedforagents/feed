@@ -233,6 +233,15 @@ export function EmailMagicLinkScreen() {
   );
 }
 
+function useScopeSelection(requestedScopes: ReadonlyArray<string>) {
+  const validInitial = requestedScopes.filter((sc) => ALL_SCOPES.some((def) => def.id === sc));
+  const [scopes, setScopes] = useState<string[]>(validInitial.length > 0 ? validInitial : ["read"]);
+  const toggleScope = (scope: string, checked: boolean) => {
+    setScopes((prev) => updateScopeSelection(prev, scope, checked));
+  };
+  return { scopes, toggleScope };
+}
+
 function DeviceApproveForm({
   userCode,
   clientName,
@@ -246,12 +255,7 @@ function DeviceApproveForm({
   readonly loading: boolean;
   readonly signedIn: boolean;
 }) {
-  const validInitial = requestedScopes.filter((sc) => ALL_SCOPES.some((def) => def.id === sc));
-  const [scopes, setScopes] = useState<string[]>(validInitial.length > 0 ? validInitial : ["read"]);
-
-  const toggleScope = (scope: string, checked: boolean) => {
-    setScopes((prev) => updateScopeSelection(prev, scope, checked));
-  };
+  const { scopes, toggleScope } = useScopeSelection(requestedScopes);
 
   return (
     <div className="flex flex-col gap-4 border-t border-border pt-4">
@@ -375,12 +379,7 @@ function ConsentScopeForm({
   readonly consent: OAuthConsentInfo;
   readonly loading: boolean;
 }) {
-  const validInitial = consent.scopes.filter((sc) => ALL_SCOPES.some((def) => def.id === sc));
-  const [scopes, setScopes] = useState<string[]>(validInitial.length > 0 ? validInitial : ["read"]);
-
-  const toggleScope = (scope: string, checked: boolean) => {
-    setScopes((prev) => updateScopeSelection(prev, scope, checked));
-  };
+  const { scopes, toggleScope } = useScopeSelection(consent.scopes);
 
   return (
     <div className="flex flex-col gap-4">

@@ -518,13 +518,17 @@ export function optStr(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
-export function num(value: unknown, fallback = 0): number {
+function parseFiniteNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim() !== "") {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return fallback;
+  return null;
+}
+
+export function num(value: unknown, fallback = 0): number {
+  return parseFiniteNumber(value) ?? fallback;
 }
 
 export function bool(value: unknown, fallback = false): boolean {
@@ -641,13 +645,7 @@ export function decodeAgentGrant(raw: unknown): AgentGrantSummary | null {
 }
 
 function optNum(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
+  return value === null || value === undefined ? null : parseFiniteNumber(value);
 }
 
 export function decodeViewer(raw: unknown): ViewerSession | null {
@@ -1975,17 +1973,18 @@ export function decodeSkillHosts(raw: unknown): AppSkillsPayload {
   };
 }
 
+function decodeScopeList(scopeRaw: unknown): ReadonlyArray<string> {
+  if (Array.isArray(scopeRaw)) return scopeRaw.filter((s): s is string => typeof s === "string");
+  if (typeof scopeRaw === "string") return scopeRaw.trim().split(/\s+/u).filter(Boolean);
+  return ["read", "social:write", "messages", "trade"];
+}
+
 export function decodeOAuthConsent(raw: unknown): OAuthConsentInfo | null {
   if (!isRecord(raw)) return null;
   const clientId = optStr(raw.clientId ?? raw.client_id);
   const clientName = optStr(raw.clientName ?? raw.client_name);
   if (!clientId && !clientName) return null;
-  const scopeRaw = raw.scopes ?? raw.scope;
-  const scopes = Array.isArray(scopeRaw)
-    ? scopeRaw.filter((s): s is string => typeof s === "string")
-    : typeof scopeRaw === "string"
-      ? scopeRaw.trim().split(/\s+/).filter(Boolean)
-      : ["read", "social:write", "messages", "trade"];
+  const scopes = decodeScopeList(raw.scopes ?? raw.scope);
   return {
     clientId: clientId ?? "",
     clientName: clientName ?? clientId ?? "MCP Client",
@@ -2105,12 +2104,7 @@ export function decodeDeviceLookup(raw: unknown): DeviceLookupInfo | null {
   const clientId = optStr(raw.clientId ?? raw.client_id);
   const clientName = optStr(raw.clientName ?? raw.client_name);
   if (!userCode && !clientName) return null;
-  const scopeRaw = raw.scopes ?? raw.scope;
-  const scopes = Array.isArray(scopeRaw)
-    ? scopeRaw.filter((s): s is string => typeof s === "string")
-    : typeof scopeRaw === "string"
-      ? scopeRaw.trim().split(/\s+/u).filter(Boolean)
-      : ["read", "social:write", "messages", "trade"];
+  const scopes = decodeScopeList(raw.scopes ?? raw.scope);
   return {
     userCode: userCode ?? "",
     clientId: clientId ?? "",

@@ -828,17 +828,20 @@ export function closeReportDialog(): void {
   setStoreState({ reportTarget: null });
 }
 
+function ensureViewerForDialog(): boolean {
+  if (currentState.viewer) return true;
+  setStoreState({
+    joinSheetOpen: true,
+    joinTab: defaultJoinTab(currentState),
+    joinEmailStep: "entry",
+    joinPhoneStep: "entry",
+    joinError: null,
+  });
+  return false;
+}
+
 export function openBlockDialog(handle: string, currentlyActive: boolean): void {
-  if (!currentState.viewer) {
-    setStoreState({
-      joinSheetOpen: true,
-      joinTab: defaultJoinTab(currentState),
-      joinEmailStep: "entry",
-      joinPhoneStep: "entry",
-      joinError: null,
-    });
-    return;
-  }
+  if (!ensureViewerForDialog()) return;
   setStoreState({ blockTarget: { handle, currentlyActive } });
 }
 
@@ -847,16 +850,7 @@ export function closeBlockDialog(): void {
 }
 
 export function openMuteDialog(handle: string, currentlyActive: boolean): void {
-  if (!currentState.viewer) {
-    setStoreState({
-      joinSheetOpen: true,
-      joinTab: defaultJoinTab(currentState),
-      joinEmailStep: "entry",
-      joinPhoneStep: "entry",
-      joinError: null,
-    });
-    return;
-  }
+  if (!ensureViewerForDialog()) return;
   setStoreState({ muteTarget: { handle, currentlyActive } });
 }
 

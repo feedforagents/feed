@@ -595,12 +595,7 @@ export function App() {
           const target = url ?? s.devEmailMagicLinkUrl;
           if (!target) return;
           storeActions.setJoinSheetOpen(false);
-          try {
-            const parsed = new URL(target, typeof window !== "undefined" ? window.location.origin : "https://feed.local");
-            void storeActions.navigate(`${parsed.pathname}${parsed.search}`);
-          } catch {
-            void storeActions.navigate(target);
-          }
+          storeActions.navigateTargetUrl(target);
         }}
         onRequestEmailMagicLink={({ email, turnstileToken }) => storeActions.requestEmailMagicLink(email, turnstileToken)}
         onResendEmailMagicLink={() => storeActions.resendEmailMagicLink()}

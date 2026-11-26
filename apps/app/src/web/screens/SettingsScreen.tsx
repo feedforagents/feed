@@ -35,16 +35,47 @@ import { storeActions, useAppStore } from "../store.ts";
 import type { AppModerationEntry, ThemePreference } from "../types.ts";
 import { ProfileMediaPickers } from "./ProfileScreen.tsx";
 
+function useTurnstileChallenge(siteKey: string | null | undefined) {
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const activeTurnstileKey = siteKey?.trim() || undefined;
+  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
+  const consumeToken = () => {
+    const token = turnstileToken ?? undefined;
+    setTurnstileToken(null);
+    setTurnstileResetKey((n) => n + 1);
+    return token;
+  };
+  return { activeTurnstileKey, turnstileToken, turnstileResetKey, turnstileRef, consumeToken };
+}
+
+function TurnstileSlot({
+  siteKey,
+  resetKey,
+  containerRef,
+}: {
+  readonly siteKey: string | undefined;
+  readonly resetKey: number;
+  readonly containerRef: (node: HTMLDivElement | null) => void;
+}) {
+  if (!siteKey) return null;
+  return (
+    <div
+      key={`${siteKey}:${resetKey}`}
+      ref={containerRef}
+      aria-label="Security verification"
+      className="min-h-16"
+    />
+  );
+}
+
 function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; readonly onOpenChange: (open: boolean) => void }) {
   const s = useAppStore();
   const [step, setStep] = useState<"phone" | "code">("phone");
   const [newPhone, setNewPhone] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
-  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
-  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
-  const activeTurnstileKey = s.turnstileSiteKey?.trim() || undefined;
-  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
+  const { activeTurnstileKey, turnstileToken, turnstileResetKey, turnstileRef, consumeToken } = useTurnstileChallenge(s.turnstileSiteKey);
 
   const formattedPhone = storeActions.formatPhoneToE164("US", newPhone);
 
@@ -52,9 +83,7 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
     e.preventDefault();
     if (!newPhone.trim()) return;
     if (activeTurnstileKey && !turnstileToken) return;
-    const token = turnstileToken ?? undefined;
-    setTurnstileToken(null);
-    setTurnstileResetKey((n) => n + 1);
+    const token = consumeToken();
     setBusy(true);
     const ok = await storeActions.startPhoneChange(formattedPhone, token);
     setBusy(false);
@@ -97,14 +126,7 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
                 onChange={(e) => setNewPhone(e.target.value)}
               />
             </div>
-            {activeTurnstileKey ? (
-              <div
-                key={`${activeTurnstileKey}:${turnstileResetKey}`}
-                ref={turnstileRef}
-                aria-label="Security verification"
-                className="min-h-16"
-              />
-            ) : null}
+            <TurnstileSlot siteKey={activeTurnstileKey} resetKey={turnstileResetKey} containerRef={turnstileRef} />
             <Button type="submit" loading={busy} disabled={!newPhone.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
               Send 6-digit code
             </Button>
@@ -146,10 +168,7 @@ function EmailLinkDialog({ open, onOpenChange }: { readonly open: boolean; reado
   const [maskedEmail, setMaskedEmail] = useState("");
   const [devLinkUrl, setDevLinkUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
-  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
-  const activeTurnstileKey = s.turnstileSiteKey?.trim() || undefined;
-  const turnstileRef = useTurnstileContainerRef(activeTurnstileKey, setTurnstileToken);
+  const { activeTurnstileKey, turnstileToken, turnstileResetKey, turnstileRef, consumeToken } = useTurnstileChallenge(s.turnstileSiteKey);
 
   const handleClose = (nextOpen: boolean) => {
     if (!nextOpen) {
@@ -165,9 +184,7 @@ function EmailLinkDialog({ open, onOpenChange }: { readonly open: boolean; reado
     e.preventDefault();
     if (!email.trim()) return;
     if (activeTurnstileKey && !turnstileToken) return;
-    const token = turnstileToken ?? undefined;
-    setTurnstileToken(null);
-    setTurnstileResetKey((n) => n + 1);
+    const token = consumeToken();
     setBusy(true);
     const result = await storeActions.startEmailLink(email.trim(), token);
     setBusy(false);
@@ -182,12 +199,7 @@ function EmailLinkDialog({ open, onOpenChange }: { readonly open: boolean; reado
     const target = devLinkUrl ?? s.devEmailMagicLinkUrl;
     if (!target) return;
     handleClose(false);
-    try {
-      const parsed = new URL(target, typeof window !== "undefined" ? window.location.origin : "https://feed.local");
-      void storeActions.navigate(`${parsed.pathname}${parsed.search}`);
-    } catch {
-      void storeActions.navigate(target);
-    }
+    storeActions.navigateTargetUrl(target);
   };
 
   return (
@@ -210,14 +222,7 @@ function EmailLinkDialog({ open, onOpenChange }: { readonly open: boolean; reado
                 onChange={(e) => setEmail(e.target.value)}
               />
             </div>
-            {activeTurnstileKey ? (
-              <div
-                key={`${activeTurnstileKey}:${turnstileResetKey}`}
-                ref={turnstileRef}
-                aria-label="Security verification"
-                className="min-h-16"
-              />
-            ) : null}
+            <TurnstileSlot siteKey={activeTurnstileKey} resetKey={turnstileResetKey} containerRef={turnstileRef} />
             <Button type="submit" loading={busy} disabled={!email.trim() || (Boolean(activeTurnstileKey) && !turnstileToken)}>
               Send confirmation link
             </Button>

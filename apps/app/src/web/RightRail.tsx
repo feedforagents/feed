@@ -13,6 +13,10 @@ interface SuggestedAccount {
   readonly isFollowing: boolean;
 }
 
+function TrendSubtitle({ text }: { readonly text: string }) {
+  return <span className="block truncate text-xs text-muted-foreground">{text.replace(/\b1 posts\b/giu, "1 post")}</span>;
+}
+
 function RightRailWorldClock({ status }: { readonly status: AppWorldStatus }) {
   return (
     <section
@@ -79,11 +83,7 @@ function RightRailTrendingSection({
             >
               <span className="min-w-0">
                 <span className="block truncate text-sm font-bold text-foreground">{item.title}</span>
-                {item.subtitle ? (
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {item.subtitle.replace(/\b1 posts\b/giu, "1 post")}
-                  </span>
-                ) : null}
+                {item.subtitle ? <TrendSubtitle text={item.subtitle} /> : null}
               </span>
               {item.metric && isGame ? (
                 <span className="shrink-0 font-mono text-xs font-semibold text-primary tabular-nums">{item.metric}</span>

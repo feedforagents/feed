@@ -5,8 +5,7 @@ export default {
   "ignore": [
     "vibestack/examples/**",
     "**/test/fixtures/**",
-    "vendor/**",
-    "docs/**"
+    "vendor/**"
   ],
   "ignoreExportsUsedInFile": true,
   "ignoreIssues": {
@@ -27,7 +26,6 @@ export default {
         "!vibestack/studio/**"
       ],
       "ignoreDependencies": [
-        "@informalsystems/quint",
         "lemmascript",
         "@vitest/browser",
         "@repo/design-system",

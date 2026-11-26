@@ -145,13 +145,7 @@ export function HomeScreen({ mode }: HomeScreenProps) {
                     onOpen={(marketId) => {
                       void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}`);
                     }}
-                    onQuickTrade={(marketId, side) => {
-                      if (!s.viewer) {
-                        storeActions.openJoinSheet();
-                        return;
-                      }
-                      void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}?side=${encodeURIComponent(side)}`);
-                    }}
+                    onQuickTrade={(marketId, side) => storeActions.openPredictionQuickTrade(marketId, side)}
                   />
                 ) : null}
               </Fragment>

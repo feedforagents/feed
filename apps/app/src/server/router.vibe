@@ -299,12 +299,12 @@ function requestOrigin(request: Request, config: AppServerConfig): string {
 }
 
 function clientIp(request: Request): string | undefined {
-  const cfIp = request.headers.get("cf-connecting-ip")?.trim()
-  if (cfIp !== undefined && cfIp !== "") return cfIp
-  const realIp = request.headers.get("x-real-ip")?.trim()
-  if (realIp !== undefined && realIp !== "") return realIp
-  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-  return forwarded !== undefined && forwarded !== "" ? forwarded : undefined
+  for (const header of ["cf-connecting-ip", "x-real-ip", "x-forwarded-for"]) {
+    const raw = request.headers.get(header)
+    const candidate = (header === "x-forwarded-for" ? raw?.split(",")[0] : raw)?.trim()
+    if (candidate !== undefined && candidate !== "") return candidate
+  }
+  return undefined
 }
 
 function strField(obj: Readonly<Record<string, unknown>>, ...keys: ReadonlyArray<string>): string | undefined {
@@ -792,13 +792,63 @@ function authBootstrapFields(config: AppServerConfig) {
   }
 }
 
+function emailStartJsonResponse(result: {
+  readonly challengeId: string
+  readonly emailMasked: string
+  readonly expiresAt: number
+  readonly resendAvailableAt: number
+  readonly devMagicLinkUrl?: string | undefined
+  readonly devToken?: string | undefined
+}): Response {
+  return jsonResponse({
+    ok: true,
+    challengeId: result.challengeId,
+    emailMasked: result.emailMasked,
+    expiresAt: result.expiresAt,
+    expiresAtMs: result.expiresAt,
+    resendAvailableAt: result.resendAvailableAt,
+    resendAvailableAtMs: result.resendAvailableAt,
+    ...(result.devMagicLinkUrl !== undefined ? { devMagicLinkUrl: result.devMagicLinkUrl, devToken: result.devToken } : {})
+  })
+}
+
+function profileFeedQuery(authorId: string, viewerId: string | undefined, mode: "game" | "social", url: URL) {
+  return {
+    tab: "latest" as const,
+    viewerId,
+    mode,
+    authorId,
+    cursor: url.searchParams.get("cursor") ?? undefined,
+    limit: clampIntQuery(url, "limit", 30, 1, 100),
+    filter: parseFeedPostFilter(url.searchParams.get("filter")),
+    onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
+    includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
+  }
+}
+
+function linkAuthContext(
+  session: { readonly accountId: string; readonly authAt: number },
+  request: Request,
+  data: Readonly<Record<string, unknown>>,
+  config: AppServerConfig
+) {
+  return {
+    accountId: session.accountId,
+    authAt: session.authAt,
+    cookieHeader: request.headers.get("cookie") ?? undefined,
+    turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
+    ipAddress: clientIp(request),
+    config: config.auth
+  }
+}
+
 effect function handleEmailAuthRoute(
   request: Request,
   url: URL,
+  path: string,
+  method: string,
   config: AppServerConfig
 ): (Response | undefined)!(AuthFailure | RateLimited | StoreFailure | HttpRequestError)!Store {
-  const path = url.pathname
-  const method = request.method.toUpperCase()
   if (method === "POST" && path === "/api/auth/email/start") {
     const { data } = try readParsedBody(request)
     const email = try reqStr(data, "email", "email")
@@ -809,16 +859,7 @@ effect function handleEmailAuthRoute(
       ipAddress: clientIp(request),
       config: config.auth
     })
-    return jsonResponse({
-      ok: true,
-      challengeId: result.challengeId,
-      emailMasked: result.emailMasked,
-      expiresAt: result.expiresAt,
-      expiresAtMs: result.expiresAt,
-      resendAvailableAt: result.resendAvailableAt,
-      resendAvailableAtMs: result.resendAvailableAt,
-      ...(result.devMagicLinkUrl !== undefined ? { devMagicLinkUrl: result.devMagicLinkUrl, devToken: result.devToken } : {})
-    })
+    return emailStartJsonResponse(result)
   }
   if (method === "POST" && path === "/api/auth/email/verify") {
     const { data } = try readParsedBody(request)
@@ -884,24 +925,10 @@ effect function handleEmailAuthRoute(
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
     const result = try startEmailLink({
-      accountId: session.accountId,
-      email: try reqStr(data, "email", "email"),
-      authAt: session.authAt,
-      cookieHeader: request.headers.get("cookie") ?? undefined,
-      turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
-      ipAddress: clientIp(request),
-      config: config.auth
+      ...linkAuthContext(session, request, data, config),
+      email: try reqStr(data, "email", "email")
     })
-    return jsonResponse({
-      ok: true,
-      challengeId: result.challengeId,
-      emailMasked: result.emailMasked,
-      expiresAt: result.expiresAt,
-      expiresAtMs: result.expiresAt,
-      resendAvailableAt: result.resendAvailableAt,
-      resendAvailableAtMs: result.resendAvailableAt,
-      ...(result.devMagicLinkUrl !== undefined ? { devMagicLinkUrl: result.devMagicLinkUrl, devToken: result.devToken } : {})
-    })
+    return emailStartJsonResponse(result)
   }
   if (method === "POST" && path === "/api/auth/email/link/verify") {
     const session = try requireSession(request, config)
@@ -958,7 +985,7 @@ effect function handleAuthRoute(
   const method = request.method.toUpperCase()
   if (!path.startsWith("/api/auth/")) return undefined
 
-  const emailResponse = try handleEmailAuthRoute(request, url, config)
+  const emailResponse = try handleEmailAuthRoute(request, url, path, method, config)
   if (emailResponse !== undefined) return emailResponse
 
   if (method === "GET" && path === "/api/auth/me") {
@@ -1114,13 +1141,8 @@ effect function handleAuthRoute(
     const session = try requireSession(request, config)
     const { data } = try readParsedBody(request)
     const res = try startPhoneLink({
-      accountId: session.accountId,
-      phoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164", "phone"),
-      authAt: session.authAt,
-      cookieHeader: request.headers.get("cookie") ?? undefined,
-      turnstileToken: strField(data, "turnstileToken", "turnstile_token"),
-      ipAddress: clientIp(request),
-      config: config.auth
+      ...linkAuthContext(session, request, data, config),
+      phoneE164: try reqStr(data, "newPhoneE164", "newPhoneE164", "phoneE164", "phone")
     })
     return jsonResponse({ challengeId: res.challengeId, last2: res.last2, expiresAt: res.expiresAt, resendAvailableAt: res.resendAvailableAt })
   }
@@ -1539,17 +1561,7 @@ effect function handleSocialPostsAndUsers(
     const session = try requireSession(request, config)
     const mode = session.uiMode
     const profile = try getProfile(session.handle, session.accountId, mode)
-    const feed = try listFeedPosts({
-      tab: "latest",
-      viewerId: session.accountId,
-      mode,
-      authorId: profile.id,
-      cursor: url.searchParams.get("cursor") ?? undefined,
-      limit: clampIntQuery(url, "limit", 30, 1, 100),
-      filter: parseFeedPostFilter(url.searchParams.get("filter")),
-      onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
-      includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
-    })
+    const feed = try listFeedPosts(profileFeedQuery(profile.id, session.accountId, mode, url))
     const positions = mode === "game"
       ? try getUserPositions(profile.id)
       : { accountId: profile.id, predictionPositions: [], perpPositions: [] }
@@ -1566,17 +1578,7 @@ effect function handleSocialPostsAndUsers(
     const mode = resolveMode(session, url)
     const handle = decodeSegment(userMatch[1] ?? "")
     const profile = try getProfile(handle, session?.accountId, mode)
-    const feed = try listFeedPosts({
-      tab: "latest",
-      viewerId: session?.accountId,
-      mode,
-      authorId: profile.id,
-      cursor: url.searchParams.get("cursor") ?? undefined,
-      limit: clampIntQuery(url, "limit", 30, 1, 100),
-      filter: parseFeedPostFilter(url.searchParams.get("filter")),
-      onlyReplies: parseBoolQuery(url.searchParams.get("onlyReplies")),
-      includeReplies: parseBoolQuery(url.searchParams.get("includeReplies"))
-    })
+    const feed = try listFeedPosts(profileFeedQuery(profile.id, session?.accountId, mode, url))
     const canViewPositions = (profile.kind === "user" || profile.kind === "npc") && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
     const positions = canViewPositions
       ? try getUserPositions(profile.id)

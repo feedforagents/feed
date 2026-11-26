@@ -683,8 +683,27 @@ export function useAppStore() {
   return useSyncExternalStore(subscribeWithBoot, getStoreSnapshot, getStoreSnapshot);
 }
 
+function navigateTargetUrl(target: string): void {
+  try {
+    const parsed = new URL(target, typeof window !== "undefined" ? window.location.origin : "https://feed.local");
+    void navigate(`${parsed.pathname}${parsed.search}`);
+  } catch {
+    void navigate(target);
+  }
+}
+
+function openPredictionQuickTrade(marketId: string, side: "yes" | "no"): void {
+  if (!getStoreSnapshot().viewer) {
+    openJoinSheet();
+    return;
+  }
+  void navigate(`/markets/predictions/${encodeURIComponent(marketId)}?side=${encodeURIComponent(side)}`);
+}
+
 export const storeActions = {
   navigate,
+  navigateTargetUrl,
+  openPredictionQuickTrade,
   navigateRoute,
   hasInternalBackHistory,
   setSettingsTab,

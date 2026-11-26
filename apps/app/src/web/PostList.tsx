@@ -78,13 +78,7 @@ export function FeedPostCard({
       onSelectTag={(tag) => { void storeActions.navigate(`/trending/${encodeURIComponent(tag)}`); }}
       onMarketClick={(ticker) => { void storeActions.navigate(`/markets/perps/${encodeURIComponent(ticker)}`); }}
       onPredictionClick={(marketId) => { void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}`); }}
-      onQuickTrade={(marketId, side) => {
-        if (!s.viewer) {
-          storeActions.openJoinSheet();
-          return;
-        }
-        void storeActions.navigate(`/markets/predictions/${encodeURIComponent(marketId)}?side=${encodeURIComponent(side)}`);
-      }}
+      onQuickTrade={(marketId, side) => storeActions.openPredictionQuickTrade(marketId, side)}
       onFollowAuthor={!isOwn ? (handle) => { void storeActions.toggleFollow(handle, post.card.isFollowingAuthor); } : undefined}
       onMuteAuthor={s.viewer && !isOwn ? (handle) => storeActions.openMuteDialog(handle, Boolean(post.card.isMutedAuthor)) : undefined}
       onBlockAuthor={s.viewer && !isOwn ? (handle) => storeActions.openBlockDialog(handle, Boolean(post.card.isBlockedAuthor)) : undefined}
