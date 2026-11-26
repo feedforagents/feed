@@ -1499,6 +1499,17 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
   return committed.result
 }
 
+effect function clearMemberChatMessageNotificationsTx(
+  tx: Tx,
+  accountId: string,
+  chatId: string
+): void!StoreFailure {
+  try tx.query(
+    "DELETE FROM feed_notifications WHERE account_id = $1 AND chat_id = $2 AND kind = 'chat_message'",
+    [accountId, chatId]
+  )
+}
+
 export effect function leaveGroupChat(accountId: string, chatId: string): LeaveGroupResult!(SocialFailure | StoreFailure)!Store {
   try requireNonEmptyChatId(chatId)
   const store = try Store
@@ -1519,6 +1530,7 @@ export effect function leaveGroupChat(accountId: string, chatId: string): LeaveG
       throw new SocialFailure({ code: "Forbidden", message: "Cannot leave this chat" })
     }
     try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, account.id])
+    try clearMemberChatMessageNotificationsTx(tx, account.id, chatId)
     const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
     const events: FeedRealtimeEvent[] = [{
       type: "chat.updated",
@@ -1589,6 +1601,7 @@ export effect function removeGroupMember(
       throw new SocialFailure({ code: "Forbidden", message: "Insufficient permissions to remove this member" })
     }
     try tx.query("DELETE FROM feed_chat_members WHERE chat_id = $1 AND member_id = $2", [chatId, target.id])
+    try clearMemberChatMessageNotificationsTx(tx, target.id, chatId)
     const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
     const events: FeedRealtimeEvent[] = [{
       type: "chat.updated",
@@ -1653,6 +1666,7 @@ export effect function deleteGroupChat(
       throw new SocialFailure({ code: "Forbidden", message: "Only the group owner can delete the group" })
     }
     const recipientIds = memberRows.map((m) => toText(m.member_id) ?? "").filter(Boolean)
+    try tx.query("DELETE FROM feed_notifications WHERE chat_id = $1", [chatId])
     try tx.query("DELETE FROM feed_chats WHERE id = $1", [chatId])
     const events: FeedRealtimeEvent[] = [{
       type: "chat.updated",
