@@ -140,6 +140,7 @@ export {
   canDeliverRealtimeEventToViewer,
   createSseResponse,
   encodeSseEvent,
+  personalizePostDeletedEvent,
   publishFeedEvent,
   realtimeBusLayer,
   subscribeFeedEvents,
