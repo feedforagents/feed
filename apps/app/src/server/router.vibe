@@ -1,4 +1,4 @@
-// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"
+// spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet"; spec/auth/oauth.md, "Story: Authorize one MCP client over OAuth 2.1 or Device Flow and rotate tokens safely"; spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/skill.md, "Story: Generate, verify, and serve Feed's canonical skill and one-click host launchers"
 import {
   AuthFailure,
   RateLimited,
@@ -535,7 +535,7 @@ effect function resolveOAuthClientRow(
   if (trimmedId === "") {
     throw new AuthFailure({ code: "invalid_client", message: "client_id is required.", status: 400 })
   }
-  if (trimmedId.startsWith("https://")) {
+  if (/^https?:\/\//i.test(trimmedId)) {
     const cimd = try fetchClientMetadata(trimmedId)
     return { clientId: cimd.clientId, clientName: cimd.clientName, redirectUris: cimd.redirectUris }
   }
@@ -724,10 +724,13 @@ effect function handleOAuthRoute(
       })
     }
     const { data } = try readParsedBody(request)
-    const clientId = try reqStr(data, "client_id", "client_id", "clientId")
+    const rawClientId = try reqStr(data, "client_id", "client_id", "clientId")
+    let clientId = rawClientId
     let clientName = strField(data, "client_name", "clientName")
-    if (clientId.startsWith("https://") && clientName === undefined) {
-      clientName = (try fetchClientMetadata(clientId)).clientName
+    if (/^https?:\/\//i.test(rawClientId)) {
+      const cimd = try fetchClientMetadata(rawClientId)
+      clientId = cimd.clientId
+      clientName = cimd.clientName
     }
     const device = try startDeviceAuthorization({
       clientId,
