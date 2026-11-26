@@ -211,6 +211,31 @@ function profilePayload(id: string, handle: string, displayName: string) {
   };
 }
 
+function replyItem(id: string, authorId: string, authorHandle: string, authorDisplayName: string, content: string) {
+  return {
+    id,
+    authorId,
+    authorKind: "user",
+    authorHandle,
+    authorDisplayName,
+    avatarUrl: null,
+    content,
+    replyToPostId: "parent-post-1",
+    quotePostId: null,
+    viaClientName: null,
+    marketId: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: [],
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt: Date.now() - 60_000,
+  };
+}
+
 function installMockNetwork(
   options: {
     holdHistoryRange?: string;
@@ -219,6 +244,7 @@ function installMockNetwork(
     holdArticleId?: string;
     holdLeaderboardScope?: string;
     holdPnlRange?: string;
+    holdProfileReplies?: boolean;
   } = {},
 ) {
   const heldHistory = new Map<string, Array<() => void>>();
@@ -236,6 +262,8 @@ function installMockNetwork(
   const requestedLeaderboardScopes = new Set<string>();
   const heldPnl = new Map<string, Array<() => void>>();
   const requestedPnlRanges = new Set<string>();
+  const heldReplies = new Map<string, Array<(res: Response) => void>>();
+  const requestedReplies = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -244,7 +272,6 @@ function installMockNetwork(
   let viewerPhoneLast2: string | null = "01";
   let viewerBalanceCents = 10500;
   let viewerIsReviewer = true;
-
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -336,6 +363,17 @@ function installMockNetwork(
         acceptedCountries: ["+1", "+44"],
         publicAppUrl: window.location.origin,
         devSmsCodeEnabled: true,
+      });
+    }
+    if (path === "/api/users/alice") return json(profilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
+    if (options.holdProfileReplies && path === "/api/posts" && url.searchParams.get("filter") === "replies") {
+      const handle = url.searchParams.get("authorHandle") ?? "";
+      requestedReplies.add(handle);
+      return new Promise<Response>((resolve) => {
+        const pending = heldReplies.get(handle) ?? [];
+        pending.push(resolve);
+        heldReplies.set(handle, pending);
       });
     }
     if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
@@ -570,6 +608,15 @@ function installMockNetwork(
     releasePnl: (range: string) => {
       for (const release of heldPnl.get(range)?.splice(0) ?? []) release();
     },
+    repliesRequested: (handle: string) => requestedReplies.has(handle),
+    releaseReplies: (handle: string, items: unknown[]) => {
+      for (const release of heldReplies.get(handle)?.splice(0) ?? []) {
+        release(Response.json({ items, nextCursor: null }));
+      }
+    },
+    releaseLatestReplies: (handle: string, items: unknown[]) => {
+      heldReplies.get(handle)?.pop()?.(Response.json({ items, nextCursor: null }));
+    },
   };
 }
 
@@ -612,6 +659,7 @@ async function signInAsReviewer() {
   await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
 }
+
 it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   await mountApp();
 
@@ -937,4 +985,48 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
   expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
   expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
+});
+
+it('Late replies never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = await mountApp({ holdProfileReplies: true });
+  const openRepliesTab = async () => {
+    await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+    await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
+    await act(() => Promise.resolve());
+  };
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Replies" })));
+  await act(() => Promise.resolve());
+  expect(network.repliesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.repliesRequested("bob")).toBe(false);
+
+  network.releaseReplies("alice", [replyItem("alice-reply-1", "acc-alice", "alice", "Alice Aardvark", "Alice reply that must not land on Bob")]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileReplies).toEqual([]);
+  expect(getStoreSnapshot().profileRepliesLoading).toBe(false);
+  await expect.element(page.getByText("Alice reply that must not land on Bob")).not.toBeInTheDocument();
+
+  await openRepliesTab();
+  expect(network.repliesRequested("bob")).toBe(true);
+  network.releaseReplies("bob", [replyItem("bob-reply-1", "acc-bob", "bob", "Bob Badger", "Bob reply on Bob profile")]);
+  await expect.element(page.getByText("Bob reply on Bob profile")).toBeInTheDocument();
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.authorHandle)).toEqual(["bob"]);
+
+  await openRepliesTab();
+  await openRepliesTab();
+  network.releaseLatestReplies("bob", [replyItem("bob-reply-2", "acc-bob", "bob", "Bob Badger", "Newer Bob reply")]);
+  await expect.element(page.getByText("Newer Bob reply")).toBeInTheDocument();
+  network.releaseReplies("bob", [replyItem("bob-reply-stale", "acc-bob", "bob", "Bob Badger", "Stale Bob reply must not replace newer")]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileReplies.map((p) => p.card.id)).toEqual(["bob-reply-2"]);
+  await expect.element(page.getByText("Stale Bob reply must not replace newer")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Newer Bob reply")).toBeInTheDocument();
 });

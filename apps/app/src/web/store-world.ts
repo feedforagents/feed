@@ -1499,10 +1499,13 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   setErrorNotice(res.ok ? "Profile not found" : res.message);
 }
 
+let profileRepliesLoadCount = 0;
+
 export async function loadProfileReplies(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileRepliesLoadCount;
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -1512,6 +1515,11 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   const res = await requestJson(url, {
     parse: (raw) => decodeFeedPage(raw, viewerId),
   });
+  if (loadId !== profileRepliesLoadCount) return;
+  if (!isProfileHandleCurrent(handle)) {
+    setStoreState({ profileRepliesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileReplies: res.data.items, profileRepliesLoading: false });
     return;
