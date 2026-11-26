@@ -14,6 +14,7 @@ import {
   ensureRollingMarketSlots,
   executeNpcDecision,
   extractRssHeadlinesFromXml,
+  generateCompletion,
   fastForwardSimulatedHours,
   findEligibleAlphaTarget,
   formatActorToneAndFinanceGuardrails,
@@ -75,6 +76,53 @@ module nodeEnv {
   }
 }
 import { applyEnvOverrides, restoreEnvSnapshot } from nodeEnv
+
+module stalledProvider {
+  import http from "node:http"
+
+  export interface StalledProvider {
+    readonly url: string
+    readonly requested: Promise<void>
+    readonly closed: Promise<boolean>
+    sendHeadersAndStall(): void
+    close(): void
+  }
+
+  /** @throws {never} */
+  export function startStalledProvider(): Promise<StalledProvider> {
+    return new Promise((resolve, reject) => {
+      let markRequested = () => {}
+      let markClosed = (_finished: boolean) => {}
+      let pending: http.ServerResponse | undefined
+      const requested = new Promise<void>((done) => { markRequested = done })
+      const closed = new Promise<boolean>((done) => { markClosed = done })
+      const server = http.createServer((_request, response) => {
+        pending = response
+        response.on("close", () => markClosed(response.writableFinished))
+        markRequested()
+      })
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address()
+        const port = typeof address === "object" && address !== null ? address.port : 0
+        resolve({
+          url: `http://127.0.0.1:${port}`,
+          requested,
+          closed,
+          sendHeadersAndStall: () => {
+            pending?.writeHead(200, { "content-type": "application/json", "content-length": "200" })
+            pending?.write('{"choices":[{"message":{"content":"partial')
+          },
+          close: () => {
+            server.closeAllConnections()
+            server.close()
+          },
+        })
+      })
+    })
+  }
+}
+import { startStalledProvider } from stalledProvider
 
 const OFFLINE_ENGINE_ENV: Readonly<Record<string, string>> = {
   SURPLUS_BASE_URL: "",
@@ -896,3 +944,35 @@ it.effect('NPCs execute full trading and social actions, alpha invites honor blo
     })
   })
 }), 180_000)
+it.live('A provider that stalls mid-body times out within one 25 s deadline and keeps the reservation uncertain (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
+  const provider = try acquireRelease(
+    tryPromise({ try: () => startStalledProvider(), catch: (cause) => new EngineFailure({ code: "LLM_UNAVAILABLE", message: "stalled provider did not start", cause }) }),
+    (stub) => sync(() => stub.close()),
+  )
+  try withEnvOverrides({ ...OFFLINE_ENGINE_ENV, SURPLUS_BASE_URL: provider.url }, scoped(effect {
+    provide localStoreLayer({ kind: "pglite", file: undefined }) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+      const startedAt = try Clock.currentTimeMillis
+      const [completion] = try Effect.all([
+        generateCompletion({ user: "Hello", maxTokens: 32 }),
+        effect {
+          try tryPromise({ try: () => provider.requested, catch: (cause) => new EngineFailure({ code: "LLM_UNAVAILABLE", message: "no request", cause }) })
+          try Effect.sleep("15 seconds")
+          try sync(() => provider.sendHeadersAndStall())
+        },
+      ], { concurrency: 2 })
+      const elapsedMs = (try Clock.currentTimeMillis) - startedAt
+      const finishedBeforeClose = try tryPromise({ try: () => provider.closed, catch: (cause) => new EngineFailure({ code: "LLM_UNAVAILABLE", message: "no close", cause }) })
+      const reservation = (try queryRows("SELECT status, actual_micros FROM feed_llm_spend_reservations WHERE attempt_id = $1", [completion.attemptId]))[0]
+      try check(() => {
+        assert.deepStrictEqual(
+          { usedFallback: completion.usedFallback, provider: completion.provider, status: toText(reservation?.status), actualMicros: reservation?.actual_micros ?? null, finishedBeforeClose },
+          { usedFallback: true, provider: "offline-fallback", status: "uncertain", actualMicros: null, finishedBeforeClose: false },
+        )
+        assert.isAtLeast(elapsedMs, 25_000)
+        assert.isBelow(elapsedMs, 30_000)
+      })
+    }
+  }))
+}), 60_000)

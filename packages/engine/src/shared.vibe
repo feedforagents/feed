@@ -3,7 +3,7 @@ import { parseJsonModelRecord } from "@elizaos/core"
 import { Store, type StoreFailure, type Tx, toInt } from "@repo/db"
 import { actors, organizations } from "@repo/pack-default"
 import { RealtimeBus, publishFeedEvent } from "@repo/social"
-import { FetchHttpClient, HttpClient, type HttpClientRequest, type HttpClientResponse } from "effect/http"
+import { FetchHttpClient, HttpClient, type HttpClientRequest } from "effect/http"
 import { REAL_TO_PARODY_MAPPINGS } from "./data/reality-grounding.ts"
 
 export type EngineErrorCode =
@@ -289,17 +289,21 @@ export function advanceDayHour(prevDay: number, baseMs: number, nextMs: number):
   return { nextDay: prevDay + dayDelta, nextHour: utcHourOf(nextMs) }
 }
 
-export effect function executeHttpWithTimeout(
+export effect function fetchTextWithTimeout(
   request: HttpClientRequest.HttpClientRequest,
   duration: "8 seconds" | "25 seconds",
   failureCode: EngineErrorCode,
   failureMessage: string,
-): HttpClientResponse.HttpClientResponse!EngineFailure {
+): { readonly status: number; readonly text: string }!EngineFailure {
   const existingClient = try Effect.serviceOption(HttpClient.HttpClient)
   const execEffect = Option.isSome(existingClient)
     ? existingClient.value.execute(request)
     : Effect.provide(HttpClient.execute(request), FetchHttpClient.layer)
-  return timeout(execEffect, duration) catch effect (cause) => {
+  const readEffect = effect {
+    const response = try execEffect
+    return { status: response.status, text: try response.text }
+  }
+  return timeout(readEffect, duration) catch effect (cause) => {
     throw new EngineFailure({ code: failureCode, message: failureMessage, cause })
   }
 }
