@@ -1089,3 +1089,16 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
     })
   }
 }))
+
+it.effect('list_markets with status resolved returns no perp markets', () =>
+  withSeededWorld((authConfig) => {
+    const openPerps = unwrapToolPayload(try callMcpTool(201, "list_markets", { kind: "perp", status: "open", limit: 10 }, authConfig))
+    const resolvedPerps = unwrapToolPayload(try callMcpTool(202, "list_markets", { kind: "perp", status: "resolved", limit: 10 }, authConfig))
+    const resolvedAll = unwrapToolPayload(try callMcpTool(203, "list_markets", { kind: "all", status: "resolved", limit: 10 }, authConfig))
+    try check(() => {
+      assert.isAbove((openPerps.perpMarkets as ReadonlyArray<unknown>).length, 0)
+      assert.deepStrictEqual(resolvedPerps.perpMarkets, [])
+      assert.deepStrictEqual(resolvedAll.perpMarkets, [])
+    })
+  })
+)
