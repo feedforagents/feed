@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -191,7 +192,9 @@ const SAMPLE_TRADES = [
   },
 ];
 
-function installMockNetwork() {
+function installMockNetwork(options: { holdHistoryRange?: string } = {}) {
+  const heldHistory = new Map<string, Array<() => void>>();
+  const requestedHistoryRanges = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -312,13 +315,24 @@ function installMockNetwork() {
       });
     }
     if (path.endsWith("/history")) {
-      return json({
-        range: "1D",
+      const range = url.searchParams.get("range") ?? "1D";
+      const finalPriceCents = range === "1D" ? 1111 : range === "1W" ? 2222 : 50;
+      const body = {
+        range,
         points: [
           { timestamp: Date.now() - 3_600_000, recordedAt: Date.now() - 3_600_000, priceCents: 46, yesPriceBps: 4600, volumeCents: 1000 },
-          { timestamp: Date.now(), recordedAt: Date.now(), priceCents: 50, yesPriceBps: 5000, volumeCents: 2500 },
+          { timestamp: Date.now(), recordedAt: Date.now(), priceCents: finalPriceCents, yesPriceBps: 5000, volumeCents: 2500 },
         ],
-      });
+      };
+      if (options.holdHistoryRange === range) {
+        requestedHistoryRanges.add(range);
+        return new Promise<Response>((resolve) => {
+          const pending = heldHistory.get(range) ?? [];
+          pending.push(() => resolve(Response.json(body)));
+          heldHistory.set(range, pending);
+        });
+      }
+      return json(body);
     }
     if (path.endsWith("/likes")) {
       return json({ posts: SAMPLE_POSTS, nextCursor: null });
@@ -402,6 +416,13 @@ function installMockNetwork() {
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
+
+  return {
+    historyRequested: (range: string) => requestedHistoryRanges.has(range),
+    releaseHistory: (range: string) => {
+      for (const release of heldHistory.get(range)?.splice(0) ?? []) release();
+    },
+  };
 }
 
 beforeAll(() => {
@@ -533,4 +554,30 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
   await act(() => storeActions.navigate("/settings?tab=account"));
   await expect.element(page.getByText("e***@example.com")).toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Change email" })).toBeInTheDocument();
+});
+
+it('Stale market history is dropped after switching ranges (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
+  const network = installMockNetwork({ holdHistoryRange: "1D" });
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await act(() => Promise.resolve());
+  expect(network.historyRequested("1D")).toBe(true);
+  expect(getStoreSnapshot().marketTimeRange).toBe("1D");
+
+  await act(() => storeActions.setMarketTimeRange("1W"));
+  expect(getStoreSnapshot().marketTimeRange).toBe("1W");
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(2222);
+
+  network.releaseHistory("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().marketTimeRange).toBe("1W");
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(2222);
+  expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
 });
