@@ -907,7 +907,21 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       { scope: "characters", metric: "net_profit", page: 1, pageSize: 5 },
       authConfig
     ))
-    const whoamiAfterTrades = unwrapToolPayload(try callMcpTool(126, "whoami", {}, authConfig, aliceToken))
+    const previewFractionalLeverage = try callMcpTool(
+      126,
+      "preview_perp",
+      { ticker, side: "long", collateralPts: 5, leverage: 2.5 },
+      authConfig,
+      aliceToken
+    )
+    const openFractionalLeverage = try callMcpTool(
+      127,
+      "open_perp",
+      { ticker, side: "long", collateralPts: 5, leverage: 2.5 },
+      authConfig,
+      aliceToken
+    )
+    const whoamiAfterTrades = unwrapToolPayload(try callMcpTool(128, "whoami", {}, authConfig, aliceToken))
 
     try check(() => {
       assert.strictEqual(invitedBob.status, "pending")
@@ -1029,6 +1043,10 @@ it.effect('Enforce MCP social delegation, canonical shared rate limits, predicti
       const charEntries = (charactersBoard.entries ?? []) as ReadonlyArray<{ readonly isNpc: boolean }>
       assert.isAbove(charEntries.length, 0)
       assert.strictEqual(charEntries[0]?.isNpc, true)
+      assert.strictEqual(previewFractionalLeverage.status, 400)
+      assert.strictEqual((previewFractionalLeverage.body.error as { readonly code?: number } | undefined)?.code, -32602)
+      assert.strictEqual(openFractionalLeverage.status, 400)
+      assert.strictEqual((openFractionalLeverage.body.error as { readonly code?: number } | undefined)?.code, -32602)
 
       const perpEvents = publishedEvents.filter(
         (ev): ev is Extract<FeedRealtimeEvent, { readonly type: "market.perp" }> => ev.type === "market.perp"
