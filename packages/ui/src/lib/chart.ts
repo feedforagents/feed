@@ -19,5 +19,7 @@ export function filterChartPointsByRange<T extends { readonly time: number }>(
   const latestMs = points.reduce((max, pt) => Math.max(max, toMs(pt.time)), 0);
   const cutoff = latestMs - RANGE_MS[timeRange];
   const filtered = points.filter((pt) => toMs(pt.time) >= cutoff);
-  return filtered.length >= 2 ? filtered : [...points];
+  if (filtered.length >= 2) return filtered;
+  const prior = points.filter((pt) => toMs(pt.time) < cutoff).at(-1);
+  return prior === undefined ? filtered : [prior, ...filtered];
 }
