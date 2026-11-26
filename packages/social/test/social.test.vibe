@@ -1794,3 +1794,27 @@ it.effect(
     ))
   })
 )
+
+it.effect(
+  'NPC post rate limit: the shared 30-per-hour post limit applies to NPC authors too (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")',
+  () => withSocialWorld(effect {
+    const results: string[] = []
+    for (let i = 0; i < 31; i++) {
+      const code = try expectSocialCode(createPost({ authorId: "ailon-musk", authorKind: "npc", content: `NPC hourly post ${i}` }))
+      results.push(code)
+    }
+    const npcRateRows = try queryStore("SELECT scope_key, count FROM feed_rate_limits WHERE scope_key = 'ailon-musk:post'")
+    try check(() => assert.deepStrictEqual(
+      {
+        acceptedCount: results.filter((code) => code === "accepted").length,
+        thirtyFirstCode: results[30],
+        npcRateKeys: npcRateRows.map((r) => [r.scope_key, r.count])
+      },
+      {
+        acceptedCount: 30,
+        thirtyFirstCode: "RateLimited",
+        npcRateKeys: [["ailon-musk:post", 30]]
+      }
+    ))
+  })
+)
