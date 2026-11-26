@@ -63,8 +63,31 @@ module node {
   export function hmacSha256Hex(key: string, input: string): string {
     return createHmac("sha256", key).update(input, "utf8").digest("hex")
   }
+
+  export function installTwilioFetchStub(onFirstVerify: () => Promise<void>): () => void {
+    const originalFetch = globalThis.fetch
+    let firstVerifyDone = false
+    const stubFetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+      if (url.includes("lookups.twilio.com")) {
+        return new Response(JSON.stringify({ valid: true, country_code: "US", line_type_intelligence: { type: "mobile" } }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      if (url.includes("/Verifications")) {
+        if (!firstVerifyDone) {
+          firstVerifyDone = true
+          await onFirstVerify()
+        }
+        return new Response(JSON.stringify({ sid: "VE00000000000000000000000000000000", status: "pending" }), { status: 201, headers: { "content-type": "application/json" } })
+      }
+      return originalFetch(input, init)
+    }) as typeof fetch
+    globalThis.fetch = stubFetch
+    return () => {
+      globalThis.fetch = originalFetch
+    }
+  }
 }
-import { hmacSha256Hex, pkceChallengeS256 } from node
+import { hmacSha256Hex, installTwilioFetchStub, pkceChallengeS256 } from node
 
 const localnetConfig: AuthRuntimeConfig = {
   digestKey: "dev-digest-key-change-in-production-32-bytes",
@@ -491,6 +514,59 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
     if (raceCode === undefined) return try Effect.die("Missing race loopback code")
     const raceVerified = try verifyPhoneCode({ phoneE164: racePhone, code: raceCode, config: localnetConfig })
 
+    const outOfOrderPhone = "+14155550156"
+    const outOfOrderPhoneHash = hmacSha256Hex(localnetConfig.digestKey, outOfOrderPhone)
+    const twilioConfig: AuthRuntimeConfig = {
+      ...localnetConfig,
+      smsMode: "twilio",
+      twilioAccountSid: "AC00000000000000000000000000000000",
+      twilioAuthToken: "test-twilio-auth-token",
+      twilioVerifyServiceSid: "VA00000000000000000000000000000000"
+    }
+    const store = try Store
+    const testClock = try TestClock.testClockWith((clock) => Effect.succeed(clock))
+    const outOfOrderNested: Array<string> = []
+    const restoreTwilioFetch = try Effect.try(() => installTwilioFetchStub(async () => {
+      if (outOfOrderNested.length > 0) return
+      outOfOrderNested.push("running")
+      await runPromise(Effect.provide(
+        sqlQuery(
+          "UPDATE code_challenges SET sent_at = sent_at - 31000 WHERE method = 'sms' AND purpose_key = 'sign-in' AND destination_digest = $1 AND phase = 'unsent'",
+          [outOfOrderPhoneHash]
+        ),
+        Layer.succeed(Store, store)
+      ))
+      const nestedStarted = await runPromise(Effect.provide(
+        Effect.provide(
+          startPhoneVerification({ phoneE164: outOfOrderPhone, config: twilioConfig }),
+          Layer.succeed(Store, store)
+        ),
+        Layer.succeed(Clock.Clock, testClock)
+      )).then(
+        (started) => {
+          outOfOrderNested[0] = "ok"
+          return started
+        },
+        (err: unknown) => {
+          outOfOrderNested[0] = failureCode(err)
+          return undefined
+        }
+      )
+      if (nestedStarted !== undefined) {
+        await runPromise(Effect.provide(
+          sqlQuery("UPDATE code_challenges SET sent_at = sent_at + 31000 WHERE key = $1", [nestedStarted.challengeId]),
+          Layer.succeed(Store, store)
+        ))
+      }
+    }))
+    const outOfOrderFirst = try Effect.result(startPhoneVerification({ phoneE164: outOfOrderPhone, config: twilioConfig }))
+    const outOfOrderFirstOutcome = outOfOrderFirst._tag === "Failure" ? failureCode(outOfOrderFirst.failure) : "ok"
+    try Effect.try(() => restoreTwilioFetch())
+    const outOfOrderRows = try sqlQuery(
+      "SELECT key, phase FROM code_challenges WHERE method = 'sms' AND destination_digest = $1 ORDER BY sent_at",
+      [outOfOrderPhoneHash]
+    )
+
     try check(() => assert.deepStrictEqual(
       {
         disallowedCountry,
@@ -565,6 +641,11 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
           results: raceResults,
           rows: raceRows.map((row) => toText(row.phase)),
           verifiedNeedsOnboarding: raceVerified.needsOnboarding
+        },
+        phoneOutOfOrderSupersession: {
+          first: outOfOrderFirstOutcome,
+          nested: outOfOrderNested[0] ?? "missing",
+          rows: outOfOrderRows.map((row) => toText(row.phase))
         }
       },
       {
@@ -617,6 +698,11 @@ it.effect('Phone auth onboarding, lockout, reviewer password gate, session revoc
           results: ["ok", "rate_limited:sms_send"],
           rows: ["open"],
           verifiedNeedsOnboarding: true
+        },
+        phoneOutOfOrderSupersession: {
+          first: "challenge_not_found",
+          nested: "ok",
+          rows: ["unsent", "open"]
         }
       }
     ))

@@ -886,13 +886,20 @@ effect function sendPhoneChallenge(input: {
     requestSignInCode({ ...initial, now }, normalizedPhone, phoneHash, issuedCode, country, false, false, turnstilePassed, true)
   }
   try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`feed:sms-send:${phoneHash}`])
     try tx.query(
-      "UPDATE code_challenges SET phase = 'superseded', revision = revision + 1 WHERE method = 'sms' AND purpose_key = $1 AND destination_digest = $2 AND phase = 'open' AND key <> $3",
-      [input.purposeKey, phoneHash, challengeId]
+      "UPDATE code_challenges SET phase = 'superseded', revision = revision + 1 WHERE method = 'sms' AND purpose_key = $1 AND destination_digest = $2 AND phase = 'open' AND key <> $3 AND sent_at <= $4",
+      [input.purposeKey, phoneHash, challengeId, now]
     )
     const flipped = try tx.query(
-      "UPDATE code_challenges SET phase = 'open', revision = revision + 1 WHERE key = $1 AND phase = 'unsent' RETURNING key",
-      [challengeId]
+      `UPDATE code_challenges SET phase = 'open', revision = revision + 1
+       WHERE key = $1 AND phase = 'unsent'
+         AND NOT EXISTS (
+           SELECT 1 FROM code_challenges newer
+           WHERE newer.method = 'sms' AND newer.purpose_key = $2 AND newer.destination_digest = $3
+             AND newer.key <> $1 AND newer.sent_at > $4 AND newer.phase IN ('open', 'unsent')
+         ) RETURNING key`,
+      [challengeId, input.purposeKey, phoneHash, now]
     )
     if (flipped.length === 0) {
       throw new AuthFailure({ code: "challenge_not_found", message: "Verification challenge is no longer active.", status: 401 })
