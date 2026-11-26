@@ -134,6 +134,7 @@ it.effect(
   () => withSocialWorld(effect {
     try seedAccount("alice", "alice", "Alice Player", 12_500, "game")
     try seedAccount("bob", "bob", "Bob Trader", 20_000, "game")
+    try seedAccount("carol", "carol", "Carol Analyst", 20_000, "game")
     try seedGrant("alice", "Claude")
 
     const prefix = "Shipping #ai thesis on $NVDAI "
@@ -158,6 +159,14 @@ it.effect(
       authorId: "bob",
       authorKind: "user",
       content: "Threaded reply to @alice on #ai",
+      replyToPostId: root.id
+    })
+    try TestClock.adjust(Duration.seconds(1))
+
+    const carolReply = try createPost({
+      authorId: "carol",
+      authorKind: "user",
+      content: "Second reply to @alice on #ai",
       replyToPostId: root.id
     })
     try TestClock.adjust(Duration.seconds(1))
@@ -190,6 +199,7 @@ it.effect(
     const socialNpc = socialFeed.items.find((p) => p.id === "seed-post-1")
 
     const nonAuthorDeleteCode = try expectSocialCode(deletePost("alice", reply.id))
+    try muteAccount("bob", "carol")
     const deletedReply = try deletePost("bob", reply.id)
     const deletedLookupCode = try expectSocialCode(getPostThread(reply.id, "alice", "game"))
     const threadAfterDelete = try getPostThread(root.id, "alice", "game")
@@ -267,9 +277,9 @@ it.effect(
     }, {
       rejections: ["InvalidInput", "InvalidInput", "Forbidden", "Forbidden", "NotFound", "NotFound"],
       rootLength: 280,
-      threadCounts: [1, [reply.id], root.id, 0, 0],
+      threadCounts: [2, [reply.id, carolReply.id], root.id, 1, 1],
       engagement: [1, 0, true, 1, 0, true],
-      deletedReply: { postId: reply.id, deleted: true, replyToPostId: root.id, parentReplyCount: 0 },
+      deletedReply: { postId: reply.id, deleted: true, replyToPostId: root.id, parentReplyCount: 1 },
       gameRoot: {
         viaClientName: "Claude",
         marketId: "seed-market-1",
@@ -280,7 +290,7 @@ it.effect(
         linkCashtags: true,
         likeCount: 1,
         repostCount: 1,
-        replyCount: 1
+        replyCount: 2
       },
       socialRoot: {
         viaClientName: "Claude",

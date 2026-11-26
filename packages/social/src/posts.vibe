@@ -1562,11 +1562,11 @@ export effect function deletePost(accountId: string, postId: string): DeletePost
         "UPDATE feed_posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1",
         [replyToPostId]
       )
-      const visibleReplyRows = try tx.query(
-        `SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")}`,
-        [replyToPostId, accountId]
+      const totalReplyRows = try tx.query(
+        "SELECT count(*)::int AS total_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL",
+        [replyToPostId]
       )
-      parentReplyCount = visibleReplyRows[0] === undefined ? 0 : safeInt(visibleReplyRows[0].visible_count, 0)
+      parentReplyCount = totalReplyRows[0] === undefined ? 0 : safeInt(totalReplyRows[0].total_count, 0)
     }
     const events: FeedRealtimeEvent[] = [{
       type: "post.deleted",
