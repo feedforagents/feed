@@ -423,7 +423,7 @@ function toPredictionMarketView(row: Row, volumeOverride?: number): PredictionMa
   }
 }
 
-function toPredictionPositionView(row: Row): PredictionPositionView {
+function toPredictionPositionView(row: Row, nowMs: number): PredictionPositionView {
   const yesShares = toInt(row.yes_shares)
   const noShares = toInt(row.no_shares)
   const yesPriceBps = yesOddsBps(yesShares, noShares)
@@ -431,9 +431,12 @@ function toPredictionPositionView(row: Row): PredictionPositionView {
   const side: PredictionSide = parsePredictionSide(row.side) ?? "yes"
   const shares = toInt(row.shares)
   const status = parsePredictionStatus(row.market_status)
+  const isTradeable = status === "open" && nowMs < toInt(row.expires_at)
   const estimatedValueCents = status === "resolved" || status === "cancelled"
     ? toInt(row.payout_cents)
-    : markToMarketPredictionCents(side, shares, yesShares, noShares)
+    : isTradeable
+      ? markToMarketPredictionCents(side, shares, yesShares, noShares)
+      : 0
   return {
     marketId: requiredText(row.market_id),
     question: requiredText(row.question),
@@ -1189,6 +1192,7 @@ export effect function cancelPredictionMarket(marketId: string): CancelPredictio
 
 export effect function getUserPositions(accountId: string): UserPositionsView!StoreFailure!Store {
   const store = try Store
+  const now = try Clock.currentTimeMillis
   return try store.transaction(effect (tx: Tx) => {
     const predRows = try tx.query(
       `SELECT
@@ -1196,7 +1200,8 @@ export effect function getUserPositions(accountId: string): UserPositionsView!St
          m.question,
          m.status AS market_status,
          m.yes_shares,
-         m.no_shares
+         m.no_shares,
+         m.expires_at
        FROM feed_prediction_positions p
        JOIN feed_prediction_markets m ON m.id = p.market_id
        WHERE p.holder_id = $1 AND p.settled_at IS NULL AND p.shares > 0
@@ -1206,7 +1211,7 @@ export effect function getUserPositions(accountId: string): UserPositionsView!St
     const perpPositions = try listPerpPositionsIn(tx, accountId)
     return {
       accountId,
-      predictionPositions: predRows.map(toPredictionPositionView),
+      predictionPositions: predRows.map((row) => toPredictionPositionView(row, now)),
       perpPositions
     }
   })
