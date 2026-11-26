@@ -442,6 +442,14 @@ afterAll(() => {
   environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
 });
 
+async function completeReviewerSignIn() {
+  await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
+  await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
+  await act(() => userEvent.fill(page.getByLabelText(/Password/i), "secret-pass"));
+  await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
+  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+}
+
 it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
   const container = document.body.appendChild(document.createElement("div"));
@@ -499,11 +507,7 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
   await expect.element(page.getByRole("dialog")).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Email" })).toBeInTheDocument();
   await expect.element(page.getByRole("tab", { name: "Connect Agent" })).toBeInTheDocument();
-  await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
-  await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
-  await act(() => userEvent.fill(page.getByLabelText(/Password/i), "secret-pass"));
-  await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
-  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  await completeReviewerSignIn();
 
   await act(() => storeActions.setPlayMode("game"));
 
@@ -565,11 +569,7 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
 
   const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
   await act(() => userEvent.click(signInBtn));
-  await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
-  await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
-  await act(() => userEvent.fill(page.getByLabelText(/Password/i), "secret-pass"));
-  await act(() => userEvent.click(page.getByRole("button", { name: /Sign in as reviewer/i })));
-  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  await completeReviewerSignIn();
 
   act(() => {
     void storeActions.loadPnlHistory("1D");
