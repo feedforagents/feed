@@ -1117,12 +1117,18 @@ export effect function fastForwardSimulatedHours(hours: number): FastForwardResu
   if (!Number.isFinite(hours) || hours <= 0) {
     throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "hours must be a finite positive number." })
   }
+  if (hours > 24) {
+    throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "hours must be at most 24." })
+  }
   const wallNow = try Clock.currentTimeMillis
   const deltaMs = Math.round(hours * 3_600_000)
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     try ensureWorldStateTx(tx, wallNow)
-    const rows = try tx.query("SELECT current_day, last_tick_at FROM feed_world_state WHERE singleton = true")
+    const rows = try tx.query("SELECT current_day, last_tick_at, game_running FROM feed_world_state WHERE singleton = true")
+    if (rows[0]?.game_running === false) {
+      throw new EngineFailure({ code: "CLOCK_MODE_INVALID", message: "fastForwardSimulatedHours requires the world to be running." })
+    }
     const prevTickAt = safeNonNegInt(rows[0]?.last_tick_at, 0)
     const baseMs = Math.max(wallNow, prevTickAt)
     const nextMs = baseMs + deltaMs
