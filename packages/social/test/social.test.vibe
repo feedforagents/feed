@@ -1472,3 +1472,29 @@ it.effect(
     }))
   })
 )
+
+it.effect(
+  'world search tag counts cover the full match set, not just the returned page (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")',
+  () => withSocialWorld(effect {
+    try seedAccount("alice", "alice", "Alice Player")
+    const baseNow = try Clock.currentTimeMillis
+    for (let i = 0; i < 20; i += 1) {
+      const extra = i === 0 ? " #zztagfootball" : ""
+      try queryStore(
+        "INSERT INTO feed_posts (id, author_id, author_kind, content, reply_to_post_id, quote_post_id, via_client_name, market_id, ticker, like_count, repost_count, reply_count, deleted_at, created_at) VALUES ($1, $2, 'user', $3, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $4)",
+        [`search-tag-post-${i}`, "alice", `dispatch ${i} on #zztagfoo${extra}`, baseNow - (20 - i)]
+      )
+    }
+    const result = try searchWorld({ query: "zztagfoo", mode: "game", limit: 15 })
+    const fooTag = result.tags.find((t) => t.tag === "#zztagfoo")
+    const footballTag = result.tags.find((t) => t.tag === "#zztagfootball")
+    try check(() => assert.deepStrictEqual(
+      {
+        pageSize: result.posts.length,
+        fooCount: fooTag?.postCount,
+        footballCount: footballTag?.postCount
+      },
+      { pageSize: 15, fooCount: 20, footballCount: 1 }
+    ))
+  })
+)
