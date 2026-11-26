@@ -820,7 +820,7 @@ effect function executePublicMarketTool(
       const prediction = kind === "all" || kind === "prediction"
         ? (try listPredictionMarkets(statusParam)).slice(0, limit).map(formatPredictionMarketForMcp)
         : []
-      const perp = kind === "all" || kind === "perp"
+      const perp = (kind === "all" || kind === "perp") && statusParam !== "resolved"
         ? (try listPerpMarkets()).slice(0, limit).map(formatPerpMarketForMcp)
         : []
       return {
