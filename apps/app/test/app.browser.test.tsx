@@ -111,18 +111,22 @@ let profilePosts: typeof SAMPLE_POSTS = [];
 const fetchPaths: string[] = [];
 const VIEWER: ViewerSession = {
     accountId: "ailon-musk",
-      handle: "ailonmusk",
-      displayName: "AIlon Musk",
-      bio: "",
-      avatarUrl: null,
-      phoneLast2: null,
-      uiMode: "game",
-      balanceCents: 0,
-      startingGrantCents: 0,
-      isAdmin: false,
-      isReviewer: false,
-      agentGrant: null,
-    };
+    handle: "ailonmusk",
+    displayName: "AIlon Musk",
+    bio: "",
+    avatarUrl: null,
+    bannerUrl: null,
+    phoneLast2: null,
+    phoneVerifiedAt: null,
+    emailMasked: null,
+    emailVerifiedAt: null,
+    uiMode: "game",
+    balanceCents: 0,
+    startingGrantCents: 0,
+    isAdmin: false,
+    isReviewer: false,
+    agentGrant: null,
+};
     const SAMPLE_LEADERBOARD_PLAYER_ENTRY = {
   rank: 1,
   accountId: "acct-player-1",
@@ -210,6 +214,24 @@ const SAMPLE_TRADES = [
     createdAt: Date.now() - 30_000,
   },
 ];
+
+async function renderAppAndExpectPost(content: string) {
+    const container = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(container);
+    opened.push(root);
+    await act(() => Promise.resolve(root.render(<App />)));
+
+    await expect.element(page.getByText(content)).toBeInTheDocument();
+}
+
+async function dispatchPostDeletedAndExpectGone() {
+    liveEventSources[0].dispatchEvent(
+      new MessageEvent("post.deleted", {
+        data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
+      }),
+    );
+    await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+}
 
 function installMockNetwork() {
   fetchPaths.length = 0;
@@ -449,12 +471,7 @@ afterAll(() => {
 
 it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   installMockNetwork();
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-
-  await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
+    await renderAppAndExpectPost("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.");
   await expect.element(page.getByText("Prediction Market").first()).toBeInTheDocument();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
 
@@ -565,19 +582,9 @@ it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "S
   installMockNetwork();
   explorePosts = [SAMPLE_POSTS[0]];
   profilePosts = [SAMPLE_POSTS[0]];
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  opened.push(root);
-  await act(() => Promise.resolve(root.render(<App />)));
-
-  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+    await renderAppAndExpectPost(SAMPLE_POSTS[0].content);
   const feedFetchesBefore = fetchPaths.filter((path) => path === "/api/feed").length;
-  liveEventSources[0].dispatchEvent(
-    new MessageEvent("post.deleted", {
-      data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
-    }),
-  );
-  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+    await dispatchPostDeletedAndExpectGone();
   expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedFetchesBefore);
   await act(async () => {
     await storeActions.navigate("/explore");
@@ -607,12 +614,7 @@ it('A deleted post disappears from Explore and Profile (spec/social/posts.md, "S
   expect(getStoreSnapshot().profileBundle?.posts?.length).toBe(2);
 
   const fetchCallsBefore = fetchPaths.length;
-  liveEventSources[0].dispatchEvent(
-    new MessageEvent("post.deleted", {
-      data: JSON.stringify({ type: "post.deleted", postId: SAMPLE_POSTS[0].id, authorId: SAMPLE_POSTS[0].authorId }),
-    }),
-  );
-  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).not.toBeInTheDocument();
+    await dispatchPostDeletedAndExpectGone();
   expect(getStoreSnapshot().profileBundle).not.toBeNull();
   expect(getStoreSnapshot().profileBundle?.posts?.map((post) => post.card.id)).toEqual(["browser-post-2"]);
   expect(fetchPaths.length).toBe(fetchCallsBefore);
