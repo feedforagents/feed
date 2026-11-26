@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { App } from "../src/web/App.tsx";
 import { storeActions } from "../src/web/store.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 
 const opened: Root[] = [];
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -191,7 +192,18 @@ const SAMPLE_TRADES = [
   },
 ];
 
-function installMockNetwork() {
+function profilePayload(id: string, handle: string, displayName: string) {
+  return {
+    profile: { id, handle, displayName, kind: "user", postsCount: 0, followersCount: 0, followingCount: 0 },
+    posts: [],
+    positions: {},
+    nextCursor: null,
+  };
+}
+
+function installMockNetwork(options: { holdTradesFor?: string } = {}) {
+  const heldTrades = new Map<string, Array<(items: unknown[]) => void>>();
+  const requestedTrades = new Set<string>();
   let signedIn = false;
   let uiMode: "game" | "social" = "game";
   let viewerHandle = "alice";
@@ -324,8 +336,21 @@ function installMockNetwork() {
       return json({ posts: SAMPLE_POSTS, nextCursor: null });
     }
     if (path.endsWith("/trades")) {
+      if (path.startsWith("/api/users/")) {
+        const handle = decodeURIComponent(path.slice("/api/users/".length, path.length - "/trades".length));
+        if (options.holdTradesFor === handle) {
+          requestedTrades.add(handle);
+          return new Promise<Response>((resolve) => {
+            const pending = heldTrades.get(handle) ?? [];
+            pending.push((items) => resolve(Response.json({ trades: items })));
+            heldTrades.set(handle, pending);
+          });
+        }
+      }
       return json({ trades: SAMPLE_TRADES });
     }
+    if (path === "/api/users/alice") return json(profilePayload("acc-alice", "alice", "Alice Aardvark"));
+    if (path === "/api/users/bob") return json(profilePayload("acc-bob", "bob", "Bob Badger"));
     if (path.startsWith("/api/users/")) {
       const handle = decodeURIComponent(path.slice("/api/users/".length));
       return json({
@@ -402,6 +427,13 @@ function installMockNetwork() {
     close() {}
   }
   vi.stubGlobal("EventSource", StubEventSource);
+
+  return {
+    tradesRequested: (handle: string) => requestedTrades.has(handle),
+    releaseTrades: (handle: string, items: unknown[]) => {
+      for (const release of heldTrades.get(handle)?.splice(0) ?? []) release(items);
+    },
+  };
 }
 
 beforeAll(() => {
@@ -533,4 +565,34 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
   await act(() => storeActions.navigate("/settings?tab=account"));
   await expect.element(page.getByText("e***@example.com")).toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Change email" })).toBeInTheDocument();
+});
+
+it('Late trades never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const network = installMockNetwork({ holdTradesFor: "alice" });
+  const container = document.body.appendChild(document.createElement("div"));
+  const root = createRoot(container);
+  opened.push(root);
+  await act(() => Promise.resolve(root.render(<App />)));
+
+  await act(() => storeActions.navigate("/u/alice"));
+  await expect.element(page.getByText("Alice Aardvark").first()).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => Promise.resolve());
+  expect(network.tradesRequested("alice")).toBe(true);
+
+  await act(() => storeActions.navigate("/u/bob"));
+  await expect.element(page.getByText("Bob Badger").first()).toBeInTheDocument();
+  expect(getStoreSnapshot().profileHandle).toBe("bob");
+  expect(network.tradesRequested("bob")).toBe(false);
+
+  network.releaseTrades("alice", [{ ...SAMPLE_TRADES[0], id: "alice-trade-1" }]);
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileTrades).toEqual([]);
+  expect(getStoreSnapshot().profileTradesLoading).toBe(false);
+
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Posts" })));
+  await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().profileTrades.map((t) => t.id)).toEqual(["trade-1"]);
 });

@@ -1473,14 +1473,32 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
   setStoreState({ profileLikesLoading: false });
 }
 
+let profileTradesLoadCount = 0;
+
 export async function loadProfileTrades(handleOrSelf?: string | null): Promise<void> {
   const s = getStoreSnapshot();
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
+  const loadId = ++profileTradesLoadCount;
   setStoreState({ profileTradesLoading: true });
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/trades?limit=50`, {
     parse: decodeMarketTrades,
   });
+  if (loadId !== profileTradesLoadCount) return;
+  const cur = getStoreSnapshot();
+  const lower = handle.toLowerCase();
+  const bundle = cur.profileBundle;
+  const bundleMatches = (key: string | null) =>
+    bundle !== null &&
+    key !== null &&
+    (bundle.summary.handle.toLowerCase() === key || bundle.id.toLowerCase() === key || bundle.orgMeta?.ticker?.toLowerCase() === key);
+  const stillCurrent =
+    cur.route === "Profile" &&
+    (cur.profileHandle?.toLowerCase() === lower || (bundleMatches(lower) && (cur.profileHandle === null || bundleMatches(cur.profileHandle.toLowerCase()))));
+  if (!stillCurrent) {
+    setStoreState({ profileTradesLoading: false });
+    return;
+  }
   if (res.ok) {
     setStoreState({ profileTrades: res.data, profileTradesLoading: false });
     return;
