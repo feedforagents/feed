@@ -18,6 +18,7 @@ import {
   getFilteredLeaderboardPage,
   getLeaderboard,
   getMarketPriceHistory,
+  getPerpPriceHistory,
   getPerpMarket,
   getPointLedger,
   getPredictionMarket,
@@ -1207,6 +1208,25 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
         board7dProfitAfterExpiry: expectedProfitAfter,
         board30dProfitAfterExpiry: expectedProfitAfter
       }
+    ))
+  })
+)
+
+it.effect('The perp price chart counts each NPC spot trade once, matching its traded volume (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    try seedHundredCorpMarket(now)
+    const buy = try executeNpcSpotTrade({ actorId: "ailon-musk", ticker: "HUND", side: "buy", quoteCents: 2_500 })
+    try TestClock.adjust("1 minute")
+    const sell = try executeNpcSpotTrade({ actorId: "ailon-musk", ticker: "HUND", side: "sell", quoteCents: 1_000 })
+    const traded = (range: "1D" | "ALL") => effect {
+      const history = try getPerpPriceHistory({ ticker: "HUND", range })
+      return history.points.filter((p) => p.volumeCents > 0).map((p) => [p.volumeCents, p.indexPriceCents])
+    }
+    const day = try traded("1D")
+    const all = try traded("ALL")
+    try check(() => assert.deepStrictEqual(
+      { day, all },
+      { day: [[2_500, buy.indexPriceCents], [1_000, sell.indexPriceCents]], all: [[2_500, buy.indexPriceCents], [1_000, sell.indexPriceCents]] }
     ))
   })
 )
