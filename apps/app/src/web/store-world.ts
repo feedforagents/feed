@@ -1680,25 +1680,34 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
   await loadChatMessages(s.selectedChatId);
 }
 
+const respondingInviteIds = new Set<string>();
+
 export async function respondGroupInvite(inviteId: string, accept: boolean): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
-  const res = await requestJson(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
-    method: "POST",
-    body: { accept },
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setErrorNotice(res.message);
-    return;
+  if (respondingInviteIds.has(inviteId)) return;
+  respondingInviteIds.add(inviteId);
+  try {
+    const res = await requestJson(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
+      method: "POST",
+      body: { accept },
+      parse: passThrough,
+    });
+    if (!res.ok) {
+      setErrorNotice(res.message);
+      return;
+    }
+    setStatusNotice(accept ? "Joined group." : "Invite declined.");
+    const cur = getStoreSnapshot();
+    setStoreState({
+      alphaInvites: cur.alphaInvites.filter((inv) => inv.id !== inviteId),
+      notifications: cur.notifications.map((n) =>
+        n.inviteId === inviteId ? { ...n, item: { ...n.item, read: true, invitePending: false } } : n,
+      ),
+    });
+    await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
+  } finally {
+    respondingInviteIds.delete(inviteId);
   }
-  setStatusNotice(accept ? "Joined group." : "Invite declined.");
-  const cur = getStoreSnapshot();
-  setStoreState({
-    notifications: cur.notifications.map((n) =>
-      n.inviteId === inviteId ? { ...n, item: { ...n.item, read: true, invitePending: false } } : n,
-    ),
-  });
-  await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
 
 let notificationsLoadCount = 0;
