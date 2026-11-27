@@ -1760,6 +1760,17 @@ export async function updateOwnProfile(payload: {
       bannerUrl: nextBanner,
     },
   });
+  const cur = getStoreSnapshot();
+  if (cur.profileBundle?.summary.isOwnProfile && cur.profileBundle.summary.handle.toLowerCase() === s.viewer.handle.toLowerCase()) {
+    const nextSummary = { ...cur.profileBundle.summary, displayName: nextDisplayName };
+    if (nextBio) nextSummary.bio = nextBio;
+    else delete nextSummary.bio;
+    if (nextAvatar) nextSummary.avatarUrl = nextAvatar;
+    else delete nextSummary.avatarUrl;
+    if (nextBanner) nextSummary.bannerUrl = nextBanner;
+    else delete nextSummary.bannerUrl;
+    setStoreState({ profileBundle: { ...cur.profileBundle, summary: nextSummary } });
+  }
   setStatusNotice("Profile updated.");
   if (s.route === "Profile" && s.profileBundle?.summary.isOwnProfile) {
     await loadProfile(s.viewer.handle);
