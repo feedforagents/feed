@@ -1666,7 +1666,7 @@ effect function setHundredCorpPrices(priceCents: number): void!StoreFailure!Stor
 
 effect function sweepLiquidatedIds(): Array<string>!(MarketFailure | StoreFailure)!Store {
   const busLayer = Layer.succeed(MarketRealtimeBus, {
-    publish: (event: MarketPerpRealtimeEvent) => Effect.sync(() => true)
+    publish: (_event: MarketPerpRealtimeEvent) => Effect.sync(() => true)
   })
   return try effect {
     provide busLayer {
