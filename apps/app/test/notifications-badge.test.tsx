@@ -4,13 +4,15 @@ import { act } from "react";
 import type { Root } from "react-dom/client";
 import { expect, it } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { eventSources, flush, installAppTestLifecycle, installMockNetwork, mountApp } from "./app-test-helpers.tsx";
+import { decodeNotifications } from "../src/web/types.ts";
+import { eventSources, flush, installAppTestLifecycle, installMockNetwork, makeViewerSession, mountApp } from "./app-test-helpers.tsx";
 
 const opened: Root[] = [];
 
 installAppTestLifecycle(opened, () => {
   mockState.uiMode = "game";
   mockState.notificationsOverride = null;
+  mockState.markReadCalls = 0;
   setStoreState({ viewer: null, notifications: [], unreadNotifications: 0, route: "Home" });
 });
 
@@ -50,6 +52,7 @@ const socialNotifications = {
 const mockState = {
   uiMode: "game" as "game" | "social",
   notificationsOverride: null as { notifications: unknown[]; unreadCount: number } | null,
+  markReadCalls: 0,
 };
 
 function respond(path: string): unknown {
@@ -64,6 +67,10 @@ function respond(path: string): unknown {
   }
   if (path === "/api/notifications") {
     return mockState.notificationsOverride ?? (mockState.uiMode === "game" ? gameNotifications : socialNotifications);
+  }
+  if (path === "/api/notifications/read") {
+    mockState.markReadCalls += 1;
+    return { markedCount: 1, unreadCount: 0 };
   }
   if (path === "/api/feed" || path === "/api/posts") return { items: [], nextCursor: null };
   if (path === "/api/trending") return { trending: [] };
@@ -97,6 +104,12 @@ function notificationBadgeText(container: HTMLElement): string | null {
 
 function unreadRowCount(container: HTMLElement): number {
   return [...container.querySelectorAll("span.sr-only")].filter((span) => span.textContent === "Unread").length;
+}
+
+function markAllReadButton(container: HTMLElement): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+    button.textContent?.includes("Mark all read"),
+  );
 }
 
 async function emitSse(type: string): Promise<void> {
@@ -154,4 +167,51 @@ it('notification badge follows a mode change through a refetch and shows the ser
   expect(paged.notifications).toHaveLength(50);
   expect(paged.unreadNotifications).toBe(150);
   expect(notificationBadgeText(container)).toBe("99+");
+});
+
+it('mark all read stays available while an unread notification sits past the loaded page (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
+  mockState.notificationsOverride = {
+    notifications: Array.from({ length: 50 }, (_, i) => ({
+      id: `notif-follow-${i}`,
+      kind: "follow",
+      actorHandle: "bob",
+      actorName: "Bob",
+      title: "Bob followed you",
+      read: true,
+      createdAt: Date.now() - 60_000 - i,
+    })),
+    unreadCount: 1,
+  };
+  installMockNetwork(respond);
+  const { container } = await mountApp(opened);
+  await flush();
+
+  const seeded = decodeNotifications(mockState.notificationsOverride);
+  await act(() =>
+    Promise.resolve(
+      setStoreState({
+        viewer: makeViewerSession(),
+        notifications: seeded.items,
+        unreadNotifications: seeded.unreadCount,
+        route: "Notifications",
+      }),
+    ),
+  );
+  await flush();
+
+  expect(getStoreSnapshot().notifications).toHaveLength(50);
+  expect(getStoreSnapshot().unreadNotifications).toBe(1);
+  expect(notificationBadgeText(container)).toBe("1");
+  expect(unreadRowCount(container)).toBe(0);
+
+  const button = markAllReadButton(container);
+  expect(button?.disabled).toBe(false);
+
+  await act(() => Promise.resolve(button?.click()));
+  await flush();
+
+  expect(mockState.markReadCalls).toBe(1);
+  expect(getStoreSnapshot().unreadNotifications).toBe(0);
+  expect(notificationBadgeText(container)).toBeNull();
+  expect(markAllReadButton(container)?.disabled).toBe(true);
 });

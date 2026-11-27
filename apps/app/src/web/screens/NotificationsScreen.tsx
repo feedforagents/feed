@@ -92,7 +92,7 @@ export function NotificationsScreen({ mode }: { readonly mode: UiMode }) {
             <Button
               variant="ghost"
               size="sm"
-              disabled={modeFiltered.every((n) => n.item.read)}
+              disabled={s.unreadNotifications === 0 && modeFiltered.every((n) => n.item.read)}
               onClick={() => { void storeActions.markAllNotificationsRead(); }}
             >
               Mark all read
