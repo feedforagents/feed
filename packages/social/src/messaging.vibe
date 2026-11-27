@@ -1271,7 +1271,11 @@ export effect function createNpcAlphaInvite(input: CreateNpcAlphaInviteInput): A
     const actorAvatarUrl = actorId !== "" ? resolveActorAvatarUrl(actorId, toText(actorRow.profile_image_url)) : null
     const actorTier = normalizeOptionalText(input.tier ?? undefined) ?? toText(actorRow.tier) ?? null
     const targetRows = try tx.query(
-      "SELECT account_id FROM feed_accounts WHERE account_id = $1 LIMIT 1",
+      `SELECT fa.account_id
+       FROM feed_accounts fa
+       WHERE fa.account_id = $1
+         AND NOT EXISTS (SELECT 1 FROM accounts acct WHERE acct.key = fa.account_id AND acct.status <> 'active')
+       LIMIT 1`,
       [input.targetAccountId]
     )
     if (targetRows.length === 0) {

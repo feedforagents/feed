@@ -1,0 +1,124 @@
+// spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/npcLoop.md, "Human social engagement unlocks eligibility for private alpha-group invites"; spec/social/messaging.md, "Group and NPC alpha-group invites require active membership and exclude blocked or already-invited targets"; spec/auth/email.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld, toText, type Tx } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import {
+  SocialFailure,
+  createNpcAlphaInvite,
+  createPost,
+  likePost,
+  listPendingGroupInvites,
+} from "@repo/social"
+import { TestClock } from "effect/testing"
+import { executeNpcDecision, findEligibleAlphaTarget } from "../src/index.vibe"
+
+it.effect(
+  'NPC alpha-group eligibility and invite creation skip deleting and erased accounts in favor of active engaged players (spec/engine/npcLoop.md, "Human social engagement unlocks eligibility for private alpha-group invites"; spec/social/messaging.md, "Group and NPC alpha-group invites require active membership and exclude blocked or already-invited targets"; spec/auth/email.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days")',
+  () => scoped(effect {
+    const fixedNow = 1_762_000_000_000
+    try TestClock.setTime(fixedNow)
+    provide localStoreLayer({ kind: "pglite", file: undefined }) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const npcActor = "sam-ailtman"
+      const fixtures = [
+        { id: "alpha-acct-deleting", handle: "alpha_del_h", finalStatus: "deleting", likes: 3 },
+        { id: "alpha-acct-erased", handle: "alpha_era_h", finalStatus: "erased", likes: 3 },
+        { id: "alpha-acct-live", handle: "alpha_live_h", finalStatus: "active", likes: 2 },
+      ] as const
+
+      const db = try Store
+      try db.transaction(effect (tx: Tx) => {
+        for (const item of fixtures) {
+          const orgKey = `org-${item.id}`
+          try tx.query(
+            "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
+            [orgKey, item.handle, fixedNow],
+          )
+          try tx.query(
+            "INSERT INTO accounts (key, state, revision, organization_id, status, created_at, updated_at) VALUES ($1, '{}'::jsonb, 1, $2, 'active', $3, $3)",
+            [item.id, orgKey, fixedNow],
+          )
+          try tx.query(
+            "INSERT INTO feed_accounts (account_id, handle, display_name, balance_cents, starting_grant_cents, created_at, updated_at) VALUES ($1, $2, $3, 15000, 10000, $4, $4)",
+            [item.id, item.handle, item.handle, fixedNow],
+          )
+        }
+      })
+
+      const posts = [
+        try createPost({ authorId: npcActor, authorKind: "npc", content: "Desk catalyst alpha note alpha-1" }),
+        try createPost({ authorId: npcActor, authorKind: "npc", content: "Desk catalyst alpha note alpha-2" }),
+        try createPost({ authorId: npcActor, authorKind: "npc", content: "Desk catalyst alpha note alpha-3" }),
+      ]
+
+      for (const item of fixtures) {
+        for (let idx = 0; idx < item.likes; idx += 1) {
+          try likePost(item.id, posts[idx]!.id)
+        }
+      }
+
+      try db.transaction(effect (tx: Tx) => {
+        for (const item of fixtures) {
+          if (item.finalStatus !== "active") {
+            try tx.query(
+              "UPDATE accounts SET status = $2, updated_at = $3 WHERE key = $1",
+              [item.id, item.finalStatus, fixedNow + 1_000],
+            )
+          }
+        }
+      })
+
+      const directInviteOutcome = (accountId: string) => effect {
+        const outcome = try exit(createNpcAlphaInvite({ actorId: npcActor, targetAccountId: accountId }))
+        if (Exit.isSuccess(outcome)) return `invited:${outcome.value.invitedAccountId}`
+        const err = Cause.squash(outcome.cause)
+        return err instanceof SocialFailure ? err.code : "other_error"
+      }
+
+      const chosenBeforeInvite = try findEligibleAlphaTarget(npcActor, fixedNow + 2_000)
+      const deletingDirect = try directInviteOutcome("alpha-acct-deleting")
+      const erasedDirect = try directInviteOutcome("alpha-acct-erased")
+      const npcInviteStep = try executeNpcDecision(npcActor, { kind: "INVITE_ALPHA" }, fixedNow + 2_000)
+      const chosenAfterInvite = try findEligibleAlphaTarget(npcActor, fixedNow + 2_000)
+
+      const livePending = try listPendingGroupInvites("alpha-acct-live", "npc_alpha")
+      const inactivePending = try db.transaction(effect (tx: Tx) => {
+        const deletingRows = try tx.query<{ id: string }>(
+          "SELECT id FROM feed_group_invites WHERE invited_account_id = $1 AND status = 'pending'",
+          ["alpha-acct-deleting"],
+        )
+        const erasedRows = try tx.query<{ id: string }>(
+          "SELECT id FROM feed_group_invites WHERE invited_account_id = $1 AND status = 'pending'",
+          ["alpha-acct-erased"],
+        )
+        return [deletingRows.length, erasedRows.length] as const
+      })
+
+      try Effect.try(() => {
+        assert.deepStrictEqual(
+          {
+            deletingDirect,
+            erasedDirect,
+            chosenBeforeInvite,
+            stepOk: npcInviteStep.success,
+            stepTarget: toText((npcInviteStep.data as Record<string, unknown> | undefined)?.targetAccountId),
+            chosenAfterInvite,
+            pendingCounts: [livePending.length, inactivePending[0], inactivePending[1]],
+          },
+          {
+            deletingDirect: "NotFound",
+            erasedDirect: "NotFound",
+            chosenBeforeInvite: "alpha-acct-live",
+            stepOk: true,
+            stepTarget: "alpha-acct-live",
+            chosenAfterInvite: null,
+            pendingCounts: [1, 0, 0],
+          },
+        )
+      })
+    }
+  }),
+  120_000,
+)

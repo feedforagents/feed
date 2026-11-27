@@ -211,6 +211,10 @@ effect function loadNpcProviderSnapshot(actor: DbActorRow, nowMs: number): NpcPr
          WHERE (b.blocker_id = $1 AND b.blocked_id = a.account_id)
             OR (b.blocker_id = a.account_id AND b.blocked_id = $1)
        )
+       AND NOT EXISTS (
+         SELECT 1 FROM accounts acct
+         WHERE acct.key = a.account_id AND acct.status <> 'active'
+       )
        ORDER BY a.updated_at DESC
        LIMIT 6`,
       [actor.id],
@@ -496,6 +500,10 @@ effect function findEligibleAlphaTargetTx(
      AND NOT EXISTS (
        SELECT 1 FROM feed_alpha_invite_cooldowns c
        WHERE c.actor_id = $1 AND c.account_id = eng.account_id AND c.next_eligible_at > $3
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM accounts acct
+       WHERE acct.key = a.account_id AND acct.status <> 'active'
      )
      GROUP BY eng.account_id
      HAVING SUM(eng.score) >= $2
