@@ -128,6 +128,10 @@ export async function hydrateAuth(): Promise<void> {
     devEmailLinkEnabled,
   } = res.data;
   if (authenticated && viewer) {
+    const switchedAccount = prevViewerId !== null && prevViewerId !== viewer.accountId;
+    if (switchedAccount) {
+      clearAccountState();
+    }
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
     sendApp({ type: "verifyPhoneSms", codeValid: true, isNewAccount: false });
@@ -158,6 +162,9 @@ export async function hydrateAuth(): Promise<void> {
     });
     if (prevViewerId !== viewer.accountId) {
       notifyAuthChanged();
+      if (switchedAccount) {
+        await refreshViewerSurfaces();
+      }
     } else if (prevUiMode !== viewer.uiMode) {
       await loadNotifications();
     }

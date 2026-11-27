@@ -429,6 +429,7 @@ function installMockNetwork(
       });
     }
     if (path === "/api/feed" && feedFails) return Promise.resolve(Response.json({ message: "Feed is unavailable." }, { status: 503 }));
+    if (path === "/api/feed" && url.searchParams.get("tab") === "following") return json({ items: [{ ...SAMPLE_POSTS[0], id: "following-post-a" }], nextCursor: null });
     if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
@@ -716,6 +717,11 @@ function installMockNetwork(
     },
     expireSession: () => {
       signedIn = false;
+    },
+    switchAccount: () => {
+      viewerIsReviewer = false;
+      viewerHandle = "erin_trader";
+      viewerDisplayName = "Erin Trader";
     },
     pnlRequested: (range: string) => requestedPnlRanges.has(range),
     releasePnl: (range: string) => {
@@ -1419,6 +1425,23 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   const expired = getStoreSnapshot();
   expect({ viewer: expired.viewer, feedTab: expired.feedTab, pnlTimeRange: expired.pnlTimeRange, pnlHistory: expired.pnlHistory }).toEqual({ viewer: null, feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [] });
   expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedLoadsBeforeExpiry + 1);
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await signInAsReviewer();
+  await act(() => storeActions.selectFeedTab("following"));
+  await act(() => storeActions.loadPnlHistory("1W"));
+  const accountState = () => {
+    const s = getStoreSnapshot();
+    return { accountId: s.viewer?.accountId, feedTab: s.feedTab, pnlTimeRange: s.pnlTimeRange, pnlHistory: s.pnlHistory, followingPostShown: s.feedPosts.some((post) => post.card.id === "following-post-a") };
+  };
+  const accountA = accountState();
+  expect(accountA).toMatchObject({ accountId: "acct-player-1", feedTab: "following", pnlTimeRange: "1W", followingPostShown: true });
+  await act(() => hydrateAuth());
+  expect(accountState()).toEqual(accountA);
+
+  network.switchAccount();
+  await act(() => hydrateAuth());
+  expect(accountState()).toEqual({ accountId: "acct-email-1", feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [], followingPostShown: false });
 });
 
 it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
