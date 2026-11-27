@@ -72,6 +72,7 @@ const likeInFlight = new Set<string>();
 const repostInFlight = new Set<string>();
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
+let feedLoadedTab: UiFeedTab = "latest";
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
@@ -300,6 +301,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const latest = getStoreSnapshot();
   if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
+    feedLoadedTab = tab;
     setStoreState({
       feedPosts: preserveEngagementSince(res.data.items, engagementAtStart),
       feedNextCursor: res.data.nextCursor,
@@ -308,7 +310,16 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     });
     return;
   }
-  setStoreState({ feedLoading: false });
+  if (feedLoadedTab !== tab && (feedLoadedTab === "latest" || latest.viewer !== null)) {
+    const specTab = toSpecTab(feedLoadedTab);
+    sendNav({ type: "selectFeedTab", tab: specTab });
+    sendApp({ type: "selectTab", tab: specTab });
+    setStoreState({ feedTab: feedLoadedTab, feedLoading: false });
+  } else if (feedLoadedTab !== tab) {
+    setStoreState({ feedPosts: [], feedNextCursor: null, feedLoading: false });
+  } else {
+    setStoreState({ feedLoading: false });
+  }
   setErrorNotice(res.message);
 }
 
