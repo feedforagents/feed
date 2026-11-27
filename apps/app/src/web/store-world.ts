@@ -1925,6 +1925,10 @@ export async function loadModerationLists(): Promise<void> {
     blockedAccounts: blockedRes.ok ? blockedRes.data : cur.blockedAccounts,
     mutedAccounts: mutedRes.ok ? mutedRes.data : cur.mutedAccounts,
   });
+  const failed = !blockedRes.ok ? blockedRes : !mutedRes.ok ? mutedRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function updateOwnProfile(payload: {
