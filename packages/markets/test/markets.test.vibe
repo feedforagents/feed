@@ -1616,7 +1616,7 @@ it.effect('Perp funding skips a position opened in the current game period after
         fundingAccruedCount: 1,
         aliceCreatedAt: gameNow,
         aliceAccruedFundingCents: 0,
-        aliceLastFundingPeriod: 0
+        aliceLastFundingPeriod: wallPeriod + 1
       }
     ))
   })

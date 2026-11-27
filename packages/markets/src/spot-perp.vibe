@@ -503,8 +503,15 @@ export effect function listPerpPositions(ownerId: string): ReadonlyArray<PerpPos
   return try store.transaction((tx) => listPerpPositionsIn(tx, ownerId))
 }
 
-effect function resolveTradeNowMs(nowMs?: number): number!! {
-  return nowMs !== undefined && Number.isFinite(nowMs) ? Math.trunc(nowMs) : try Clock.currentTimeMillis
+effect function resolveTradeNowMs(nowMs?: number): number!StoreFailure!Store {
+  if (nowMs !== undefined && Number.isFinite(nowMs)) return Math.trunc(nowMs)
+  const wallNow = try Clock.currentTimeMillis
+  const store = try Store
+  return try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query("SELECT last_tick_at FROM feed_world_state WHERE singleton = true")
+    const recorded = rows.length > 0 ? toInt(rows[0]?.last_tick_at) : 0
+    return Math.max(wallNow, recorded)
+  })
 }
 
 // spec/markets/spotPerp.md, "Only NPCs may trade the spot CPMM pool, updating the persisted index price"
@@ -1673,7 +1680,7 @@ export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceip
 
 export effect function liquidateEligiblePositions(): LiquidationSweepSummary!(MarketFailure | StoreFailure)!Store {
   const store = try Store
-  const now = try Clock.currentTimeMillis
+  const now = try resolveTradeNowMs()
   const summary = try store.transaction(effect (tx: Tx) => {
     const marketRows = try tx.query(
       "SELECT ticker, index_price_cents, mark_price_cents, long_oi_cents, short_oi_cents FROM feed_perp_markets ORDER BY ticker ASC FOR UPDATE"
@@ -1811,7 +1818,7 @@ export effect function liquidateEligiblePositions(): LiquidationSweepSummary!(Ma
 
 export effect function accruePerpFunding(nowMs?: number): FundingAccrualSummary!(MarketFailure | StoreFailure)!Store {
   const store = try Store
-  const now = nowMs ?? (try Clock.currentTimeMillis)
+  const now = nowMs ?? (try resolveTradeNowMs())
   const period = fundingPeriodFromSeconds(Math.floor(now / 1000))
   return try store.transaction(effect (tx: Tx) => {
     const worldRows = try tx.query(
