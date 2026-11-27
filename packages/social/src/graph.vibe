@@ -20,6 +20,7 @@ import {
   type Notification as SpecNotification,
   type ReportCategory
 } from "../gen/social__moderation.effect.vibe"
+import { socialModeMarketExclusionSql } from "./posts.vibe"
 import { type FeedRealtimeEvent } from "./realtime.vibe"
 import {
   clampLimit,
@@ -42,6 +43,7 @@ import {
   type SubjectKind,
   type SubjectProfile
 } from "./shared.vibe"
+import { viewerAuthorVisibilitySql } from "./visibility.vibe"
 
 export type { ReportCategory } from "../gen/social__moderation.effect.vibe"
 
@@ -372,7 +374,19 @@ export effect function getProfile(
           "SELECT count(*) AS count FROM feed_follows f WHERE f.follower_id = $1 AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = f.target_id) OR (b.blocker_id = f.target_id AND b.blocked_id = $2))",
           [target.id, viewer]
         ))[0]?.count, 0)
-    const postsCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_posts WHERE author_id = $1 AND deleted_at IS NULL", [target.id]))[0]?.count, 0)
+    const postsCountParams: unknown[] = [target.id]
+    const postsCountConditions = ["p.author_id = $1", "p.deleted_at IS NULL"]
+    if (effectiveMode === "social") {
+      postsCountConditions.push(socialModeMarketExclusionSql("p"))
+    }
+    if (viewer !== undefined) {
+      postsCountParams.push(viewer)
+      postsCountConditions.push(viewerAuthorVisibilitySql(`$${postsCountParams.length}`, "p.author_id"))
+    }
+    const postsCount = safeInt((try tx.query(
+      `SELECT count(*) AS count FROM feed_posts p WHERE ${postsCountConditions.join(" AND ")}`,
+      postsCountParams
+    ))[0]?.count, 0)
     let viewerFollows = false
     let viewerFollowedBy = false
     let viewerBlocks = false

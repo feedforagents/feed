@@ -6,8 +6,10 @@ import { TestClock } from "effect/testing"
 import {
   blockAccount,
   getProfile,
+  muteAccount,
   realtimeBusLayer,
   unblockAccount,
+  unmuteAccount,
 } from "../src/index.vibe"
 
 effect function execTx(sql: string, params: ReadonlyArray<unknown> = []) {
@@ -16,7 +18,7 @@ effect function execTx(sql: string, params: ReadonlyArray<unknown> = []) {
 }
 
 it.effect(
-  'getProfile suppresses tradeCount and openPositionCount across mutual user and NPC blocks while preserving unblocked GameMode and self views (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  'getProfile suppresses tradeCount, openPositionCount, and postsCount across mutual user and NPC blocks and mutes and excludes market posts from postsCount in SocialMode while preserving unblocked GameMode and self views (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
   () => effect {
     try TestClock.setTime(1_760_000_500_000)
     provide Layer.merge(
@@ -66,6 +68,16 @@ it.effect(
         [perpTicker, 1_760_000_500_000],
       )
 
+      try execTx(
+        `INSERT INTO feed_posts (id, author_id, author_kind, content, reply_to_post_id, quote_post_id, via_client_name, market_id, ticker, like_count, repost_count, reply_count, deleted_at, created_at)
+         VALUES
+           ('pbc-post-a1', 'pbc-alice', 'user', 'Morning dispatch from Alice', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pbc-post-a2', 'pbc-alice', 'user', 'NEW MARKET (FOO) is live', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pbc-post-b1', 'pbc-bob', 'user', 'Morning dispatch from Bob', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pbc-post-n1', $2, 'npc', 'Morning dispatch from the NPC', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1)`,
+        [1_760_000_500_000, npcId],
+      )
+
       const unblockedBobViewsAlice = try getProfile("pbc_alice", "pbc-bob", "game")
       const unblockedBobViewsNpc = try getProfile(npcHandle, "pbc-bob", "game")
       const anonGameViewsAlice = try getProfile("pbc_alice", undefined, "game")
@@ -79,6 +91,11 @@ it.effect(
 
       try unblockAccount("pbc-alice", "pbc_bob")
       const bobViewsAliceAfterUnblock = try getProfile("pbc_alice", "pbc-bob", "game")
+
+      try muteAccount("pbc-bob", "pbc_alice")
+      const bobViewsAliceWhileMuted = try getProfile("pbc_alice", "pbc-bob", "game")
+      try unmuteAccount("pbc-bob", "pbc_alice")
+      const bobViewsAliceAfterUnmute = try getProfile("pbc_alice", "pbc-bob", "game")
 
       try blockAccount("pbc-bob", npcHandle)
       const bobViewsNpcWhileBlocking = try getProfile(npcHandle, "pbc-bob", "game")
@@ -113,6 +130,17 @@ it.effect(
                 bobViewsNpcWhileBlocking.tradeCount,
                 bobViewsNpcWhileBlocking.openPositionCount,
               ],
+              unblockedBobViewsAlicePosts: unblockedBobViewsAlice.postsCount,
+              anonGameViewsAlicePosts: anonGameViewsAlice.postsCount,
+              socialModeViewsAlicePosts: socialModeViewsAlice.postsCount,
+              bobViewsAliceWhileBlockedByPosts: bobViewsAliceWhileBlockedBy.postsCount,
+              aliceViewsBobWhileBlockingPosts: aliceViewsBobWhileBlocking.postsCount,
+              aliceSelfWhileBlockingPosts: aliceSelfWhileBlocking.postsCount,
+              bobSelfWhileBlockedPosts: bobSelfWhileBlocked.postsCount,
+              bobViewsAliceAfterUnblockPosts: bobViewsAliceAfterUnblock.postsCount,
+              bobViewsAliceWhileMutedPosts: bobViewsAliceWhileMuted.postsCount,
+              bobViewsAliceAfterUnmutePosts: bobViewsAliceAfterUnmute.postsCount,
+              bobViewsNpcWhileBlockingPosts: bobViewsNpcWhileBlocking.postsCount,
             },
             {
               unblockedBobViewsAlice: [2, 2],
@@ -125,6 +153,17 @@ it.effect(
               bobSelfWhileBlocked: [1, 1],
               bobViewsAliceAfterUnblock: [2, 2],
               bobViewsNpcWhileBlocking: [true, null, null],
+              unblockedBobViewsAlicePosts: 2,
+              anonGameViewsAlicePosts: 2,
+              socialModeViewsAlicePosts: 1,
+              bobViewsAliceWhileBlockedByPosts: 0,
+              aliceViewsBobWhileBlockingPosts: 0,
+              aliceSelfWhileBlockingPosts: 2,
+              bobSelfWhileBlockedPosts: 1,
+              bobViewsAliceAfterUnblockPosts: 2,
+              bobViewsAliceWhileMutedPosts: 0,
+              bobViewsAliceAfterUnmutePosts: 2,
+              bobViewsNpcWhileBlockingPosts: 0,
             },
           )
         }),
