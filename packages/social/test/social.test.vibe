@@ -1140,6 +1140,43 @@ it.effect(
 )
 
 it.effect(
+  'paginates older For You fallback posts without changing the recent window (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => effect {
+    try TestClock.setTime(1_760_000_000_000)
+    provide localStoreLayer({ kind: "pglite", file: undefined }), realtimeBusLayer {
+      try migrateFeedSchema()
+      try seedAccount("gardener", "gardener", "Garden Club")
+      for (let i = 0; i < 27; i += 1) {
+        try createPost({ authorId: "gardener", authorKind: "user", content: `Garden club notice ${i + 1}` })
+      }
+      try TestClock.adjust(Duration.hours(25))
+
+      const oldFirst = try listFeedPosts({ tab: "top", limit: 25 })
+      const oldSecond = try listFeedPosts({ tab: "top", cursor: oldFirst.nextCursor ?? undefined, limit: 25 })
+      try TestClock.adjust(Duration.seconds(1))
+      for (let i = 0; i < 27; i += 1) {
+        try createPost({ authorId: "gardener", authorKind: "user", content: `Fresh garden notice ${i + 1}` })
+      }
+      const oldContinuation = try listFeedPosts({ tab: "top", cursor: oldFirst.nextCursor ?? undefined, limit: 25 })
+      const recentFirst = try listFeedPosts({ tab: "top", limit: 25 })
+      const recentSecond = try listFeedPosts({ tab: "top", cursor: recentFirst.nextCursor ?? undefined, limit: 25 })
+      try check(() => {
+        assert.lengthOf(oldFirst.items, 25)
+        assert.isString(oldFirst.nextCursor)
+        assert.lengthOf(oldSecond.items, 2)
+        assert.isNull(oldSecond.nextCursor)
+        assert.deepStrictEqual(oldContinuation.items.map((p) => p.id), oldSecond.items.map((p) => p.id))
+        assert.lengthOf(recentFirst.items, 25)
+        assert.isString(recentFirst.nextCursor)
+        assert.lengthOf(recentSecond.items, 2)
+        assert.isNull(recentSecond.nextCursor)
+        assert.isTrue(recentSecond.items.every((p) => p.content.startsWith("Fresh garden notice")))
+      })
+    }
+  }
+)
+
+it.effect(
   'chat read state, reaction toggle/remove, NPC DM refusal, user-group consent invites, alpha decline cooldown, and group management (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
   () => withSocialWorld(effect {
     try seedChatParticipants()
