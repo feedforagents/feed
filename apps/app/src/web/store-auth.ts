@@ -24,7 +24,6 @@ import {
 } from "./store-core.ts";
 import {
   createPost,
-  invalidatePnlHistoryLoads,
   loadArticle,
   loadChats,
   loadClosedPositions,
@@ -39,6 +38,7 @@ import {
   loadTrending,
   openThread,
   repostPost,
+  resetAccountLoads,
   selectFeedTab,
   startDirectChat,
   submitPerpOrder,
@@ -163,6 +163,9 @@ export async function hydrateAuth(): Promise<void> {
     }
     return;
   }
+  if (prevViewerId !== null) {
+    clearAccountState();
+  }
   const snap = getStoreSnapshot();
   const currentRoute = snap.route;
   const protectedRoute = currentRoute === "Chats" || currentRoute === "Notifications" || currentRoute === "Settings" || currentRoute === "Admin";
@@ -184,6 +187,7 @@ export async function hydrateAuth(): Promise<void> {
   });
   if (prevViewerId !== null) {
     notifyAuthChanged();
+    await loadFeed("latest");
   }
 }
 
@@ -840,16 +844,22 @@ async function performSignOut({
     setErrorNotice(res.message);
     return;
   }
+  pushBrowserRoute("Home");
+  setStoreState({ route: "Home", walletView: false });
+  clearAccountState();
+  setStatusNotice(statusMessage);
+  notifyAuthChanged();
+  await loadFeed("latest");
+}
+
+function clearAccountState(): void {
   clearPersistedPendingAction();
   sendNav({ type: "signOutNav" });
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
-  pushBrowserRoute("Home");
-  invalidatePnlHistoryLoads();
+  resetAccountLoads();
   setStoreState({
     viewer: null,
-    route: "Home",
-    walletView: false,
     feedTab: "latest",
     chats: [],
     selectedChatId: null,
@@ -893,9 +903,6 @@ async function performSignOut({
     devEmailMagicLinkUrl: null,
     pendingAction: null,
   });
-  setStatusNotice(statusMessage);
-  notifyAuthChanged();
-  await loadFeed("latest");
 }
 
 export async function logout(): Promise<void> {

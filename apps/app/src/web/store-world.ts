@@ -893,8 +893,9 @@ export async function loadWorldStatus(): Promise<void> {
   }
 }
 
-export function invalidatePnlHistoryLoads(): void {
+export function resetAccountLoads(): void {
   pnlHistoryRequestSeq += 1;
+  feedLoadedTab = "latest";
 }
 
 export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {

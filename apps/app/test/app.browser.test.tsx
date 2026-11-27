@@ -313,6 +313,7 @@ function installMockNetwork(
   let viewerPhoneLast2: string | null = "01";
   let viewerBalanceCents = 10500;
   let viewerIsReviewer = true;
+  let feedFails = false;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
     const url = requestUrl(input);
@@ -427,6 +428,7 @@ function installMockNetwork(
         heldReplies.set(handle, pending);
       });
     }
+    if (path === "/api/feed" && feedFails) return Promise.resolve(Response.json({ message: "Feed is unavailable." }, { status: 503 }));
     if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
@@ -708,6 +710,12 @@ function installMockNetwork(
     leaderboardRequested: (scope: string) => requestedLeaderboardScopes.has(scope),
     releaseLeaderboard: (scope: string) => {
       for (const release of heldLeaderboard.get(scope)?.splice(0) ?? []) release();
+    },
+    setFeedFails: (fails: boolean) => {
+      feedFails = fails;
+    },
+    expireSession: () => {
+      signedIn = false;
     },
     pnlRequested: (range: string) => requestedPnlRanges.has(range),
     releasePnl: (range: string) => {
@@ -1391,6 +1399,26 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   await act(() => Promise.resolve());
   const { pnlTimeRange, pnlHistory, pnlHistoryLoading } = getStoreSnapshot();
   expect({ pnlTimeRange, pnlHistory, pnlHistoryLoading }).toEqual({ pnlTimeRange: "ALL", pnlHistory: [], pnlHistoryLoading: false });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await signInAsReviewer();
+  await act(() => storeActions.selectFeedTab("following"));
+  network.setFeedFails(true);
+  await act(() => storeActions.logout());
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await signInAsReviewer();
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acct-player-1");
+  expect(getStoreSnapshot().feedTab).toBe("latest");
+
+  network.setFeedFails(false);
+  await act(() => storeActions.selectFeedTab("following"));
+  await act(() => storeActions.loadPnlHistory("1W"));
+  const feedLoadsBeforeExpiry = fetchPaths.filter((path) => path === "/api/feed").length;
+  network.expireSession();
+  await act(() => hydrateAuth());
+  const expired = getStoreSnapshot();
+  expect({ viewer: expired.viewer, feedTab: expired.feedTab, pnlTimeRange: expired.pnlTimeRange, pnlHistory: expired.pnlHistory }).toEqual({ viewer: null, feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [] });
+  expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedLoadsBeforeExpiry + 1);
 });
 
 it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
