@@ -39,6 +39,7 @@ export interface ToastItem {
   readonly message: string;
   readonly description?: string;
   readonly tone: ToastTone;
+  readonly replyPostId?: string;
 }
 
 export interface ViewerSession {

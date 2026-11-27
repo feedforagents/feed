@@ -624,7 +624,7 @@ export function setStoreState(patch: Partial<StoreState>): void {
   for (const listener of listeners) listener();
 }
 
-export function pushToast(message: string, tone: ToastTone = "default", description?: string): void {
+export function pushToast(message: string, tone: ToastTone = "default", description?: string, replyPostId?: string): void {
   const trimmed = message.trim();
   if (!trimmed) return;
   toastSeq += 1;
@@ -633,8 +633,9 @@ export function pushToast(message: string, tone: ToastTone = "default", descript
     message: trimmed,
     ...(description ? { description } : {}),
     tone,
+    ...(replyPostId ? { replyPostId } : {}),
   };
-  const deduped = currentState.toasts.filter((t) => t.message !== trimmed || t.tone !== tone);
+  const deduped = currentState.toasts.filter((t) => t.message !== trimmed || t.tone !== tone || t.replyPostId !== replyPostId);
   setStoreState({ toasts: [...deduped.slice(-3), item] });
 }
 
@@ -650,6 +651,19 @@ export function setStatusNotice(message: string): void {
 export function setErrorNotice(message: string): void {
   pushToast(message, "destructive");
   setStoreState({ errorMessage: message });
+}
+
+export function setReplyErrorNotice(postId: string, message: string): void {
+  pushToast(message, "destructive", undefined, postId);
+  setStoreState({ errorMessage: message });
+}
+
+export function clearReplyFailureNotice(postId: string): void {
+  const removed = currentState.toasts.filter((toast) => toast.tone === "destructive" && toast.replyPostId === postId);
+  if (removed.length === 0) return;
+  const keptToasts = currentState.toasts.filter((toast) => !(toast.tone === "destructive" && toast.replyPostId === postId));
+  const errorCleared = currentState.errorMessage !== null && removed.some((toast) => toast.message === currentState.errorMessage);
+  setStoreState({ toasts: keptToasts, ...(errorCleared ? { errorMessage: null } : {}) });
 }
 
 export function clearNotices(): void {

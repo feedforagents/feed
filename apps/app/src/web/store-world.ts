@@ -11,6 +11,7 @@ import { passThrough, requestJson } from "./api.ts";
 import {
   appendAnonymousModeParam,
   clearNotices,
+  clearReplyFailureNotice,
   currentUiMode,
   getStoreSnapshot,
   incrementSpaNavDepth,
@@ -20,6 +21,7 @@ import {
   sendApp,
   sendNav,
   setErrorNotice,
+  setReplyErrorNotice,
   setStatusNotice,
   setStoreState,
   toSpecTab,
@@ -504,8 +506,15 @@ export async function createPost(
     parse: (raw) => decodePost(raw, viewerId),
   });
   if (!res.ok) {
-    setErrorNotice(res.message);
+    if (options?.replyToPostId) {
+      setReplyErrorNotice(options.replyToPostId, res.message);
+    } else {
+      setErrorNotice(res.message);
+    }
     return false;
+  }
+  if (options?.replyToPostId) {
+    clearReplyFailureNotice(options.replyToPostId);
   }
   setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
   const cur = getStoreSnapshot();
