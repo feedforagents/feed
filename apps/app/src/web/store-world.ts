@@ -76,6 +76,7 @@ let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
 let pnlHistoryRequestSeq = 0;
+let closedPositionsLoadCount = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -780,10 +781,12 @@ export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<v
 
 export async function loadClosedPositions(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const loadId = ++closedPositionsLoadCount;
   setStoreState({ closedPositionsLoading: true });
   const res = await requestJson("/api/markets/positions/closed?limit=50", {
     parse: decodeClosedPositions,
   });
+  if (loadId !== closedPositionsLoadCount) return;
   if (res.ok) {
     setStoreState({ closedPositions: res.data, closedPositionsLoading: false });
     return;
