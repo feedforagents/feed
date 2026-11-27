@@ -82,17 +82,22 @@ export function PerpPriceChart({
     ];
   }, [visible, positive, currentPrice]);
 
+  const showDelta = !loading && visible.length > 0;
   const headerLeft = showHeader ? (
     <div className="flex flex-wrap items-center justify-between gap-2">
       <span className="font-mono text-2xl font-bold whitespace-nowrap text-foreground tabular-nums">{safeFormatPrice(currentPrice)}</span>
-      <Badge variant={positive ? "ok" : "destructive"} className="shrink-0 font-mono whitespace-nowrap tabular-nums">
-        {positive ? "+" : ""}
-        {deltaPct.toFixed(2)}%
-      </Badge>
-      <span className="font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums">
-        {positive ? "+" : ""}
-        {safeFormatPrice(delta)} ({timeRange})
-      </span>
+      {showDelta ? (
+        <>
+          <Badge variant={positive ? "ok" : "destructive"} className="shrink-0 font-mono whitespace-nowrap tabular-nums">
+            {positive ? "+" : ""}
+            {deltaPct.toFixed(2)}%
+          </Badge>
+          <span className="font-mono text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+            {positive ? "+" : ""}
+            {safeFormatPrice(delta)} ({timeRange})
+          </span>
+        </>
+      ) : null}
     </div>
   ) : undefined;
 

@@ -87,3 +87,23 @@ it("a quiet perp's 1H delta is measured from the single earlier point the server
   );
   expect(text).toContain("+8.70%");
 });
+
+it("a loading perp chart does not claim the newly selected range's delta yet", () => {
+  const now = Date.now();
+  const text = renderText(
+    <PerpPriceChart
+      ticker="XTRPC"
+      data={[
+        { time: now - 50 * 60_000, price: 90 },
+        { time: now, price: 100 },
+      ]}
+      currentPrice={100}
+      timeRange="1W"
+      onTimeRangeChange={() => {}}
+      loading
+    />,
+  );
+  expect(text).toContain("100 pts");
+  expect(text).not.toContain("+11.11%");
+  expect(text).not.toContain("(1W)");
+});
