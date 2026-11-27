@@ -123,6 +123,7 @@ let feedLoadedTab: UiFeedTab = "latest";
 let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null; viewerId: string | null } | null = null;
 let exploreRequestSeq = 0;
 let exploreLoadedQuery = "";
+let exploreLoadedTag: string | null = null;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
@@ -922,6 +923,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     }
   }
   if (res.ok) {
+    exploreLoadedTag = null;
     const cur = getStoreSnapshot();
     const isBrowse = q.trim() === "";
     setStoreState({
@@ -941,6 +943,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
 
 export async function loadTrendingTag(tag: string): Promise<void> {
   const cleanTag = tag.trim();
+  const loadedTag = cleanTag.toLowerCase();
   const s = getStoreSnapshot();
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++exploreRequestSeq;
@@ -953,6 +956,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
   });
   if (reqSeq !== exploreRequestSeq) return;
   if (res.ok) {
+    exploreLoadedTag = loadedTag;
     const cur = getStoreSnapshot();
     setStoreState({
       explore: {
@@ -967,8 +971,14 @@ export async function loadTrendingTag(tag: string): Promise<void> {
     });
     return;
   }
-  setStoreState({ exploreLoading: false });
-  await loadExplore(cleanTag);
+  const cur = getStoreSnapshot();
+  setStoreState({
+    exploreLoading: false,
+    ...(exploreLoadedTag === loadedTag
+      ? {}
+      : { explore: { ...cur.explore, posts: [], accounts: [], actors: [], organizations: [], tags: [] } }),
+  });
+  setErrorNotice(res.message);
 }
 
 export async function searchAccounts(query: string): Promise<{
