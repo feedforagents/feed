@@ -580,12 +580,13 @@ effect function hydratePostRowsTx(
   const quoteIds = [...new Set(rows.map((r) => toText(r.quote_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
   let quoteRows: ReadonlyArray<Row> = []
   if (quoteIds.length > 0) {
+    const quoteWhere = `p.id = ANY($1) AND p.deleted_at IS NULL${mode === "social" ? ` AND ${socialModeMarketExclusionSql("p")}` : ""}`
     quoteRows = viewerId !== undefined && viewerId !== ""
       ? try tx.query(
-          `SELECT p.* FROM feed_posts p WHERE p.id = ANY($1) AND p.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`,
+          `SELECT p.* FROM feed_posts p WHERE ${quoteWhere} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`,
           [quoteIds, viewerId]
         )
-      : try tx.query("SELECT * FROM feed_posts WHERE id = ANY($1) AND deleted_at IS NULL", [quoteIds])
+      : try tx.query(`SELECT p.* FROM feed_posts p WHERE ${quoteWhere}`, [quoteIds])
   }
   const replyParentIds = [...new Set(rows.map((r) => toText(r.reply_to_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
   const parentAuthorByPostId = new Map<string, { readonly authorId: string; readonly authorKind: PostAuthorKind }>()
