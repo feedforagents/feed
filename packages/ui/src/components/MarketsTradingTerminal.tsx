@@ -265,6 +265,8 @@ export interface PredictionOrderPanelProps {
   noPositionShares?: number;
   /** Side the ticket opens on (default `YES`); a new value moves an open ticket to that side. */
   initialSide?: "YES" | "NO";
+  /** Bumped on each new side intent; a new value re-applies `initialSide` even when the side itself is unchanged. */
+  sideIntentSeq?: number;
   /** Submits a buy or sell prediction order. */
   onSubmitOrder: (order: PredictionOrderInput) => void;
   /** Invoked when clicking the resolution article link in the info modal. */
@@ -314,6 +316,8 @@ export type MarketsTradingTerminalProps = Omit<ComponentProps<"div">, "children"
   onClosePerp?: (positionId: string) => void;
   /** Side the prediction ticket opens on (default `YES`); a new value moves an open ticket to that side. */
   initialPredictionSide?: "YES" | "NO";
+  /** Bumped on each new prediction side intent; a new value re-applies `initialPredictionSide` even when the side itself is unchanged. */
+  predictionSideIntentSeq?: number;
   /** Submits a prediction buy or sell order. */
   onSubmitPrediction?: (order: PredictionOrderInput) => void;
   /** Invoked when the user clicks a resolution article link. */
@@ -1408,6 +1412,7 @@ export function PredictionOrderPanel({
   yesPositionShares = 0,
   noPositionShares = 0,
   initialSide = "YES",
+  sideIntentSeq = 0,
   onSubmitOrder,
   onOpenResolutionArticle,
   confirmBeforeSubmit = true,
@@ -1421,8 +1426,10 @@ export function PredictionOrderPanel({
   const [action, setAction] = useState<"buy" | "sell">("buy");
   const [side, setSide] = useState<"YES" | "NO">(initialSide);
   const [prevInitialSide, setPrevInitialSide] = useState(initialSide);
-  if (initialSide !== prevInitialSide) {
+  const [prevSideIntentSeq, setPrevSideIntentSeq] = useState(sideIntentSeq);
+  if (initialSide !== prevInitialSide || sideIntentSeq !== prevSideIntentSeq) {
     setPrevInitialSide(initialSide);
+    setPrevSideIntentSeq(sideIntentSeq);
     setSide(initialSide);
   }
   const [amountText, setAmountText] = useState("10");
@@ -1833,6 +1840,7 @@ export function MarketsTradingTerminal({
   onRebalancePerp,
   onClosePerp,
   initialPredictionSide,
+  predictionSideIntentSeq,
   onSubmitPrediction,
   onOpenResolutionArticle,
   submitting = false,
@@ -1884,6 +1892,7 @@ export function MarketsTradingTerminal({
         yesPositionShares={yesSharesOwned}
         noPositionShares={noSharesOwned}
         initialSide={initialPredictionSide}
+        sideIntentSeq={predictionSideIntentSeq}
         onSubmitOrder={(order) => onSubmitPrediction?.(order)}
         onOpenResolutionArticle={onOpenResolutionArticle}
         confirmBeforeSubmit={confirmBeforeSubmit}

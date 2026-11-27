@@ -936,6 +936,7 @@ export function selectMarket(kind: "prediction" | "perp", id: string): void {
     selectedMarketKind: kind,
     selectedMarketId: id,
     selectedMarketSide: "YES",
+    marketSideIntentSeq: getStoreSnapshot().marketSideIntentSeq + 1,
     selectedTicker: kind === "perp" ? id : null,
     marketsViewMode: "terminal",
     marketHistory: [],

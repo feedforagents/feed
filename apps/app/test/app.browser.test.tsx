@@ -845,10 +845,16 @@ it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/market
   await expect.element(page.getByRole("heading", { name: "Will OpenAGI ship Strawberry-9000 before Friday?" })).toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Buy NO" })).toBeInTheDocument();
 
-  await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=yes"));
+  const goToSide = async (side: "yes" | "no") => {
+    await act(() => storeActions.navigate(`/markets/predictions/seed-market-1?side=${side}`));
+    await expect.element(page.getByRole("button", { name: side === "yes" ? "Buy YES" : "Buy NO" })).toBeInTheDocument();
+  };
+  await goToSide("yes");
+  await goToSide("no");
+
+  await act(() => userEvent.click(page.getByRole("radio", { name: /YES \d+%/ })));
   await expect.element(page.getByRole("button", { name: "Buy YES" })).toBeInTheDocument();
-  await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=no"));
-  await expect.element(page.getByRole("button", { name: "Buy NO" })).toBeInTheDocument();
+  await goToSide("no");
 
   await act(() => userEvent.click(page.getByRole("button", { name: "Buy NO" })));
   await expect.element(page.getByText("Confirm Buy NO")).toBeInTheDocument();
