@@ -1858,3 +1858,35 @@ it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Br
   });
   await expect.element(page.getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
 });
+
+it('Shows the not-found screen when a reply disappears before opening (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const parent = { ...SAMPLE_THREAD.post, content: "Plant swap on Saturday.", marketId: null, marketBadge: null, ticker: null, cashtags: [] };
+  const reply = {
+    ...parent,
+    id: "removed-reply",
+    replyToPostId: parent.id,
+    content: "I'll bring some extra seeds.",
+  };
+  installMockNetwork({
+    threadFetch: (path) => {
+      if (path === `/api/posts/${parent.id}`) {
+        return Promise.resolve(Response.json({ ...SAMPLE_THREAD, post: parent, replies: [reply] }));
+      }
+      if (path === `/api/posts/${reply.id}`) {
+        return Promise.resolve(Response.json({ error: "Post not found" }, { status: 404 }));
+      }
+      return null;
+    },
+  });
+  await openThreadDetail();
+  await expect.element(page.getByText(parent.content, { exact: true })).toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByText(reply.content, { exact: true })));
+  expect(window.location.pathname).toBe(`/post/${reply.id}`);
+  await expect.element(page.getByRole("button", { name: "Back to Home" })).toBeInTheDocument();
+  await expect.element(page.getByText(parent.content, { exact: true })).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(page.getByText(parent.content, { exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe(`/post/${parent.id}`);
+});
