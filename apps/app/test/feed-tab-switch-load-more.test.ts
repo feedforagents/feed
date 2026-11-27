@@ -3,18 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadMoreFeed, selectFeedTab } from "../src/web/store-world.ts";
 import { decodePosts } from "../src/web/types.ts";
-import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
-
-function post(id: string) {
-  return { id, authorId: "acct-bob", authorHandle: "bob", authorDisplayName: "Bob", content: `post ${id}`, createdAt: "2026-11-27T00:00:00.000Z" };
-}
-
-function errorResponse(): Response {
-  return new Response(JSON.stringify({ message: "Feed unavailable" }), {
-    status: 500,
-    headers: { "content-type": "application/json" },
-  });
-}
+import { feedErrorResponse as errorResponse, feedPost as post, installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
 
 function seedLatestPage() {
   setStoreState({
