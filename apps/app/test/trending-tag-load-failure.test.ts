@@ -46,6 +46,15 @@ function stubTagLoads(failingTags: ReadonlySet<string>) {
   });
 }
 
+function expectTagView(tag: string, postIds: ReadonlyArray<string>, errorMessage: string | null) {
+  const s = getStoreSnapshot();
+  expect(s.activeTrendingTag).toBe(tag);
+  expect(s.explore.posts.map((p) => p.card.id)).toEqual(postIds);
+  expect(s.explore.accounts.map((a) => a.handle)).toEqual([]);
+  expect(s.exploreLoading).toBe(false);
+  expect(s.errorMessage).toBe(errorMessage);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   setStoreState({
@@ -62,34 +71,20 @@ describe("trending tag load failure", () => {
   it('a failed trending tag load shows no search posts or people under the tag (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     stubTagLoads(new Set(["gardens"]));
     await loadTrendingTag("gardens");
-    const s = getStoreSnapshot();
-    expect(s.activeTrendingTag).toBe("gardens");
-    expect(s.explore.posts.map((p) => p.card.id)).toEqual([]);
-    expect(s.explore.accounts.map((a) => a.handle)).toEqual([]);
-    expect(s.exploreLoading).toBe(false);
-    expect(s.errorMessage).toBe("Trending unavailable");
+    expectTagView("gardens", [], "Trending unavailable");
   });
 
   it('a failed switch to another tag drops the previous tag posts (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     stubTagLoads(new Set(["orchards"]));
     await loadTrendingTag("gardens");
     await loadTrendingTag("orchards");
-    const s = getStoreSnapshot();
-    expect(s.activeTrendingTag).toBe("orchards");
-    expect(s.explore.posts.map((p) => p.card.id)).toEqual([]);
-    expect(s.explore.accounts.map((a) => a.handle)).toEqual([]);
-    expect(s.exploreLoading).toBe(false);
-    expect(s.errorMessage).toBe("Trending unavailable");
+    expectTagView("orchards", [], "Trending unavailable");
   });
 
   it('a successful trending tag load shows only the tag posts (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     stubTagLoads(new Set());
     await loadTrendingTag("gardens");
-    const s = getStoreSnapshot();
-    expect(s.activeTrendingTag).toBe("gardens");
-    expect(s.explore.posts.map((p) => p.card.id)).toEqual(["gardens-1"]);
-    expect(s.explore.accounts).toEqual([]);
-    expect(s.exploreLoading).toBe(false);
+    expectTagView("gardens", ["gardens-1"], null);
   });
 
   it('a failed reload of the current tag keeps its posts and reports the failure (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
@@ -98,10 +93,6 @@ describe("trending tag load failure", () => {
     await loadTrendingTag("gardens");
     failingTags.add("gardens");
     await loadTrendingTag("gardens");
-    const s = getStoreSnapshot();
-    expect(s.activeTrendingTag).toBe("gardens");
-    expect(s.explore.posts.map((p) => p.card.id)).toEqual(["gardens-1"]);
-    expect(s.exploreLoading).toBe(false);
-    expect(s.errorMessage).toBe("Trending unavailable");
+    expectTagView("gardens", ["gardens-1"], "Trending unavailable");
   });
 });
