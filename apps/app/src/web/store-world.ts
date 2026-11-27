@@ -393,7 +393,12 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   threadRequestSeq += 1;
   const requestSeq = threadRequestSeq;
   const engagementAtStart = captureEngagement();
-  setStoreState({ threadLoading: true, activePostId: postId, threadSort: sort });
+  setStoreState({
+    threadLoading: true,
+    activePostId: postId,
+    threadSort: sort,
+    activeThread: s.activeThread?.post.card.id === postId ? s.activeThread : null,
+  });
   recordPublicView("PostDetail");
   const baseUrl = `/api/posts/${encodeURIComponent(postId)}?sort=${encodeURIComponent(sort)}`;
   const res = await requestJson(appendAnonymousModeParam(baseUrl, s), {
