@@ -1217,7 +1217,8 @@ export async function rebalancePerpPosition(order: PerpRebalanceOrderInput): Pro
 }
 
 export async function markChatRead(chatId: string): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+  const viewerId = getStoreSnapshot().viewer?.accountId;
+  if (!viewerId) return;
   const cur = getStoreSnapshot();
   const target = cur.chats.find((c) => c.id === chatId);
   if (target && target.unreadCount > 0) {
@@ -1225,10 +1226,35 @@ export async function markChatRead(chatId: string): Promise<void> {
       chats: cur.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: 0 } : c)),
     });
   }
-  await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
+  const chatNotificationIds = new Set(
+    cur.notifications
+      .filter((n) => n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read)
+      .map((n) => n.item.id),
+  );
+  if (chatNotificationIds.size > 0) {
+    captureNotificationIdsBeforeMutation();
+  }
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
     method: "POST",
     body: {},
     parse: passThrough,
+  });
+  if (!res.ok || chatNotificationIds.size === 0) return;
+  const s = getStoreSnapshot();
+  if (s.viewer?.accountId !== viewerId) return;
+  let cleared = 0;
+  const notifications = s.notifications.map((n) => {
+    if (chatNotificationIds.has(n.item.id) && !n.item.read) {
+      cleared += 1;
+      return { ...n, item: { ...n.item, read: true } };
+    }
+    return n;
+  });
+  if (cleared === 0) return;
+  invalidateNotificationsLoads();
+  setStoreState({
+    notifications,
+    unreadNotifications: Math.max(0, s.unreadNotifications - cleared),
   });
 }
 
