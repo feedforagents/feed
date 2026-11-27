@@ -2049,3 +2049,43 @@ it('Shows the not-found screen when a reply disappears before opening (spec/app/
   await expect.element(page.getByText(parent.content, { exact: true })).toBeInTheDocument();
   expect(window.location.pathname).toBe(`/post/${parent.id}`);
 });
+
+it('Opening another article replaces all paragraphs even when two share an opener (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const opener = "The neighborhood garden volunteers will ";
+  const firstParagraph = opener + "bring seeds for the morning exchange.";
+  const secondParagraph = opener + "sort tools for the afternoon workshop.";
+  const libraryParagraph = "The library will be open to readers until five.";
+  const garden = {
+    id: "garden-schedule",
+    title: "Garden Volunteer Schedule",
+    body: `${firstParagraph}\n\n${secondParagraph}`,
+    publishedAt: Date.now() - 60_000,
+  };
+  const library = {
+    id: "library-hours",
+    title: "Library Holiday Hours",
+    body: `## Saturday opening\n\n${libraryParagraph}`,
+    publishedAt: Date.now(),
+  };
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles: [library, garden] }));
+      if (path === `/api/articles/${garden.id}`) return Promise.resolve(Response.json(garden));
+      if (path === `/api/articles/${library.id}`) return Promise.resolve(Response.json(library));
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  const main = page.getByRole("main");
+  const earlier = main.getByText(firstParagraph, { exact: true });
+  const later = main.getByText(secondParagraph, { exact: true });
+  await act(() => userEvent.click(main.getByRole("button", { name: `Read full article: ${garden.title}` })));
+  await expect.element(earlier).toBeInTheDocument();
+  await expect.element(later).toBeInTheDocument();
+  await act(() => userEvent.click(main.getByRole("button", { name: `Read full article: ${library.title}` })));
+  await expect.element(main.getByText(libraryParagraph, { exact: true })).toBeInTheDocument();
+  await expect.element(earlier).not.toBeInTheDocument();
+  await expect.element(later).not.toBeInTheDocument();
+});
