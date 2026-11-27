@@ -3,7 +3,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { loadChatMessages, selectChat } from "../src/web/store-world.ts";
+import { loadChatMessages, selectChat, sendChatMessage } from "../src/web/store-world.ts";
 import type { AppChatSummary } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
@@ -264,4 +264,80 @@ it("clears the list badge and keeps the switched-to room when a chat.message SSE
   expect(readPosts.filter((path) => path === "/api/chats/chat-1/read")).toHaveLength(2);
   expect(readPosts).toContain("/api/chats/chat-2/read");
   vi.unstubAllGlobals();
+});
+
+it("keeps the room the user switched to when a send in the previous room finishes (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  const gates: { send?: () => void; roomB?: () => void } = {};
+  let listLoads = 0;
+  let gateRoomB = false;
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats" && method === "GET") {
+      listLoads += 1;
+      return Promise.resolve(
+        Response.json({
+          chats: [
+            { id: "chat-1", kind: "direct", unreadCount: 0, lastMessagePreview: roomMessages.at(-1)?.content, members: [{ memberId: "bob", handle: "bob", displayName: "Bob" }] },
+            { id: "chat-2", kind: "direct", unreadCount: 0, members: [{ memberId: "carol", handle: "carol", displayName: "Carol" }] },
+          ],
+        }),
+      );
+    }
+    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "POST") {
+      const { content } = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as { content: string };
+      return new Promise<Response>((resolve) => {
+        gates.send = () => {
+          roomMessages = [...roomMessages, { ...bobMessage, id: content, senderId: "alice", senderHandle: "alice", content }];
+          resolve(Response.json({ ok: true }));
+        };
+      });
+    }
+    if (url.pathname === "/api/chats/chat-1/messages") return Promise.resolve(Response.json({ messages: roomMessages }));
+    if (url.pathname === "/api/chats/chat-2/messages") {
+      const reply = () => Response.json({ messages: [{ ...bobMessage, id: "m2", content: "from B" }] });
+      if (!gateRoomB) return Promise.resolve(reply());
+      return new Promise<Response>((resolve) => {
+        gates.roomB = () => resolve(reply());
+      });
+    }
+    if (url.pathname.endsWith("/read") && method === "POST") {
+      readPosts.push(url.pathname);
+      return Promise.resolve(Response.json({ unreadCount: 0 }));
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  }, "http://localhost");
+  setStoreState({ route: "Chats", chats: [seedChat(0)], selectedChatId: "chat-1", chatMessages: [] });
+  const view = () => ({
+    selected: getStoreSnapshot().selectedChatId,
+    thread: getStoreSnapshot().chatMessages.map((m) => m.content),
+    roomAPreview: getStoreSnapshot().chats.find((c) => c.id === "chat-1")?.lastMessagePreview,
+  });
+  async function sendInRoomA(content: string, whileSending: () => Promise<void> | void): Promise<void> {
+    const loadsBefore = listLoads;
+    const sending = sendChatMessage("chat-1", content);
+    for (let round = 0; round < 50 && !gates.send; round += 1) await Promise.resolve();
+    await whileSending();
+    gates.send?.();
+    gates.send = undefined;
+    expect(await sending).toBe(true);
+    for (let round = 0; round < 50 && listLoads === loadsBefore; round += 1) await Promise.resolve();
+    for (let round = 0; round < 20; round += 1) await Promise.resolve();
+  }
+
+  await sendInRoomA("stay in A", () => {});
+  expect(view()).toEqual({ selected: "chat-1", thread: ["hello", "stay in A"], roomAPreview: "stay in A" });
+
+  await sendInRoomA("sent before switching", () => selectChat("chat-2"));
+  expect(view()).toEqual({ selected: "chat-2", thread: ["from B"], roomAPreview: "sent before switching" });
+
+  await selectChat("chat-1");
+  gateRoomB = true;
+  let switching: Promise<void> = Promise.resolve();
+  await sendInRoomA("sent while B loads", () => {
+    switching = selectChat("chat-2");
+  });
+  gates.roomB?.();
+  await switching;
+  expect(view()).toEqual({ selected: "chat-2", thread: ["from B"], roomAPreview: "sent while B loads" });
 });

@@ -1384,7 +1384,8 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
     setErrorNotice(res.message);
     return false;
   }
-  await Promise.all([loadChatMessages(chatId), loadChats(false, chatId)]);
+  const stillOpen = getStoreSnapshot().selectedChatId === chatId;
+  await Promise.all([stillOpen ? loadChatMessages(chatId) : undefined, loadChats(false)]);
   return true;
 }
 
