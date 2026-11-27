@@ -2217,7 +2217,10 @@ export function toggleMute(handle: string, currentMuted?: boolean): Promise<void
 }
 
 export async function submitReport(targetKind: "account" | "post", targetId: string, reason: string): Promise<boolean> {
-  if (!getStoreSnapshot().viewer) return false;
+  if (!getStoreSnapshot().viewer) {
+    setErrorNotice("You must be signed in to submit a report.");
+    return false;
+  }
   const res = await requestJson("/api/reports", {
     method: "POST",
     body: { targetKind, targetId, reason },

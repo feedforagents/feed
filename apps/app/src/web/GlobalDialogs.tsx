@@ -19,6 +19,7 @@ import {
   type PostComposerContext,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "./store.ts";
+import { getStoreSnapshot } from "./store-core.ts";
 
 const REPORT_CATEGORIES = [
   "Spam",
@@ -86,6 +87,7 @@ export function GlobalDialogs() {
   const [reportCategory, setReportCategory] = useState<(typeof REPORT_CATEGORIES)[number]>("Spam");
   const [reportDetails, setReportDetails] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const quoteContext: PostComposerContext | undefined = s.quotePostTarget
     ? { authorHandle: s.quotePostTarget.card.authorHandle, excerpt: s.quotePostTarget.card.content }
@@ -107,6 +109,7 @@ export function GlobalDialogs() {
   const closeReport = () => {
     setReportCategory("Spam");
     setReportDetails("");
+    setReportError(null);
     storeActions.closeReportDialog();
   };
 
@@ -115,9 +118,14 @@ export function GlobalDialogs() {
     if (!s.reportTarget) return;
     const reason = reportDetails.trim() ? `${reportCategory}: ${reportDetails.trim()}` : reportCategory;
     setReportBusy(true);
+    setReportError(null);
     const ok = await storeActions.submitReport(s.reportTarget.kind, s.reportTarget.id, reason);
     setReportBusy(false);
-    if (ok) closeReport();
+    if (ok) {
+      closeReport();
+    } else {
+      setReportError(getStoreSnapshot().errorMessage ?? "Report could not be submitted. Please try again.");
+    }
   };
 
   return (
@@ -168,7 +176,10 @@ export function GlobalDialogs() {
                   type="button"
                   size="sm"
                   variant={reportCategory === category ? "primary" : "outline"}
-                  onClick={() => setReportCategory(category)}
+                  onClick={() => {
+                    setReportCategory(category);
+                    setReportError(null);
+                  }}
                 >
                   {category}
                 </Button>
@@ -178,8 +189,12 @@ export function GlobalDialogs() {
               aria-label="Additional details"
               placeholder="Optional details..."
               value={reportDetails}
-              onChange={(e) => setReportDetails(e.target.value)}
+              onChange={(e) => {
+                setReportDetails(e.target.value);
+                setReportError(null);
+              }}
             />
+            {reportError ? <p role="alert" className="text-xs text-destructive">{reportError}</p> : null}
             <div className="flex justify-end gap-2">
               <Button
                 type="button"
