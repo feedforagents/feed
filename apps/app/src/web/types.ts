@@ -1714,6 +1714,7 @@ function toNotificationEventKind(rawKind: string): AppNotificationEventKind {
       return "ChatMessage";
     case "market_resolved":
     case "MarketResolved":
+    case "perp_liquidated":
       return "MarketResolved";
     case "pnl_digest":
     case "PnLDigest":

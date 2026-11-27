@@ -660,7 +660,7 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
       }
     }
     const bobNotifs = try store.transaction((tx: Tx) =>
-      tx.query("SELECT kind, title FROM feed_notifications WHERE account_id = 'user-bob' AND kind = 'perp_liquidated'")
+      tx.query("SELECT kind, title, market_id FROM feed_notifications WHERE account_id = 'user-bob' AND kind = 'perp_liquidated'")
     )
     const bobClosed = try listUserClosedPositions("user-bob")
 
@@ -749,6 +749,7 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
           publishedEvents[0]?.action,
           publishedEvents[0]?.positionId === bobLong.positionId,
           bobNotifs.length,
+          bobNotifs[0]?.market_id,
           bobClosed.perpPositions[0]?.status
         ]
       },
@@ -770,7 +771,7 @@ it.effect('Perp add, partial close, reduce, flip, 8h funding, and cascading liqu
           [nextPeriodFunding.period, nextPeriodFunding.period, nextPeriodFunding.period],
           [marketAfterFunding.updatedAt, marketAfterFunding.updatedAt, marketAfterFunding.updatedAt]
         ],
-        liquidation: [1, true, 1, "liquidate", true, 1, "liquidated"]
+        liquidation: [1, true, 1, "liquidate", true, 1, "XTRPC", "liquidated"]
       }
     ))
   })

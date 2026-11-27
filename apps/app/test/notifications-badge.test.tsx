@@ -266,3 +266,63 @@ it('mark all read stays available while an unread notification sits past the loa
   expect(notificationBadgeText(container)).toBeNull();
   expect(markAllReadButton(container)?.disabled).toBe(true);
 });
+
+it('opening a perp liquidation notification lands on its perp market (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
+  installMockNetwork(respond);
+  const { container } = await mountApp(opened);
+  await flush();
+
+  const seeded = decodeNotifications({
+    notifications: [
+      {
+        id: "notif-liq",
+        kind: "perp_liquidated",
+        ticker: "BTC",
+        isGameOnly: true,
+        title: "$BTC Long position liquidated",
+        body: "Your 5x $BTC Long position was liquidated at 100.00 pts.",
+        read: false,
+        createdAt: Date.now() - 60_000,
+      },
+    ],
+    unreadCount: 1,
+  });
+  await act(() =>
+    Promise.resolve(
+      setStoreState({
+        viewer: makeViewerSession(),
+        notifications: seeded.items,
+        unreadNotifications: seeded.unreadCount,
+        route: "Notifications",
+      }),
+    ),
+  );
+  await flush();
+
+  expect(container.textContent).toContain("$BTC Long position liquidated");
+
+  const pressTab = async (label: string) => {
+    const tab = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.trim() === label,
+    );
+    await act(() =>
+      Promise.resolve(tab?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }))),
+    );
+    await flush();
+  };
+  await pressTab("Mentions");
+  expect(container.textContent).not.toContain("$BTC Long position liquidated");
+
+  await pressTab("All");
+
+  const titleButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+    button.textContent?.includes("$BTC Long position liquidated"),
+  );
+  expect(titleButton).toBeDefined();
+  await act(() => Promise.resolve(titleButton?.click()));
+  await flush();
+
+  expect(mockState.markReadCalls).toBe(1);
+  expect(getStoreSnapshot().route).toBe("Markets");
+  expect(getStoreSnapshot().selectedTicker).toBe("BTC");
+});

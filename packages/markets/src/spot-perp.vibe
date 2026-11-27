@@ -1771,7 +1771,7 @@ export effect function liquidateEligiblePositions(): LiquidationSweepSummary!(Ma
           id: `perp_liquidated:${posId}`,
           accountId: specPos.owner,
           kind: "perp_liquidated",
-          marketId: null,
+          marketId: ticker,
           title: `$${ticker} ${direction} position liquidated`,
           body: `Your ${specPos.leverage}x $${ticker} ${direction} position was liquidated at ${(postLiqMark / 100).toFixed(2)} pts. Remaining equity credited: ${(payoutCents / 100).toFixed(2)} pts.`,
           createdAt: now

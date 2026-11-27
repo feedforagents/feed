@@ -161,6 +161,7 @@ export interface NotificationView {
   readonly actorIsVerified: boolean
   readonly postId: string | null
   readonly marketId: string | null
+  readonly ticker: string | null
   readonly chatId: string | null
   readonly inviteId: string | null
   readonly invitePending: boolean
@@ -844,7 +845,8 @@ function rowToNotification(row: Row, meta: HydratedNotificationMeta): Notificati
     actorIsParody,
     actorIsVerified: actorIsParody,
     postId: toText(row.post_id) ?? null,
-    marketId: toText(row.market_id) ?? null,
+    marketId: kind === "perp_liquidated" ? null : toText(row.market_id) ?? null,
+    ticker: kind === "perp_liquidated" ? toText(row.market_id) ?? null : null,
     chatId: meta.chatId,
     inviteId: meta.inviteId,
     invitePending: meta.invitePending,
