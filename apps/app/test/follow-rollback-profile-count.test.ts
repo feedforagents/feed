@@ -2,12 +2,13 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadProfile, toggleFollow } from "../src/web/store-world.ts";
-import { aliceViewer, makeProfileBundle, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
+import type { AppProfileBundle } from "../src/web/types.ts";
+import { aliceViewer, bobPostRaw, makeProfileBundle, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
 const bobBundle = () => makeProfileBundle("bob", "Bob Trader", 6, 4, false);
 const aliceBundle = () => makeProfileBundle("alice", "Alice Player", 2, 4, true);
 
-function openProfile(profileBundle: ReturnType<typeof makeProfileBundle>, profileHandle: string) {
+function openProfile(profileBundle: AppProfileBundle, profileHandle: string) {
   setStoreState({ viewer: aliceViewer, profileBundle, profileHandle, route: "Profile" });
 }
 
@@ -42,7 +43,15 @@ function expectBobRolledBack(): void {
   expect(current?.summary.followersCount).toBe(6);
 }
 
-function profileResponse(handle: string, displayName: string, followersCount: number, followingCount: number, viewerFollows: boolean) {
+async function expectProfileFollowing(followersCount: number): Promise<void> {
+  await vi.waitFor(() => {
+    const current = getStoreSnapshot().profileBundle;
+    expect(current?.summary.isFollowing).toBe(true);
+    expect(current?.summary.followersCount).toBe(followersCount);
+  });
+}
+
+function profileResponse(handle: string, displayName: string, followersCount: number, followingCount: number, viewerFollows: boolean, posts: unknown[] = []) {
   return Response.json({
     profile: {
       id: handle,
@@ -51,6 +60,27 @@ function profileResponse(handle: string, displayName: string, followersCount: nu
       kind: "user",
       followersCount,
       followingCount,
+      postsCount: 0,
+      viewerFollows,
+      viewerFollowedBy: false,
+      viewerBlocks: false,
+      viewerMutes: false,
+    },
+    posts,
+    positions: [],
+  });
+}
+
+function orgProfileResponse(followersCount: number, viewerFollows: boolean) {
+  return Response.json({
+    profile: {
+      id: "airk-invest",
+      handle: "airk",
+      displayName: "Airk",
+      kind: "organization",
+      orgMeta: { ticker: "AIRK", orgType: "organization" },
+      followersCount,
+      followingCount: 0,
       postsCount: 0,
       viewerFollows,
       viewerFollowedBy: false,
@@ -125,11 +155,7 @@ it('A follow that succeeds after the same profile refreshes resyncs the follower
   setStoreState({ profileBundle: bobBundle(), profileHandle: "bob" });
   follow.resolve(Response.json({ following: true }));
   await pending;
-  await vi.waitFor(() => {
-    const current = getStoreSnapshot().profileBundle;
-    expect(current?.summary.isFollowing).toBe(true);
-    expect(current?.summary.followersCount).toBe(7);
-  });
+  await expectProfileFollowing(7);
 });
 
 function bobFollowingBundle() {
@@ -137,7 +163,7 @@ function bobFollowingBundle() {
   return { ...bundle, summary: { ...bundle.summary, isFollowing: true } };
 }
 
-function beginRefreshRace(profileBundle: ReturnType<typeof makeProfileBundle>, profileHandle: string, currentlyFollowing: boolean, freshProfile: Response) {
+function beginRefreshRace(profileBundle: AppProfileBundle, profileHandle: string, currentlyFollowing: boolean, freshProfile: Response, followHandle = "bob") {
   openProfile(profileBundle, profileHandle);
   const follow = pendingResponse();
   const staleProfile = pendingResponse();
@@ -148,7 +174,7 @@ function beginRefreshRace(profileBundle: ReturnType<typeof makeProfileBundle>, p
     return profileGets === 1 ? staleProfile.promise : Promise.resolve(freshProfile);
   });
   const refresh = loadProfile(profileHandle);
-  const pending = toggleFollow("bob", currentlyFollowing);
+  const pending = toggleFollow(followHandle, currentlyFollowing);
   return { follow, staleProfile, refresh, pending };
 }
 
@@ -160,13 +186,10 @@ it('A follow that commits while a profile refresh is in flight keeps the Followi
   follow.resolve(Response.json({ following: true }));
   await pending;
 
-  staleProfile.resolve(profileResponse("bob", "Bob Trader", 6, 4, false));
+  staleProfile.resolve(profileResponse("bob", "Bob Trader", 6, 4, false, [bobPostRaw]));
   await refresh;
-  await vi.waitFor(() => {
-    const current = getStoreSnapshot().profileBundle;
-    expect(current?.summary.isFollowing).toBe(true);
-    expect(current?.summary.followersCount).toBe(7);
-  });
+  await expectProfileFollowing(7);
+  expect(getStoreSnapshot().profileBundle?.posts[0]?.card.isFollowingAuthor).toBe(true);
 });
 
 it('An unfollow that commits while a profile refresh is in flight keeps the Follow state and follower count when the stale refresh lands (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
@@ -210,4 +233,22 @@ it('A failed follow while a profile refresh is in flight still rolls back when t
   await refresh;
 
   expectBobRolledBack();
+});
+
+it('A follow that commits while an organization profile opened by id refreshes keeps the Following state when the stale refresh lands (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const orgBundle: AppProfileBundle = {
+    ...makeProfileBundle("airk", "Airk", 6, 0, false),
+    id: "airk-invest",
+    kind: "organization",
+    orgMeta: { ticker: "AIRK", orgType: "organization" },
+  };
+  const { follow, staleProfile, refresh, pending } = beginRefreshRace(orgBundle, "airk-invest", false, orgProfileResponse(7, true), "airk");
+  expect(getStoreSnapshot().profileBundle?.summary.isFollowing).toBe(true);
+
+  follow.resolve(Response.json({ following: true }));
+  await pending;
+
+  staleProfile.resolve(orgProfileResponse(6, false));
+  await refresh;
+  await expectProfileFollowing(7);
 });

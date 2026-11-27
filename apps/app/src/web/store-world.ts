@@ -82,7 +82,21 @@ export function markRepostServerCountLanded(postId: string): void {
   if (repostInFlight.has(postId)) repostServerCountLanded.add(postId);
 }
 const followInFlight = new Set<string>();
-let followChangeSeq = 0;
+const followChangeSeq = new Map<string, number>();
+
+function profileIdentityKeys(bundle: AppProfileBundle): string[] {
+  return [bundle.summary.handle, bundle.id, bundle.orgMeta?.ticker ?? ""]
+    .filter((key) => key.length > 0)
+    .map((key) => key.toLowerCase());
+}
+
+function bumpFollowChangeSeq(keys: ReadonlyArray<string>): void {
+  for (const key of keys) followChangeSeq.set(key, (followChangeSeq.get(key) ?? 0) + 1);
+}
+
+function followSeqSnapshot(keys: ReadonlyArray<string>): Map<string, number> {
+  return new Map(keys.map((key) => [key, followChangeSeq.get(key) ?? 0]));
+}
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
 let exploreRequestSeq = 0;
@@ -175,13 +189,20 @@ function preserveEngagementSince(
 function preserveFollowSince(
   fetched: AppProfileBundle,
   lower: string,
-  followSeqAtStart: number,
+  followSeqAtStart: ReadonlyMap<string, number>,
 ): AppProfileBundle {
-  if (followChangeSeq === followSeqAtStart) return fetched;
+  const fetchedKeys = profileIdentityKeys(fetched);
+  const changed = [...fetchedKeys, ...followSeqAtStart.keys()].some(
+    (key) => (followChangeSeq.get(key) ?? 0) !== (followSeqAtStart.get(key) ?? 0),
+  );
+  if (!changed) return fetched;
   const local = getStoreSnapshot().profileBundle;
-  if (!local || local.summary.handle.toLowerCase() !== lower) return fetched;
+  if (!local) return fetched;
+  const localKeys = profileIdentityKeys(local);
+  if (!localKeys.includes(lower) && !localKeys.some((key) => fetchedKeys.includes(key))) return fetched;
   const localSummary = local.summary;
   const fetchedSummary = fetched.summary;
+  const fetchedHandle = fetchedSummary.handle.toLowerCase();
   const flip = localSummary.isFollowing === fetchedSummary.isFollowing ? 0 : localSummary.isFollowing ? 1 : -1;
   return {
     ...fetched,
@@ -192,7 +213,7 @@ function preserveFollowSince(
       followingCount: fetchedSummary.isOwnProfile ? localSummary.followingCount : fetchedSummary.followingCount,
     },
     posts: fetched.posts.map((p) =>
-      p.card.authorHandle.toLowerCase() === lower
+      p.card.authorHandle.toLowerCase() === fetchedHandle
         ? { ...p, card: { ...p.card, isFollowingAuthor: localSummary.isFollowing } }
         : p,
     ),
@@ -1779,7 +1800,6 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   }
   const loadId = ++profileLoadCount;
   const engagementAtStart = captureEngagement();
-  const followSeqAtStart = followChangeSeq;
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -1787,6 +1807,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     (bundle.summary.handle.toLowerCase() === lower ||
       bundle.id.toLowerCase() === lower ||
       bundle.orgMeta?.ticker?.toLowerCase() === lower);
+  const followSeqAtStart = followSeqSnapshot(bundle && sameProfile ? profileIdentityKeys(bundle) : [lower]);
   setStoreState({
     profileLoading: true,
     profileHandle: handle,
@@ -2045,10 +2066,15 @@ export async function updateOwnProfile(payload: {
 }
 
 function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimisticBundleHandle?: string | null): void {
-  followChangeSeq += 1;
   const lower = handle.toLowerCase();
   const cur = getStoreSnapshot();
   const viewerHandle = cur.viewer?.handle.toLowerCase() ?? "";
+  const bundleKeys = cur.profileBundle ? profileIdentityKeys(cur.profileBundle) : [];
+  bumpFollowChangeSeq([
+    lower,
+    ...(bundleKeys.includes(lower) ? bundleKeys : []),
+    ...(viewerHandle ? [viewerHandle] : []),
+  ]);
   const profileMatches = Boolean(cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower);
   const viewingOwnProfile = Boolean(cur.profileBundle?.summary.isOwnProfile && lower !== viewerHandle);
   const sameBundleAsOptimistic = optimisticBundleHandle === undefined
@@ -2151,7 +2177,6 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
       setErrorNotice(res.message);
       return;
     }
-    followChangeSeq += 1;
     const cur = getStoreSnapshot();
     const curBundleHandle = cur.profileBundle?.summary.handle.toLowerCase() ?? null;
     const targetStateStale = curBundleHandle === lower
