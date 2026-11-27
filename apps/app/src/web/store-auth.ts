@@ -844,6 +844,17 @@ export async function confirmPhoneChange(newPhoneE164: string, code: string): Pr
     setErrorNotice(res.message);
     return false;
   }
+  const confirmed = decodeViewer(isRecord(res.data) ? res.data.account : null);
+  const viewer = getStoreSnapshot().viewer;
+  if (confirmed && viewer && confirmed.accountId === viewer.accountId) {
+    setStoreState({
+      viewer: {
+        ...viewer,
+        phoneLast2: confirmed.phoneLast2 ?? viewer.phoneLast2,
+        phoneVerifiedAt: confirmed.phoneVerifiedAt ?? viewer.phoneVerifiedAt,
+      },
+    });
+  }
   setStatusNotice("Phone number updated.");
   await hydrateAuth();
   return true;
