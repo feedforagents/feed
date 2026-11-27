@@ -1006,6 +1006,55 @@ it('Late likes never land on another profile (spec/app/navigation.md, "Story: Br
   expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["browser-post-1"]);
 });
 
+it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const tagged = {
+    ...SAMPLE_POSTS[0],
+    id: "tagged-gardens",
+    content: "Plant swap this Saturday #gardens",
+    marketId: null,
+    ticker: null,
+    marketBadge: null,
+    cashtags: [],
+    hashtags: ["gardens"],
+  };
+  const untagged = { ...tagged, id: "untagged-gardens", content: "Private gardens open Tuesday", hashtags: [] };
+  const article = { id: "garden-news", title: "Spring planting bulletin", body: "Community news", publishedAt: Date.now() };
+  let published = false;
+  await mountCustomMockApp({
+    handle(path, url) {
+      if (path === "/api/explore") {
+        return Promise.resolve(Response.json({
+          trending: [{ kind: "hashtag", tag: "#gardens", postCount: 1 }],
+          articles: published ? [article] : [],
+          search: { posts: url.searchParams.get("q") === "gardens" ? [tagged, untagged] : [] },
+        }));
+      }
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      if (path === "/api/trending/gardens") return Promise.resolve(Response.json({ tag: "gardens", posts: [tagged] }));
+      if (path === "/api/articles") return Promise.resolve(Response.json({ articles: published ? [article] : [] }));
+      return undefined;
+    },
+  });
+  await act(async () => { reconnectRealtime(); });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  await act(() => userEvent.click(page.getByRole("main").getByRole("button", { name: /#gardens/ }).first()));
+  await expect.element(page.getByText(tagged.content, { exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/trending/gardens");
+
+  published = true;
+  await act(async () => {
+    liveEventSources.at(-1)?.dispatchEvent(new MessageEvent("article.published", {
+      data: JSON.stringify({ type: "article.published", articleId: article.id, organizationId: "org-community" }),
+    }));
+  });
+
+  expect(window.location.pathname).toBe("/trending/gardens");
+  await expect.element(page.getByRole("button", { name: "Clear tag" })).toBeInTheDocument();
+  await expect.element(page.getByText(tagged.content, { exact: true })).toBeInTheDocument();
+  await expect.element(page.getByText(untagged.content, { exact: true })).not.toBeInTheDocument();
+  await expect.element(page.getByText(article.title, { exact: true })).toBeInTheDocument();
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 

@@ -432,6 +432,11 @@ function refreshActiveRouteIfStale(minGapMs: number): void {
   });
 }
 
+function refreshExploreFromRealtime(): Promise<void> {
+  const { route, activeTrendingTag } = getStoreSnapshot();
+  return route === "Explore" && !activeTrendingTag ? loadExplore() : loadTrending();
+}
+
 function handleSseEvent(eventType: string, rawData: unknown): void {
   const data = parseSseData(rawData);
   const s = getStoreSnapshot();
@@ -480,7 +485,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
   }
 
   if (eventType === "article.published") {
-    void runDomainRefresh("explore", () => (s.route === "Explore" ? loadExplore() : loadTrending()));
+    void runDomainRefresh("explore", refreshExploreFromRealtime);
     return;
   }
 
@@ -506,7 +511,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
       });
     }
     if (s.route === "Explore") {
-      void runDomainRefresh("explore", () => loadExplore());
+      void runDomainRefresh("explore", refreshExploreFromRealtime);
     }
     if (s.route === "Profile") {
       void runDomainRefresh("profile", () => loadProfile());
