@@ -880,6 +880,16 @@ it.effect(
     try unmuteAccount("alice", "bob")
     try blockAccount("alice", "carol")
     const ssePostBlockedDenied = try canDeliverRealtimeEventToViewer(store, postEvent, "alice")
+    const engagementOnBlockedPost: FeedRealtimeEvent = {
+      type: "post.engagement",
+      postId: directCarol.id,
+      kind: "like",
+      accountId: "dave",
+      likeCount: 1,
+      repostCount: 0,
+      postAuthorId: "carol"
+    }
+    const sseEngagementBlockedAuthorDenied = try canDeliverRealtimeEventToViewer(store, engagementOnBlockedPost, "alice")
     const groupSkippingBlocked = try createUserGroupChat("alice", "Skip Blocked Group", ["carol", "dave"])
     const daveSkipGroupInvites = try listPendingGroupInvites("dave", "user_group")
     const carolSkipGroupInvites = try listPendingGroupInvites("carol", "user_group")
@@ -941,6 +951,7 @@ it.effect(
         sseChatMemberAllowed,
         sseChatMutedDenied,
         ssePostBlockedDenied,
+        sseEngagementBlockedAuthorDenied,
         sseChatNonMemberDenied,
         sseGameNotifSocialModeDenied,
         sseInviteWrongViewerDenied,
@@ -980,6 +991,7 @@ it.effect(
         false,
         false,
         true,
+        false,
         false,
         false,
         false,
