@@ -1045,7 +1045,11 @@ export effect function getPostThread(
   const viewer = normalizeOptionalText(viewerId) ?? undefined
   return try store.transaction(effect (tx: Tx) => {
     const effectiveMode = mode ?? (try readViewerUiModeTx(tx, viewer))
-    const rootRows = try tx.query("SELECT * FROM feed_posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1", [postId])
+    const socialExclusion = effectiveMode === "social" ? ` AND ${socialModeMarketExclusionSql("p")}` : ""
+    const rootRows = try tx.query(
+      `SELECT p.* FROM feed_posts p WHERE p.id = $1 AND p.deleted_at IS NULL${socialExclusion} LIMIT 1`,
+      [postId]
+    )
     const rootRow = rootRows[0]
     if (rootRow === undefined) {
       throw new SocialFailure({ code: "NotFound", message: "Post not found" })
@@ -1062,7 +1066,7 @@ export effect function getPostThread(
         : "p.created_at ASC, p.id ASC"
     const replyParams: unknown[] = viewer === undefined ? [postId] : [postId, viewer]
     const replyRows = try tx.query(
-      `SELECT p.* FROM feed_posts p WHERE p.reply_to_post_id = $1 AND p.deleted_at IS NULL${visibilitySuffix} ORDER BY ${replyOrderBy}`,
+      `SELECT p.* FROM feed_posts p WHERE p.reply_to_post_id = $1 AND p.deleted_at IS NULL${socialExclusion}${visibilitySuffix} ORDER BY ${replyOrderBy}`,
       replyParams
     )
     const parentId = toText(rootRow.reply_to_post_id) ?? null
@@ -1085,7 +1089,7 @@ export effect function getPostThread(
            SELECT p.*
            FROM chain c
            INNER JOIN feed_posts p ON p.id = c.id
-           WHERE p.deleted_at IS NULL${ancestorVisibility}
+           WHERE p.deleted_at IS NULL${socialExclusion}${ancestorVisibility}
            ORDER BY c.depth DESC`,
           viewer === undefined
             ? [postId, parentId, MAX_REPLY_ANCESTOR_DEPTH]

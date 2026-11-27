@@ -1,0 +1,141 @@
+// spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"; spec/social/posts.md, "Story: Project posts for Game and Social presentation modes"
+import { SocialFailure, createPost, getPostThread, realtimeBusLayer } from "../src/index.vibe"
+import { Duration } from "effect"
+import { TestClock } from "effect/testing"
+import { localStoreLayer } from "@repo/db/node"
+import { Store, migrateFeedSchema, seedFeedWorld, toText } from "@repo/db"
+import { assert, it } from "@effect/vitest"
+
+effect function readSocialThreadFailureCode(postId: string, viewerId?: string, mode?: "game" | "social") {
+  const outcome = try exit(getPostThread(postId, viewerId, mode))
+  if (Exit.isSuccess(outcome)) return "unexpected_ok"
+  const err = Cause.squash(outcome.cause)
+  return err instanceof SocialFailure ? err.code : "unexpected_err"
+}
+
+it.effect(
+  'getPostThread hides market root posts, market replies, and market ancestors in SocialMode while preserving GameMode threads (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")',
+  () => effect {
+    try TestClock.setTime(1_761_200_000_000)
+    provide Layer.merge(
+      Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })),
+      Layer.fresh(realtimeBusLayer)
+    ) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const db = try Store
+      const orgRows = try db.transaction((tx) => tx.query("SELECT id FROM feed_organizations ORDER BY id ASC LIMIT 1"))
+      const orgId = toText(orgRows[0]?.id) ?? ""
+      const perpRows = try db.transaction((tx) => tx.query("SELECT ticker FROM feed_perp_markets ORDER BY ticker ASC LIMIT 1"))
+      const ticker = toText(perpRows[0]?.ticker) ?? "HUND"
+
+      try orDie(db.transaction((tx) =>
+        tx.query(
+          `INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at)
+           VALUES
+             ('ptsm-viewer', 'ptsm_viewer', 'Social Viewer', '', 'social', 10000, $1, $1),
+             ('ptsm-author', 'ptsm_author', 'Thread Author', '', 'game', 10000, $1, $1)`,
+          [1_761_200_000_000]
+        )
+      ))
+
+      const newMarketRoot = try orDie(createPost({
+        authorId: orgId,
+        authorKind: "org",
+        content: "NEW MARKET (30m): Will compute spot demand double before close?",
+        marketId: "seed-market-1"
+      }))
+      try TestClock.adjust(Duration.seconds(1))
+      const orgTickerRoot = try orDie(createPost({
+        authorId: orgId,
+        authorKind: "org",
+        content: "Desk update from organization floor",
+        ticker
+      }))
+      try TestClock.adjust(Duration.seconds(1))
+      const userChildUnderMarket = try orDie(createPost({
+        authorId: "ptsm-author",
+        authorKind: "user",
+        content: "Plain user comment beneath market announcement",
+        replyToPostId: newMarketRoot.id
+      }))
+      try TestClock.adjust(Duration.seconds(1))
+      const userGrandchild = try orDie(createPost({
+        authorId: "ptsm-author",
+        authorKind: "user",
+        content: "Second plain comment continuing the conversation",
+        replyToPostId: userChildUnderMarket.id
+      }))
+
+      try TestClock.adjust(Duration.seconds(1))
+      const plainRoot = try orDie(createPost({
+        authorId: "ptsm-author",
+        authorKind: "user",
+        content: "Weekend photography notes from downtown"
+      }))
+      try TestClock.adjust(Duration.seconds(1))
+      const plainReply = try orDie(createPost({
+        authorId: "ptsm-author",
+        authorKind: "user",
+        content: "Shot on 35mm film at dusk",
+        replyToPostId: plainRoot.id
+      }))
+      try TestClock.adjust(Duration.seconds(1))
+      const settlementReply = try orDie(createPost({
+        authorId: orgId,
+        authorKind: "org",
+        content: "Settlement Wire: market settled YES on verified close",
+        replyToPostId: plainRoot.id,
+        marketId: "seed-market-1"
+      }))
+
+      const rootInGame = try orDie(getPostThread(newMarketRoot.id, undefined, "game"))
+      const rootInSocialExplicit = try readSocialThreadFailureCode(newMarketRoot.id, undefined, "social")
+      const rootInSocialByViewer = try readSocialThreadFailureCode(newMarketRoot.id, "ptsm-viewer")
+      const orgTickerInSocial = try readSocialThreadFailureCode(orgTickerRoot.id, undefined, "social")
+
+      const plainRootSocial = try orDie(getPostThread(plainRoot.id, "ptsm-viewer"))
+      const plainRootGame = try orDie(getPostThread(plainRoot.id, "ptsm-author", "game"))
+
+      const childSocial = try orDie(getPostThread(userChildUnderMarket.id, "ptsm-viewer"))
+      const childGame = try orDie(getPostThread(userChildUnderMarket.id, "ptsm-author", "game"))
+      const grandchildSocial = try orDie(getPostThread(userGrandchild.id, "ptsm-viewer"))
+
+      try orDie(db.transaction((tx) =>
+        tx.query("UPDATE feed_accounts SET ui_mode = 'game' WHERE account_id = 'ptsm-viewer'")
+      ))
+      const rootAfterSwitchToGame = try orDie(getPostThread(newMarketRoot.id, "ptsm-viewer"))
+
+      try orDie(Effect.try(() => {
+        assert.deepStrictEqual(
+          {
+            rootInGameId: rootInGame.post.id,
+            rootInSocialExplicit,
+            rootInSocialByViewer,
+            orgTickerInSocial,
+            plainRootSocialReplies: plainRootSocial.replies.map((r) => r.id),
+            plainRootGameReplies: plainRootGame.replies.map((r) => r.id),
+            childSocialParentAndAncestors: [childSocial.parentPost, childSocial.ancestors.map((a) => a.id)],
+            childGameParentAndAncestors: [childGame.parentPost?.id ?? null, childGame.ancestors.map((a) => a.id)],
+            grandchildSocialParentAndAncestors: [grandchildSocial.parentPost?.id ?? null, grandchildSocial.ancestors.map((a) => a.id)],
+            rootAfterSwitchToGameId: rootAfterSwitchToGame.post.id
+          },
+          {
+            rootInGameId: newMarketRoot.id,
+            rootInSocialExplicit: "NotFound",
+            rootInSocialByViewer: "NotFound",
+            orgTickerInSocial: "NotFound",
+            plainRootSocialReplies: [plainReply.id],
+            plainRootGameReplies: [plainReply.id, settlementReply.id],
+            childSocialParentAndAncestors: [null, []],
+            childGameParentAndAncestors: [newMarketRoot.id, [newMarketRoot.id]],
+            grandchildSocialParentAndAncestors: [userChildUnderMarket.id, [userChildUnderMarket.id]],
+            rootAfterSwitchToGameId: newMarketRoot.id
+          }
+        )
+      }))
+    }
+  },
+  60_000
+)
