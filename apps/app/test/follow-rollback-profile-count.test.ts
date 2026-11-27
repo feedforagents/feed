@@ -150,6 +150,52 @@ it('A failed follow from the own profile rolls the own Following count back (spe
   expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
 });
 
+it('A failed follow rolled back after the own profile reloads leaves the own Following count unchanged (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  openProfile(aliceBundle(), "alice");
+  const follow = pendingResponse();
+  stubFetchUrl((url) => url.includes("/follow") ? follow.promise : Promise.resolve(profileResponse("alice", "Alice Player", 2, 4, false)));
+  const pending = toggleFollow("bob", false);
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+
+  await loadProfile("alice");
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
+  await failFollow(follow, pending);
+
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
+  expect(getStoreSnapshot().errorMessage).toBe("Follow failed");
+});
+
+it('A failed unfollow rolled back after the own profile reloads leaves the own Following count unchanged (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const alice = makeProfileBundle("alice", "Alice Player", 2, 5, true);
+  openProfile(alice, "alice");
+  const follow = pendingResponse();
+  stubFetchUrl((url) => url.includes("/follow") ? follow.promise : Promise.resolve(profileResponse("alice", "Alice Player", 2, 5, false)));
+  const pending = toggleFollow("bob", true);
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
+
+  await loadProfile("alice");
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+  await failFollow(follow, pending);
+
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+});
+
+it('A failed unfollow with no navigation rolls the follower count and follow state back (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const bob = makeProfileBundle("bob", "Bob Trader", 7, 4, false);
+  openProfile({ ...bob, summary: { ...bob.summary, isFollowing: true } }, "bob");
+  const follow = pendingResponse();
+  stubFetchUrl(() => follow.promise);
+  const pending = toggleFollow("bob", true);
+  expect(getStoreSnapshot().profileBundle?.summary.isFollowing).toBe(false);
+  expect(getStoreSnapshot().profileBundle?.summary.followersCount).toBe(6);
+
+  await failFollow(follow, pending);
+
+  expect(getStoreSnapshot().profileBundle?.summary.isFollowing).toBe(true);
+  expect(getStoreSnapshot().profileBundle?.summary.followersCount).toBe(7);
+  expect(getStoreSnapshot().errorMessage).toBe("Follow failed");
+});
+
 it('A follow that succeeds after the same profile refreshes resyncs the follower count (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
   const { follow, pending } = beginFollowWithProfileResponse(profileResponse("bob", "Bob Trader", 7, 4, true));
   setStoreState({ profileBundle: bobBundle(), profileHandle: "bob" });

@@ -103,6 +103,7 @@ export function markReplyLiveCountLanded(replyPostId: string): void {
 }
 const followInFlight = new Set<string>();
 const followChangeSeq = new Map<string, number>();
+let profileBundleGen = 0;
 
 function profileIdentityKeys(bundle: AppProfileBundle): string[] {
   return [bundle.summary.handle, bundle.id, bundle.orgMeta?.ticker ?? ""]
@@ -2038,6 +2039,9 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   if (loadId !== profileLoadCount || getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
     const fetched = sameProfile ? preserveFollowSince(res.data, lower, followSeqAtStart) : res.data;
+    if (fetched === res.data) {
+      profileBundleGen += 1;
+    }
     const droppedOwnPosts = fetched.posts.filter(
       (post) => wasPostDeletedSince(post.card.id, deletionsAtStart)
         && post.card.authorHandle.toLowerCase() === fetched.summary.handle.toLowerCase(),
@@ -2297,7 +2301,7 @@ export async function updateOwnProfile(payload: {
   return true;
 }
 
-function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimisticBundleHandle?: string | null): void {
+function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimisticBundleHandle?: string | null, optimisticBundleGen?: number): void {
   const lower = handle.toLowerCase();
   const cur = getStoreSnapshot();
   const viewerHandle = cur.viewer?.handle.toLowerCase() ?? "";
@@ -2311,6 +2315,7 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimist
   const viewingOwnProfile = Boolean(cur.profileBundle?.summary.isOwnProfile && lower !== viewerHandle);
   const sameBundleAsOptimistic = optimisticBundleHandle === undefined
     || (cur.profileBundle !== null && cur.profileBundle.summary.handle.toLowerCase() === optimisticBundleHandle);
+  const bundleReplacedSinceOptimistic = optimisticBundleGen !== undefined && optimisticBundleGen !== profileBundleGen;
   const delta = nextFollowing ? 1 : -1;
   const patchPostAuthor = (p: AppPost): AppPost =>
     p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p;
@@ -2336,7 +2341,7 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimist
         posts: nextPosts,
         summary: {
           ...cur.profileBundle.summary,
-          followingCount: sameBundleAsOptimistic
+          followingCount: sameBundleAsOptimistic && !bundleReplacedSinceOptimistic
             ? Math.max(0, cur.profileBundle.summary.followingCount + delta)
             : cur.profileBundle.summary.followingCount,
         },
@@ -2398,14 +2403,15 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
   followInFlight.add(lower);
   const nextFollowing = !inferred;
   const optimisticBundleHandle = s.profileBundle?.summary.handle.toLowerCase() ?? null;
-  patchFollowAcrossStore(handle, nextFollowing, optimisticBundleHandle);
+  const optimisticBundleGen = profileBundleGen;
+  patchFollowAcrossStore(handle, nextFollowing, optimisticBundleHandle, optimisticBundleGen);
   try {
     const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/follow`, {
       method: inferred ? "DELETE" : "POST",
       parse: passThrough,
     });
     if (!res.ok) {
-      patchFollowAcrossStore(handle, inferred, optimisticBundleHandle);
+      patchFollowAcrossStore(handle, inferred, optimisticBundleHandle, optimisticBundleGen);
       setErrorNotice(res.message);
       return;
     }
