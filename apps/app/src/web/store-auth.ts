@@ -1022,12 +1022,16 @@ export async function loadAdminStatus(): Promise<void> {
   setStoreState({ adminLoading: false, adminStatus: res.data });
 }
 
+let adminReportsRequestSeq = 0;
+
 export async function loadAdminReports(status: "all" | "open" | "reviewed" | "dismissed" = "open"): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminReportsRequestSeq;
   setStoreState({ adminTabLoading: true });
   const res = await requestJson(`/api/admin/reports?status=${encodeURIComponent(status)}&limit=50`, {
     parse: decodeAdminReports,
   });
+  if (reqSeq !== adminReportsRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminTabLoading: false });
     setErrorNotice(res.message);
