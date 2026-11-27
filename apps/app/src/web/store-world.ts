@@ -1974,18 +1974,20 @@ export async function updateOwnProfile(payload: {
     body: payload,
     parse: passThrough,
   });
+  const currentViewer = getStoreSnapshot().viewer;
+  if (!currentViewer || currentViewer.accountId !== s.viewer.accountId) return false;
   if (!res.ok) {
     setErrorNotice(res.message);
     return false;
   }
   const rec = isRecord(res.data) ? res.data : {};
-  const nextDisplayName = str(rec.displayName, payload.displayName ?? s.viewer.displayName);
-  const nextBio = str(rec.bio, payload.bio ?? s.viewer.bio);
-  const nextAvatar = optStr(rec.avatarUrl) ?? (payload.avatarUrl !== undefined ? payload.avatarUrl : s.viewer.avatarUrl);
-  const nextBanner = optStr(rec.bannerUrl) ?? (payload.bannerUrl !== undefined ? payload.bannerUrl : s.viewer.bannerUrl);
+  const nextDisplayName = str(rec.displayName, payload.displayName ?? currentViewer.displayName);
+  const nextBio = str(rec.bio, payload.bio ?? currentViewer.bio);
+  const nextAvatar = optStr(rec.avatarUrl) ?? (payload.avatarUrl !== undefined ? payload.avatarUrl : currentViewer.avatarUrl);
+  const nextBanner = optStr(rec.bannerUrl) ?? (payload.bannerUrl !== undefined ? payload.bannerUrl : currentViewer.bannerUrl);
   setStoreState({
     viewer: {
-      ...s.viewer,
+      ...currentViewer,
       displayName: nextDisplayName,
       bio: nextBio,
       avatarUrl: nextAvatar,
@@ -2004,10 +2006,10 @@ export async function updateOwnProfile(payload: {
     setStoreState({ profileBundle: { ...cur.profileBundle, summary: nextSummary } });
   }
   setStatusNotice("Profile updated.");
-  if (s.route === "Profile" && s.profileBundle?.summary.isOwnProfile) {
-    await loadProfile(s.viewer.handle);
+  if (cur.route === "Profile" && cur.profileBundle?.summary.isOwnProfile) {
+    await loadProfile(currentViewer.handle);
     if (getStoreSnapshot().profileReplies.length > 0) {
-      await loadProfileReplies(s.viewer.handle);
+      await loadProfileReplies(currentViewer.handle);
     }
   }
   return true;
