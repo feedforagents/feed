@@ -1157,6 +1157,37 @@ it('A published article does not replace a trending tag list (spec/app/navigatio
   await expect.element(page.getByText(article.title, { exact: true })).toBeInTheDocument();
 });
 
+it('Publishes a pasted post whose trimmed text fits the limit (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const text = "Garden club plant swap this Saturday. ".repeat(8).slice(0, 279) + ".";
+  const submitted: string[] = [];
+  await mountCustomMockApp({
+    authenticated: true,
+    handle(path, _url, init) {
+      if (path === "/api/posts" && init?.method === "POST") {
+        if (typeof init.body === "string") submitted.push(init.body);
+        return Promise.resolve(Response.json({ ...SAMPLE_POSTS[0], id: "plant-swap", content: text }, { status: 201 }));
+      }
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+
+  const main = page.getByRole("main");
+  const draft = main.getByRole("textbox", { name: "Post text", exact: true });
+  const publish = main.getByRole("button", { name: "Post", exact: true });
+  await act(() => userEvent.fill(draft, text + "!"));
+  await expect.element(publish).toBeDisabled();
+  await expect.element(main.getByText("-1", { exact: true })).toBeInTheDocument();
+  await act(() => userEvent.fill(draft, text + " "));
+  await expect.element(publish).toBeEnabled();
+  await expect.element(main.getByText("0", { exact: true })).toBeInTheDocument();
+  await act(() => userEvent.fill(draft, text + "\n"));
+  await expect.element(publish).toBeEnabled();
+  await act(() => userEvent.click(publish));
+  await expect.element(draft).toHaveValue("");
+  expect(submitted).toEqual([JSON.stringify({ content: text })]);
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 
