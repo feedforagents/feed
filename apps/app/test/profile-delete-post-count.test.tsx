@@ -2,6 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { deletePost, loadProfile, loadProfileReplies, removePostAcrossStore } from "../src/web/store-world.ts";
+import { decodePost } from "../src/web/types.ts";
 import { makeRawPost, makeRawProfileBundle, makeViewerSession } from "./app-test-helpers.tsx";
 
 const createdAt = Date.now() - 60_000;
@@ -22,6 +23,18 @@ function signInAsAlice(): void {
   });
 }
 
+function fetchPath(input: RequestInfo | URL): string {
+  return input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+}
+
+function deletePostResponse(postId: string, replyToPostId: string | null = null, parentReplyCount: number | null = null): Promise<Response> {
+  return Promise.resolve(Response.json({ postId, deleted: true, replyToPostId, parentReplyCount }));
+}
+
+function isDeletePost(input: RequestInfo | URL, init: RequestInit | undefined, postId: string): boolean {
+  return fetchPath(input).includes(`/api/posts/${postId}`) && (init?.method ?? "GET") === "DELETE";
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   setStoreState({
@@ -36,11 +49,8 @@ afterEach(() => {
 
 it('Deleting an own post from the profile drops the header post count with the list (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
-    const method = init?.method ?? "GET";
-    if (url.includes("/api/posts/alice-post-1") && method === "DELETE") {
-      return Promise.resolve(Response.json({ postId: "alice-post-1", deleted: true, replyToPostId: null, parentReplyCount: null }));
-    }
+    const url = fetchPath(input);
+    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
     if (url.startsWith("/api/users/alice")) {
       return Promise.resolve(Response.json(profileRaw(2, [firstRaw, secondRaw])));
     }
@@ -131,4 +141,42 @@ it('Deleting an own reply from the profile replies tab drops the header post cou
 
   removePostAcrossStore("alice-reply-1", { replyToPostId: "carol-post-9", parentReplyCount: 0 });
   expect(getStoreSnapshot().profileBundle?.postsCount).toBe(1);
+});
+
+it('Deleting an own post turns its quote embeds unavailable in the same lists (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const quotingRaw = makeRawPost(createdAt, {
+    id: "carol-quote-1",
+    authorId: "carol",
+    authorHandle: "carol",
+    authorDisplayName: "Carol Analyst",
+    content: "Carol quoting Alice",
+    quotePostId: "alice-post-1",
+    quotePost: {
+      id: "alice-post-1",
+      authorId: "alice",
+      authorHandle: "alice",
+      authorDisplayName: "Alice Player",
+      content: "Alice first call",
+      createdAt,
+    },
+  });
+  const decodedTarget = decodePost(firstRaw, "alice");
+  const decodedQuoting = decodePost(quotingRaw, "alice");
+  if (decodedTarget === null || decodedQuoting === null) throw new Error("test fixtures must decode");
+  expect(decodedQuoting.card.quotePost?.content).toBe("Alice first call");
+
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  });
+
+  signInAsAlice();
+  setStoreState({ feedPosts: [decodedQuoting, decodedTarget] });
+
+  await deletePost("alice-post-1");
+
+  const feedAfter = getStoreSnapshot().feedPosts;
+  expect(feedAfter.map((p) => p.card.id)).toEqual(["carol-quote-1"]);
+  expect(feedAfter[0]?.card.quotePost?.deleted).toBe(true);
+  expect(feedAfter[0]?.card.quotePost?.content).toBe("");
 });

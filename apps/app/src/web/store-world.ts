@@ -287,7 +287,25 @@ export function removePostAcrossStore(
       : Math.max(0, post.card.replyCount - 1);
     return { ...post, card: { ...post.card, replyCount: nextCount } };
   };
-  const cleanList = (list: ReadonlyArray<AppPost>) => list.filter((p) => p.card.id !== postId).map(adjustParent);
+  const tombstoneQuote = (post: AppPost): AppPost =>
+    post.card.quotePost?.id === postId
+      ? {
+          ...post,
+          card: {
+            ...post.card,
+            quotePost: {
+              id: postId,
+              authorDisplayName: "",
+              authorHandle: "",
+              isNpcParody: false,
+              content: "",
+              deleted: true,
+            },
+          },
+        }
+      : post;
+  const cleanList = (list: ReadonlyArray<AppPost>) =>
+    list.filter((p) => p.card.id !== postId).map((p) => adjustParent(tombstoneQuote(p)));
   const bundle = cur.profileBundle;
   const removedFromProfile = bundle !== null
     && existing !== undefined
@@ -306,8 +324,8 @@ export function removePostAcrossStore(
       ? thread.post.card.id === postId
         ? null
         : {
-            post: adjustParent(thread.post),
-            parentPost: thread.parentPost ? adjustParent(thread.parentPost) : null,
+            post: adjustParent(tombstoneQuote(thread.post)),
+            parentPost: thread.parentPost ? adjustParent(tombstoneQuote(thread.parentPost)) : null,
             ancestors: cleanList(thread.ancestors),
             replies: cleanList(thread.replies),
           }
