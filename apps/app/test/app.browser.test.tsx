@@ -841,6 +841,11 @@ it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/market
   await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=no"));
   await expect.element(page.getByRole("button", { name: "Buy NO" })).toBeInTheDocument();
 
+  await act(() => userEvent.click(page.getByRole("radio", { name: /YES \d+%/ })));
+  await expect.element(page.getByRole("button", { name: "Buy YES" })).toBeInTheDocument();
+  await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=no"));
+  await expect.element(page.getByRole("button", { name: "Buy NO" })).toBeInTheDocument();
+
   await act(() => userEvent.click(page.getByRole("button", { name: "Buy NO" })));
   await expect.element(page.getByText("Confirm Buy NO")).toBeInTheDocument();
   await act(() => storeActions.navigate("/markets/predictions/seed-market-1?side=yes"));

@@ -162,6 +162,7 @@ export interface StoreState {
   readonly selectedMarketKind: "prediction" | "perp";
   readonly selectedMarketId: string | null;
   readonly selectedMarketSide: "YES" | "NO";
+  readonly marketSideIntentSeq: number;
   readonly marketHistory: ReadonlyArray<AppMarketHistoryPoint>;
   readonly marketHistoryLoading: boolean;
   readonly marketTrades: ReadonlyArray<AssetTradeEntry>;
@@ -511,6 +512,7 @@ let currentState: StoreState = {
   selectedMarketKind: initialLocation.marketKind ?? (initialLocation.queryTicker ? "perp" : "prediction"),
   selectedMarketId: initialLocation.marketId ?? initialLocation.queryTicker,
   selectedMarketSide: initialLocation.marketSide ?? "YES",
+  marketSideIntentSeq: 0,
   marketHistory: [],
   marketHistoryLoading: false,
   marketTrades: [],
