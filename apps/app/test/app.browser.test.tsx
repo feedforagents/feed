@@ -1206,6 +1206,39 @@ it('Back from a News article restores the full article list (spec/app/navigation
   await expect.element(openArticle).toBeInTheDocument();
 });
 
+it('Back from a searched article keeps the selected search tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const article = {
+    id: "garden-search-article",
+    title: "Garden search bulletin",
+    body: "The community plant swap starts on Saturday.",
+    publishedAt: Date.now(),
+  };
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/explore") return Promise.resolve(Response.json({ articles: [article] }));
+      if (path === `/api/articles/${article.id}`) return Promise.resolve(Response.json(article));
+      if (path === "/api/articles") return Promise.resolve(Response.json({ articles: [article] }));
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  const main = page.getByRole("main");
+
+  await act(() => userEvent.fill(main.getByLabelText("Search Feed"), "garden"));
+  await act(() => userEvent.click(main.getByRole("button", { name: "Search", exact: true })));
+
+  const people = main.getByRole("tab", { name: "People", exact: true });
+  await act(() => userEvent.click(people));
+  await expect.element(people).toHaveAttribute("aria-selected", "true");
+
+  await act(() => storeActions.navigate(`/article/${article.id}`));
+  await expect.element(main.getByRole("heading", { name: article.title, exact: true })).toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(people).toHaveAttribute("aria-selected", "true");
+});
+
 it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const tagged = {
     ...SAMPLE_POSTS[0],

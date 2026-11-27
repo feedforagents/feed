@@ -291,6 +291,7 @@ function ExploreMarketsList() {
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
   const { activeArticleId, exploreNewsRequest } = useAppStore();
   const [browseTab, setBrowseTab] = useState<BrowseTab>(exploreNewsRequest === null ? "trending" : "news");
+  const [searchTab, setSearchTab] = useState<SearchTab>("top");
   const [handledNewsRequest, setHandledNewsRequest] = useState(exploreNewsRequest);
   if (exploreNewsRequest !== null && exploreNewsRequest !== handledNewsRequest) {
     setHandledNewsRequest(exploreNewsRequest);
@@ -298,18 +299,27 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
   }
   return activeArticleId
     ? <ArticleDetailScreen mode={mode} />
-    : <ExploreBrowseScreen mode={mode} browseTab={browseTab} setBrowseTab={setBrowseTab} />;
+    : (
+      <ExploreBrowseScreen
+        mode={mode}
+        browseTab={browseTab}
+        setBrowseTab={setBrowseTab}
+        searchTab={searchTab}
+        setSearchTab={setSearchTab}
+      />
+    );
 }
 
-function ExploreBrowseScreen({ mode, browseTab, setBrowseTab }: {
+function ExploreBrowseScreen({ mode, browseTab, setBrowseTab, searchTab, setSearchTab }: {
   readonly mode: UiMode;
   readonly browseTab: BrowseTab;
   readonly setBrowseTab: (tab: BrowseTab) => void;
+  readonly searchTab: SearchTab;
+  readonly setSearchTab: (tab: SearchTab) => void;
 }) {
   const s = useAppStore();
   const [draftQuery, setDraftQuery] = useState(s.exploreQuery);
   const [syncedQuery, setSyncedQuery] = useState(s.exploreQuery);
-  const [searchTab, setSearchTab] = useState<SearchTab>("top");
 
   if (s.exploreQuery !== syncedQuery) {
     setSyncedQuery(s.exploreQuery);
