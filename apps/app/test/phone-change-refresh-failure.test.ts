@@ -1,6 +1,6 @@
 // spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"
 import { afterEach, expect, it, vi } from "vitest";
-import { aliceViewer, stubFetchUrl } from "./moderation-fixtures.ts";
+import { aliceViewer, setupAuthStore } from "./moderation-fixtures.ts";
 
 const OLD_LAST2 = "01";
 const NEW_LAST2 = "99";
@@ -14,11 +14,8 @@ function account(last2: string, accountId = "acc-1") {
 }
 
 async function setup(handler: (path: string) => Response) {
-  stubFetchUrl((url) => Promise.resolve(handler(new URL(url, "https://feed.local").pathname)));
-  const { setStoreState, getStoreSnapshot } = await import("../src/web/store-core.ts");
-  const { confirmPhoneChange } = await import("../src/web/store-auth.ts");
-  setStoreState({ viewer: viewer(OLD_LAST2), route: "Settings", settingsTab: "account" });
-  return { confirmPhoneChange, getStoreSnapshot };
+  const { core, auth } = await setupAuthStore(handler, viewer(OLD_LAST2));
+  return { confirmPhoneChange: auth.confirmPhoneChange, getStoreSnapshot: core.getStoreSnapshot };
 }
 
 async function confirmWithMe(me: Response, accountPayload = account(NEW_LAST2)) {
