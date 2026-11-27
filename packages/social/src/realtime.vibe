@@ -12,6 +12,7 @@ export type FeedRealtimeEvent =
       readonly quotePostId: string | null
       readonly quoteAuthorId?: string | null
       readonly createdAt: number
+      readonly parentReplyCount?: number | null
     }
   | {
       readonly type: "post.deleted"
@@ -315,13 +316,18 @@ effect function runFailClosedLookup(lookup: boolean!unknown!never): boolean!! {
 effect function visibleParentReplyCountForViewer(
   store: Store.Shape,
   parentPostId: string,
-  viewerId: string
+  viewerId?: string
 ): (number | null)!! {
   const res = try exit(store.transaction(effect (tx: Tx) => {
-    const rows = try tx.query(
-      `SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")}`,
-      [parentPostId, viewerId]
-    )
+    const rows = viewerId === undefined
+      ? try tx.query(
+          "SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL",
+          [parentPostId]
+        )
+      : try tx.query(
+          `SELECT count(*)::int AS visible_count FROM feed_posts r WHERE r.reply_to_post_id = $1 AND r.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "r.author_id")}`,
+          [parentPostId, viewerId]
+        )
     const row = rows[0]
     return row === undefined ? 0 : toInt(row.visible_count)
   }))
@@ -333,6 +339,24 @@ export effect function personalizePostDeletedEvent(
   event: FeedRealtimeEvent,
   viewerAccountId: string | null | undefined
 ): FeedRealtimeEvent!! {
+  if (event.type === "post.created") {
+    const parentId = event.replyToPostId
+    if (parentId === null || parentId === "" || store === undefined) return event
+    const viewerId = normalizeViewerId(viewerAccountId)
+    const count = try visibleParentReplyCountForViewer(store, parentId, viewerId)
+    if (count === null) return event
+    return {
+      type: "post.created",
+      postId: event.postId,
+      authorId: event.authorId,
+      authorKind: event.authorKind,
+      replyToPostId: event.replyToPostId,
+      quotePostId: event.quotePostId,
+      ...(event.quoteAuthorId === undefined ? {} : { quoteAuthorId: event.quoteAuthorId }),
+      createdAt: event.createdAt,
+      parentReplyCount: count
+    }
+  }
   if (event.type !== "post.deleted") return event
   const viewerId = normalizeViewerId(viewerAccountId)
   const parentId = event.replyToPostId ?? null
