@@ -36,19 +36,23 @@ async function tick() {
   }
 }
 
+async function signOutResolvingLatest(feedResponse: Response): Promise<void> {
+  const pending = installDeferredFetch();
+  seedFollowingPage();
+  const signingOut = logout();
+  pending.get("POST /api/auth/logout")?.resolve(jsonResponse({}));
+  await tick();
+  pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(feedResponse);
+  await signingOut;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("sign out and the Latest feed load", () => {
   it('a failed Latest load after sign out leaves no previous-tab posts or cursor for Load more to reuse (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-    const pending = installDeferredFetch();
-    seedFollowingPage();
-    const signingOut = logout();
-    pending.get("POST /api/auth/logout")?.resolve(jsonResponse({}));
-    await tick();
-    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(errorResponse());
-    await signingOut;
+    await signOutResolvingLatest(errorResponse());
     const s = getStoreSnapshot();
     expect(s.viewer).toBeNull();
     expect(s.feedTab).toBe("latest");
@@ -59,13 +63,7 @@ describe("sign out and the Latest feed load", () => {
   });
 
   it('a successful Latest load after sign out replaces the list and cursor with the Latest page (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-    const pending = installDeferredFetch();
-    seedFollowingPage();
-    const signingOut = logout();
-    pending.get("POST /api/auth/logout")?.resolve(jsonResponse({}));
-    await tick();
-    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201500000:latest-1" }));
-    await signingOut;
+    await signOutResolvingLatest(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201500000:latest-1" }));
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
     expect(s.feedNextCursor).toBe("1764201500000:latest-1");
