@@ -1,6 +1,6 @@
 // spec/auth/email.md, "Story: Onboard once, link or change email, sign out everywhere, or delete after cooldown"
 import { afterEach, expect, it, vi } from "vitest";
-import { aliceViewer, stubFetchUrl } from "./moderation-fixtures.ts";
+import { aliceViewer, setupAuthStore } from "./moderation-fixtures.ts";
 
 const OLD_MASKED = "a***@example.com";
 const NEW_MASKED = "b***@example.com";
@@ -14,11 +14,8 @@ function account(emailMasked: string, emailVerifiedAt: number, accountId = "acc-
 }
 
 async function setup(handler: (path: string) => Response) {
-  stubFetchUrl((url) => Promise.resolve(handler(new URL(url, "https://feed.local").pathname)));
-  const { setStoreState, getStoreSnapshot } = await import("../src/web/store-core.ts");
-  const { verifyEmailMagicLink } = await import("../src/web/store-auth.ts");
-  setStoreState({ viewer: viewer(OLD_MASKED, 1000), route: "Settings", settingsTab: "account" });
-  return { verifyEmailMagicLink, getStoreSnapshot };
+  const { core, auth } = await setupAuthStore(handler, viewer(OLD_MASKED, 1000));
+  return { verifyEmailMagicLink: auth.verifyEmailMagicLink, getStoreSnapshot: core.getStoreSnapshot };
 }
 
 async function verifyWithMe(me: Response, accountPayload = account(NEW_MASKED, 2000)) {

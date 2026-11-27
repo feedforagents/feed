@@ -168,3 +168,11 @@ export function makeProfileBundle(
     positions: [],
   };
 }
+
+export async function setupAuthStore(handler: (path: string) => Response, viewerState: typeof aliceViewer) {
+  stubFetchUrl((url) => Promise.resolve(handler(new URL(url, "https://feed.local").pathname)));
+  const core = await import("../src/web/store-core.ts");
+  const auth = await import("../src/web/store-auth.ts");
+  core.setStoreState({ viewer: viewerState, route: "Settings", settingsTab: "account" });
+  return { core, auth };
+}
