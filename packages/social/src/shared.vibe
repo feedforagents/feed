@@ -242,7 +242,7 @@ function subjectFromOrgRow(row: Row): ResolvedSubject {
 
 effect function findAccountByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const accountRows = try tx.query(
-    "SELECT account_id, handle, display_name, avatar_url, banner_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
+    "SELECT account_id, handle, display_name, avatar_url, banner_url, ui_mode FROM feed_accounts WHERE (account_id = $1 OR lower(handle) = lower($1)) AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = feed_accounts.account_id AND a.status <> 'active') LIMIT 1",
     [cleaned]
   )
   const accountRow = accountRows[0]
