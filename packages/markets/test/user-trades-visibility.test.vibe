@@ -1,0 +1,88 @@
+// spec/auth/email.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days"; spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"
+import { it, assert } from "@effect/vitest"
+import { migrateFeedSchema, seedFeedWorld, Store, toText } from "@repo/db"
+import { MarketFailure, buyPredictionShares, listUserTrades } from "../src/index.vibe"
+import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
+
+it.effect(
+  'listUserTrades rejects deleting and erased accounts by handle and ID while returning trades for active users and NPCs (spec/auth/email.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days")',
+  () => effect {
+    try TestClock.setTime(1_761_300_000_000)
+    provide Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const db = try Store
+      const npcRows = try orDie(db.transaction((tx) => tx.query("SELECT id, username FROM feed_actors WHERE id NOT LIKE 'test-%' ORDER BY id ASC LIMIT 1")))
+      const npcId = toText(npcRows[0]?.id) ?? ""
+      const npcHandle = toText(npcRows[0]?.username) ?? ""
+
+      try orDie(db.transaction(effect (tx) => {
+        try tx.query(
+          `INSERT INTO organizations (id, name, credit_balance, created_at)
+           VALUES
+             ('utv-org-active', 'Active Org', 0, $1),
+             ('utv-org-deleting', 'Deleting Org', 0, $1),
+             ('utv-org-erased', 'Erased Org', 0, $1)`,
+          [1_761_300_000_000]
+        )
+        try tx.query(
+          `INSERT INTO accounts (key, state, revision, organization_id, status, created_at, updated_at)
+           VALUES
+             ('utv-active', '{}'::jsonb, 1, 'utv-org-active', 'active', $1, $1),
+             ('utv-deleting', '{}'::jsonb, 1, 'utv-org-deleting', 'deleting', $1, $1),
+             ('utv-erased', '{}'::jsonb, 1, 'utv-org-erased', 'erased', $1, $1)`,
+          [1_761_300_000_000]
+        )
+        try tx.query(
+          `INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at)
+           VALUES
+             ('utv-active', 'utv_active', 'Active Trader', '', 'game', 20000, $1, $1),
+             ('utv-deleting', 'deleted_utv-deleting', 'Deleted User', '', 'game', 20000, $1, $1),
+             ('utv-erased', 'deleted_utv-erased', 'Erased User', '', 'game', 20000, $1, $1)`,
+          [1_761_300_000_000]
+        )
+      }))
+
+      try orDie(buyPredictionShares({ marketId: "seed-market-1", actorId: "utv-active", actorKind: "user", side: "yes", amountCents: 400 }))
+      try orDie(buyPredictionShares({ marketId: "seed-market-1", actorId: "utv-deleting", actorKind: "user", side: "no", amountCents: 300 }))
+      try orDie(buyPredictionShares({ marketId: "seed-market-1", actorId: "utv-erased", actorKind: "user", side: "yes", amountCents: 300 }))
+      try orDie(buyPredictionShares({ marketId: "seed-market-1", actorId: npcId, actorKind: "npc", side: "yes", amountCents: 500 }))
+
+      const activeByHandle = try orDie(listUserTrades({ handleOrId: "utv_active" }))
+      const activeById = try orDie(listUserTrades({ handleOrId: "utv-active" }))
+      const npcTrades = try orDie(listUserTrades({ handleOrId: npcHandle }))
+
+      const checkMissing = (target: string) => effect {
+        const res = try exit(listUserTrades({ handleOrId: target }))
+        if (Exit.isSuccess(res)) return `unexpected_ok:${res.value.length}`
+        const cause = Cause.squash(res.cause)
+        return cause instanceof MarketFailure ? cause.code : "unexpected_err"
+      }
+
+      const deletingByHandle = try checkMissing("deleted_utv-deleting")
+      const deletingById = try checkMissing("utv-deleting")
+      const erasedByHandle = try checkMissing("deleted_utv-erased")
+      const erasedById = try checkMissing("utv-erased")
+
+      try orDie(Effect.try(() => {
+        assert.deepStrictEqual(
+          {
+            activeCounts: [activeByHandle.length, activeById.length],
+            npcPositive: npcTrades.length >= 1,
+            deleting: [deletingByHandle, deletingById],
+            erased: [erasedByHandle, erasedById]
+          },
+          {
+            activeCounts: [1, 1],
+            npcPositive: true,
+            deleting: ["USER_NOT_FOUND", "USER_NOT_FOUND"],
+            erased: ["USER_NOT_FOUND", "USER_NOT_FOUND"]
+          }
+        )
+      }))
+    }
+  },
+  60_000
+)
