@@ -815,6 +815,27 @@ it.effect('An exhausted LLM budget defers clues without failing the markets tick
   })
 }))
 
+it.effect('RSS refresh runs once five minute indices have passed, however many seconds into the minute each run starts (spec/engine/worldClock.md, "RSS ingestion and parody generation have one scheduled owner at 5-minute cadence")', () => scoped(effect {
+  const firstMs = Date.UTC(2026, 10, 27, 10, 0, 30)
+  const xml = `<?xml version="1.0"?><rss version="2.0"><channel><item><title>Cadence headline</title></item></channel></rss>`
+  try withSeededEngine(firstMs, effect {
+    try withStubProvider(200, xml, effect (baseUrl: string) => {
+      const runAt = (nowMs: number) => withEnvOverrides({ FEED_RSS_URLS: `${baseUrl}/rss.xml` }, runRssRefreshTick(nowMs))
+      const first = try runAt(firstMs)
+      const fourMinutesLater = try runAt(Date.UTC(2026, 10, 27, 10, 4, 59))
+      const fiveMinutesLater = try runAt(Date.UTC(2026, 10, 27, 10, 5, 0))
+      const health = (try queryRows("SELECT last_success_at FROM feed_tick_health WHERE job_name = 'rss-refresh'"))[0] ?? {}
+      try check(() => {
+        assert.deepStrictEqual(
+          [first, fourMinutesLater, fiveMinutesLater].map((r) => [r.skipped, r.fetchedCount]),
+          [[false, 1], [true, 0], [false, 1]],
+        )
+        assert.strictEqual(toInt(health.last_success_at), Date.UTC(2026, 10, 27, 10, 5, 0))
+      })
+    })
+  })
+}))
+
 it.effect('NPCs execute full trading and social actions, alpha invites honor blocks and cooldowns, and atomic settlement publishes clean proof articles and NEW MARKET posts (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', () => scoped(effect {
   const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
   try withSeededEngine(liveNow, effect {
