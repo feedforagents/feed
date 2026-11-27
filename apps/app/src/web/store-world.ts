@@ -1767,12 +1767,14 @@ export async function updateOwnProfile(payload: {
   return true;
 }
 
-function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
+function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimisticBundleHandle?: string | null): void {
   const lower = handle.toLowerCase();
   const cur = getStoreSnapshot();
   const viewerHandle = cur.viewer?.handle.toLowerCase() ?? "";
   const profileMatches = Boolean(cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower);
   const viewingOwnProfile = Boolean(cur.profileBundle?.summary.isOwnProfile && lower !== viewerHandle);
+  const sameBundleAsOptimistic = optimisticBundleHandle === undefined
+    || (cur.profileBundle !== null && cur.profileBundle.summary.handle.toLowerCase() === optimisticBundleHandle);
   const delta = nextFollowing ? 1 : -1;
   const patchPostAuthor = (p: AppPost): AppPost =>
     p.card.authorHandle.toLowerCase() === lower ? { ...p, card: { ...p.card, isFollowingAuthor: nextFollowing } } : p;
@@ -1782,13 +1784,14 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
   if (cur.profileBundle) {
     const nextPosts = patchPosts(cur.profileBundle.posts);
     if (profileMatches) {
+      const countDelta = cur.profileBundle.summary.isFollowing === nextFollowing ? 0 : delta;
       nextProfileBundle = {
         ...cur.profileBundle,
         posts: nextPosts,
         summary: {
           ...cur.profileBundle.summary,
           isFollowing: nextFollowing,
-          followersCount: Math.max(0, cur.profileBundle.summary.followersCount + delta),
+          followersCount: Math.max(0, cur.profileBundle.summary.followersCount + countDelta),
         },
       };
     } else if (viewingOwnProfile) {
@@ -1797,7 +1800,9 @@ function patchFollowAcrossStore(handle: string, nextFollowing: boolean): void {
         posts: nextPosts,
         summary: {
           ...cur.profileBundle.summary,
-          followingCount: Math.max(0, cur.profileBundle.summary.followingCount + delta),
+          followingCount: sameBundleAsOptimistic
+            ? Math.max(0, cur.profileBundle.summary.followingCount + delta)
+            : cur.profileBundle.summary.followingCount,
         },
       };
     } else {
@@ -1856,16 +1861,24 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
   if (followInFlight.has(lower)) return;
   followInFlight.add(lower);
   const nextFollowing = !inferred;
-  patchFollowAcrossStore(handle, nextFollowing);
+  const optimisticBundleHandle = s.profileBundle?.summary.handle.toLowerCase() ?? null;
+  patchFollowAcrossStore(handle, nextFollowing, optimisticBundleHandle);
   try {
     const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/follow`, {
       method: inferred ? "DELETE" : "POST",
       parse: passThrough,
     });
     if (!res.ok) {
-      patchFollowAcrossStore(handle, inferred);
+      patchFollowAcrossStore(handle, inferred, optimisticBundleHandle);
       setErrorNotice(res.message);
       return;
+    }
+    const cur = getStoreSnapshot();
+    const curBundleHandle = cur.profileBundle?.summary.handle.toLowerCase() ?? null;
+    const targetStateStale = curBundleHandle === lower
+      && cur.profileBundle?.summary.isFollowing !== nextFollowing;
+    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale)) {
+      void loadProfile(cur.profileBundle?.summary.handle);
     }
     setStatusNotice(nextFollowing ? `Following @${handle}.` : `Unfollowed @${handle}.`);
   } finally {
