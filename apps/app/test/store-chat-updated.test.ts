@@ -206,16 +206,20 @@ const pendingInvite: AppAlphaInvite = {
   status: "pending",
 };
 
-function stubInviteRespondFetch(respond: (call: number) => Promise<Response>): { respondCalls: () => number } {
+function stubInviteRespondFetch(
+  respond: (call: number, inviteId: string) => Promise<Response>,
+  invites: () => Promise<Response> = () => Promise.resolve(Response.json({ invites: [] })),
+): { respondCalls: () => number } {
   let calls = 0;
   stubFetchByUrl((url, init) => {
     const method = init?.method ?? "GET";
-    if (url.pathname === "/api/chats/invites/inv-1/respond" && method === "POST") {
+    const respondMatch = /^\/api\/chats\/invites\/([^/]+)\/respond$/.exec(url.pathname);
+    if (respondMatch && method === "POST") {
       calls += 1;
-      return respond(calls);
+      return respond(calls, respondMatch[1]);
     }
     if (url.pathname === "/api/chats") return Promise.resolve(Response.json({ chats: [serverChatAfterLeave] }));
-    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    if (url.pathname === "/api/chats/invites") return invites();
     if (url.pathname === "/api/chats/chat-1/messages") return Promise.resolve(Response.json({ messages: [] }));
     if (url.pathname === "/api/notifications") return Promise.resolve(Response.json({ notifications: [], unreadCount: 0 }));
     return Promise.resolve(Response.json({}, { status: 404 }));
@@ -246,21 +250,13 @@ it("a second respond for the same invite while the first is in flight raises no 
 
 it("clears the responded invite from the pending list before the refetch settles (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
   let releaseInvites: (() => void) | undefined;
-  stubFetchByUrl((url, init) => {
-    const method = init?.method ?? "GET";
-    if (url.pathname === "/api/chats/invites/inv-1/respond" && method === "POST") {
-      return Promise.resolve(Response.json({ invite: { id: "inv-1", status: "declined" } }));
-    }
-    if (url.pathname === "/api/chats/invites") {
-      return new Promise<Response>((resolve) => {
+  stubInviteRespondFetch(
+    () => Promise.resolve(Response.json({ invite: { id: "inv-1", status: "declined" } })),
+    () =>
+      new Promise<Response>((resolve) => {
         releaseInvites = () => resolve(Response.json({ invites: [] }));
-      });
-    }
-    if (url.pathname === "/api/chats") return Promise.resolve(Response.json({ chats: [serverChatAfterLeave] }));
-    if (url.pathname === "/api/chats/chat-1/messages") return Promise.resolve(Response.json({ messages: [] }));
-    if (url.pathname === "/api/notifications") return Promise.resolve(Response.json({ notifications: [], unreadCount: 0 }));
-    return Promise.resolve(Response.json({}, { status: 404 }));
-  }, "http://localhost");
+      }),
+  );
   setStoreState({ alphaInvites: [pendingInvite], errorMessage: null, statusMessage: null, toasts: [] });
   const responding = respondGroupInvite("inv-1", false);
   for (let round = 0; round < 50 && getStoreSnapshot().statusMessage === null; round += 1) await Promise.resolve();
@@ -283,4 +279,27 @@ it("keeps the invite pending after a failed respond so it can be answered again 
   await respondGroupInvite("inv-1", false);
   expect(stub.respondCalls()).toBe(2);
   expect(getStoreSnapshot().alphaInvites).toEqual([]);
+});
+
+it("sends a respond for a second invite while the first is still in flight (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  const releases: Array<() => void> = [];
+  const stub = stubInviteRespondFetch(
+    (_call, inviteId) =>
+      new Promise<Response>((resolve) => {
+        releases.push(() => resolve(Response.json({ invite: { id: inviteId, status: "accepted" } })));
+      }),
+  );
+  setStoreState({
+    alphaInvites: [pendingInvite, { ...pendingInvite, id: "inv-2", chatId: "chat-10", chatTitle: "Beta Crew" }],
+    errorMessage: null,
+    statusMessage: null,
+    toasts: [],
+  });
+  const first = respondGroupInvite("inv-1", true);
+  const second = respondGroupInvite("inv-2", true);
+  expect(stub.respondCalls()).toBe(2);
+  releases.forEach((release) => release());
+  await Promise.all([first, second]);
+  expect(getStoreSnapshot().alphaInvites).toEqual([]);
+  expect(getStoreSnapshot().errorMessage).toBeNull();
 });
