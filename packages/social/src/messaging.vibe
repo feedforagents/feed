@@ -460,10 +460,20 @@ export effect function getChatMessages(
     if (messageRows.length === 0) return []
     const profiles = try loadParticipantProfilesTx(tx, messageRows)
     const msgIds = messageRows.map((r) => toText(r.id) ?? "").filter(Boolean)
-    const reactionRows = try tx.query(
-      "SELECT message_id, account_id, emoji FROM feed_message_reactions WHERE message_id = ANY($1) ORDER BY created_at ASC",
-      [msgIds]
-    )
+    const reactionRows = chat.kind === "direct"
+      ? try tx.query(
+          "SELECT message_id, account_id, emoji FROM feed_message_reactions WHERE message_id = ANY($1) ORDER BY created_at ASC",
+          [msgIds]
+        )
+      : try tx.query(
+          `SELECT r.message_id, r.account_id, r.emoji
+           FROM feed_message_reactions r
+           WHERE r.message_id = ANY($1)
+             AND NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $2 AND b.blocked_id = r.account_id) OR (b.blocker_id = r.account_id AND b.blocked_id = $2))
+             AND NOT EXISTS (SELECT 1 FROM feed_mutes mu WHERE mu.muter_id = $2 AND mu.muted_id = r.account_id)
+           ORDER BY r.created_at ASC`,
+          [msgIds, account.id]
+        )
     const reactionsByMsg = new Map<string, Map<string, { count: number; viewerReacted: boolean }>>()
     for (const row of reactionRows) {
       const mid = toText(row.message_id) ?? ""

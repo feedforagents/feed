@@ -1,0 +1,145 @@
+// spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+import {
+  blockAccount,
+  createDirectChat,
+  createNpcAlphaInvite,
+  createUserGroupChat,
+  getChatMessages,
+  listPendingGroupInvites,
+  muteAccount,
+  reactToMessage,
+  realtimeBusLayer,
+  respondAlphaInvite,
+  respondGroupInvite,
+  sendChatMessage,
+  unblockAccount,
+  unmuteAccount
+} from "../src/index.vibe"
+import { migrateFeedSchema, seedFeedWorld, Store, toText } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { it, assert } from "@effect/vitest"
+
+effect function registerSocialUser(userId: string, label: string) {
+  const db = try Store
+  const ts = try Clock.currentTimeMillis
+  try db.transaction((tx) =>
+    tx.query(
+      "INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at) VALUES ($1, $2, $3, $4, 'game', 10000, $5, $5)",
+      [userId, userId, label, `${label} profile`, ts]
+    )
+  )
+}
+
+it.effect(
+  'group and alpha chat message reactions omit blocked, blocking, and muted reactors while preserving direct history (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => effect {
+    try TestClock.setTime(1_760_500_000_000)
+    provide localStoreLayer({ kind: "pglite", file: undefined }), realtimeBusLayer {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      try registerSocialUser("alice", "Alice Viewer")
+      try registerSocialUser("bob", "Bob Blocked")
+      try registerSocialUser("carol", "Carol Blocker")
+      try registerSocialUser("dave", "Dave Muted")
+      try registerSocialUser("erin", "Erin Visible")
+
+      const dm = try createDirectChat("alice", "bob")
+      const dmMsg = try sendChatMessage({
+        senderId: "alice",
+        senderKind: "user",
+        chatId: dm.id,
+        content: "Direct message before block"
+      })
+      try reactToMessage({ accountId: "bob", messageId: dmMsg.id, emoji: "wave" })
+
+      const group = try createUserGroupChat("alice", "Reaction Filter Room", ["bob", "carol", "dave", "erin"])
+      for (const peer of ["bob", "carol", "dave", "erin"]) {
+        const invites = try listPendingGroupInvites(peer, "user_group")
+        const match = invites.find((item) => item.chatId === group.id)
+        if (match !== undefined) {
+          try respondGroupInvite({ accountId: peer, inviteId: match.id, accept: true })
+        }
+      }
+
+      const anchor = try sendChatMessage({
+        senderId: "alice",
+        senderKind: "user",
+        chatId: group.id,
+        content: "Anchor message in group"
+      })
+
+      for (const reactor of ["alice", "bob", "carol", "dave", "erin"]) {
+        try reactToMessage({ accountId: reactor, messageId: anchor.id, emoji: "fire" })
+      }
+      try reactToMessage({ accountId: "bob", messageId: anchor.id, emoji: "skull" })
+      try reactToMessage({ accountId: "carol", messageId: anchor.id, emoji: "eyes" })
+      try reactToMessage({ accountId: "dave", messageId: anchor.id, emoji: "zzz" })
+
+      const db = try Store
+      const actorRows = try db.transaction((tx) => tx.query("SELECT id FROM feed_actors ORDER BY id ASC LIMIT 1"))
+      const npcId = toText(actorRows[0]?.id) ?? ""
+      const alphaAlice = try createNpcAlphaInvite({ actorId: npcId, targetAccountId: "alice" })
+      const alphaBob = try createNpcAlphaInvite({ actorId: npcId, targetAccountId: "bob" })
+      try respondAlphaInvite({ accountId: "alice", inviteId: alphaAlice.id, accept: true })
+      try respondAlphaInvite({ accountId: "bob", inviteId: alphaBob.id, accept: true })
+      const alphaMsg = try sendChatMessage({
+        senderId: npcId,
+        senderKind: "npc",
+        chatId: alphaAlice.chatId,
+        content: "Alpha desk call"
+      })
+      try reactToMessage({ accountId: "bob", messageId: alphaMsg.id, emoji: "rocket" })
+
+      try blockAccount("alice", "bob")
+      try blockAccount("carol", "alice")
+      try muteAccount("alice", "dave")
+
+      const aliceGroupView = try getChatMessages("alice", group.id)
+      const erinGroupView = try getChatMessages("erin", group.id)
+      const aliceDmView = try getChatMessages("alice", dm.id)
+      const aliceAlphaBlocked = try getChatMessages("alice", alphaAlice.chatId)
+
+      try unblockAccount("alice", "bob")
+      try unblockAccount("carol", "alice")
+      try unmuteAccount("alice", "dave")
+
+      const aliceGroupRestored = try getChatMessages("alice", group.id)
+      const aliceAlphaRestored = try getChatMessages("alice", alphaAlice.chatId)
+
+      try Effect.try(() => {
+        const filteredMsg = aliceGroupView.find((m) => m.id === anchor.id)
+        assert.isDefined(filteredMsg)
+        assert.deepStrictEqual(filteredMsg.reactions, [
+          { emoji: "fire", count: 2, reactedByViewer: true }
+        ])
+
+        const observerMsg = erinGroupView.find((m) => m.id === anchor.id)
+        assert.isDefined(observerMsg)
+        assert.strictEqual(observerMsg.reactions.find((r) => r.emoji === "fire")?.count, 5)
+        assert.strictEqual(observerMsg.reactions.length, 4)
+
+        const dmItem = aliceDmView.find((m) => m.id === dmMsg.id)
+        assert.isDefined(dmItem)
+        assert.deepStrictEqual(dmItem.reactions, [
+          { emoji: "wave", count: 1, reactedByViewer: false }
+        ])
+
+        const alphaBlockedItem = aliceAlphaBlocked.find((m) => m.id === alphaMsg.id)
+        assert.isDefined(alphaBlockedItem)
+        assert.deepStrictEqual(alphaBlockedItem.reactions, [])
+
+        const restoredMsg = aliceGroupRestored.find((m) => m.id === anchor.id)
+        assert.isDefined(restoredMsg)
+        assert.strictEqual(restoredMsg.reactions.find((r) => r.emoji === "fire")?.count, 5)
+        assert.strictEqual(restoredMsg.reactions.length, 4)
+
+        const alphaRestoredItem = aliceAlphaRestored.find((m) => m.id === alphaMsg.id)
+        assert.isDefined(alphaRestoredItem)
+        assert.deepStrictEqual(alphaRestoredItem.reactions, [
+          { emoji: "rocket", count: 1, reactedByViewer: false }
+        ])
+      })
+    }
+  }
+)
