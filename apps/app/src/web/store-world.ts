@@ -679,14 +679,17 @@ export async function loadTrendingTag(tag: string): Promise<void> {
 export async function searchAccounts(query: string): Promise<{
   readonly accounts: ReadonlyArray<ExploreAccountHit>;
   readonly actors: ReadonlyArray<ExploreActorHit>;
-}> {
+} | null> {
   const trimmed = query.trim().replace(/^@/, "");
   if (!trimmed) return { accounts: [], actors: [] };
   const reqSeq = ++userSearchRequestSeq;
   const res = await requestJson(`/api/users/search?q=${encodeURIComponent(trimmed)}&limit=12`, {
     parse: decodeUsersSearch,
   });
-  if (reqSeq !== userSearchRequestSeq || !res.ok) {
+  if (reqSeq !== userSearchRequestSeq) {
+    return null;
+  }
+  if (!res.ok) {
     return { accounts: [], actors: [] };
   }
   return res.data;
