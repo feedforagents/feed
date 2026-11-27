@@ -380,6 +380,11 @@ function perpOrderFields(
       minimum: 1,
       maximum: 20,
       description: leverageDescription
+    },
+    mode: {
+      kind: "enum",
+      values: ["flip"],
+      description: "Flip the existing position to the opposite side instead of reducing it. Omit for the default open, add, or reduce behaviour."
     }
   }
 }
@@ -1483,7 +1488,7 @@ export const MCP_TOOL_DEFINITIONS: ReadonlyArray<McpToolDefinition> = [
         kind: "number",
         exclusiveMinimum: 0,
         maximum: 100,
-        description: "Optional percentage (0-100] of the open position to close."
+        description: "Optional percentage (0-100] of the open position to close. Mutually exclusive with sizePts and sizeCents; provide only one of sizeCents/sizePts/closePct."
       },
       maxSlippageBps: {
         kind: "integer",

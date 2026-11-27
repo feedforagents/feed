@@ -1010,10 +1010,14 @@ export async function approveDeviceCode(userCode: string, scopes: ReadonlyArray<
   await hydrateAuth();
 }
 
+let adminStatusRequestSeq = 0;
+
 export async function loadAdminStatus(): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminStatusRequestSeq;
   setStoreState({ adminLoading: true });
   const res = await requestJson("/api/admin/status", { parse: decodeAdminStatus });
+  if (reqSeq !== adminStatusRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminLoading: false });
     setErrorNotice(res.message);
@@ -1022,12 +1026,16 @@ export async function loadAdminStatus(): Promise<void> {
   setStoreState({ adminLoading: false, adminStatus: res.data });
 }
 
+let adminReportsRequestSeq = 0;
+
 export async function loadAdminReports(status: "all" | "open" | "reviewed" | "dismissed" = "open"): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminReportsRequestSeq;
   setStoreState({ adminTabLoading: true });
   const res = await requestJson(`/api/admin/reports?status=${encodeURIComponent(status)}&limit=50`, {
     parse: decodeAdminReports,
   });
+  if (reqSeq !== adminReportsRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminTabLoading: false });
     setErrorNotice(res.message);
@@ -1068,10 +1076,14 @@ export async function loadAdminUsers(query = ""): Promise<void> {
   setStoreState({ adminTabLoading: false, adminUsers: res.data });
 }
 
+let adminFactsRequestSeq = 0;
+
 export async function loadAdminWorldFacts(): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminFactsRequestSeq;
   setStoreState({ adminTabLoading: true });
   const res = await requestJson("/api/admin/world-facts?limit=100", { parse: decodeAdminWorldFacts });
+  if (reqSeq !== adminFactsRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminTabLoading: false });
     setErrorNotice(res.message);

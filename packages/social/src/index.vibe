@@ -156,3 +156,5 @@ export {
   type SseResponseOptions,
   type SseStreamOptions
 } from "./realtime.vibe"
+
+export { viewerAuthorVisibilitySql } from "./visibility.vibe"
