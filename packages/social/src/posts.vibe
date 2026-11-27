@@ -1472,7 +1472,7 @@ effect function engagePost(
           { postAuthorId, postAuthorKind, actorId: accountId, postId, kind: "like", content, now },
           events
         )
-        events.push({ type: "post.engagement", postId, kind: "like", accountId, likeCount, repostCount })
+        events.push({ type: "post.engagement", postId, kind: "like", accountId, postAuthorId, likeCount, repostCount })
       } else if (!active && already) {
         if (!canUnlikePost(specState, 1, caller)) {
           throw new SocialFailure({ code: "Forbidden", message: "Cannot unlike post" })
@@ -1480,7 +1480,7 @@ effect function engagePost(
         try tx.query("DELETE FROM feed_post_likes WHERE post_id = $1 AND account_id = $2", [postId, accountId])
         likeCount = Math.max(0, likeCount - 1)
         try tx.query("UPDATE feed_posts SET like_count = $2 WHERE id = $1", [postId, likeCount])
-        events.push({ type: "post.engagement", postId, kind: "unlike", accountId, likeCount, repostCount })
+        events.push({ type: "post.engagement", postId, kind: "unlike", accountId, postAuthorId, likeCount, repostCount })
       }
     } else if (active && !already) {
       if (!canRepostPost(specState, 1, caller)) {
@@ -1494,7 +1494,7 @@ effect function engagePost(
         { postAuthorId, postAuthorKind, actorId: accountId, postId, kind: "repost", content, now },
         events
       )
-      events.push({ type: "post.engagement", postId, kind: "repost", accountId, likeCount, repostCount })
+      events.push({ type: "post.engagement", postId, kind: "repost", accountId, postAuthorId, likeCount, repostCount })
     } else if (!active && already) {
       if (!canUnrepostPost(specState, 1, caller)) {
         throw new SocialFailure({ code: "Forbidden", message: "Cannot unrepost post" })
@@ -1502,7 +1502,7 @@ effect function engagePost(
       try tx.query("DELETE FROM feed_post_reposts WHERE post_id = $1 AND account_id = $2", [postId, accountId])
       repostCount = Math.max(0, repostCount - 1)
       try tx.query("UPDATE feed_posts SET repost_count = $2 WHERE id = $1", [postId, repostCount])
-      events.push({ type: "post.engagement", postId, kind: "unrepost", accountId, likeCount, repostCount })
+      events.push({ type: "post.engagement", postId, kind: "unrepost", accountId, postAuthorId, likeCount, repostCount })
     }
     return { value: { postId, likeCount, repostCount }, events }
   })
