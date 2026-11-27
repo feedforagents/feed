@@ -1461,8 +1461,11 @@ export async function markNotificationRead(notificationId: string): Promise<void
     body: { notificationIds: [notificationId] },
     parse: passThrough,
   });
-  if (res.ok && isRecord(res.data) && typeof res.data.unreadCount === "number") {
-    setStoreState({ unreadNotifications: res.data.unreadCount });
+  if (res.ok) {
+    notificationsLoadCount += 1;
+    if (isRecord(res.data) && typeof res.data.unreadCount === "number") {
+      setStoreState({ unreadNotifications: res.data.unreadCount });
+    }
   }
 }
 
@@ -1483,6 +1486,7 @@ export async function markAllNotificationsRead(): Promise<void> {
     setErrorNotice(res.message);
     return;
   }
+  notificationsLoadCount += 1;
   if (currentUiMode(s) !== mode) {
     await loadNotifications();
     return;
@@ -1506,6 +1510,7 @@ export async function clearNotifications(): Promise<void> {
     setErrorNotice(res.message);
     return;
   }
+  notificationsLoadCount += 1;
   setStoreState({
     notifications: [],
     unreadNotifications: 0,
