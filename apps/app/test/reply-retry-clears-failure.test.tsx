@@ -3,7 +3,7 @@
 import { act } from "react";
 import type { Root } from "react-dom/client";
 import { expect, it } from "vitest";
-import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { getStoreSnapshot, pushToast, setStoreState } from "../src/web/store-core.ts";
 import { storeActions } from "../src/web/store.ts";
 import { eventSources, findButtonByText, flush, installAppTestLifecycle, installStubEventSource, makeAuthMeResponse, makeRawPost, makeViewerSession, mountApp, setControlValue, stubFetchByUrl } from "./app-test-helpers.tsx";
 
@@ -76,6 +76,10 @@ async function clickReply(container: HTMLElement): Promise<void> {
   await flush();
 }
 
+function alertText(container: HTMLElement): string {
+  return [...container.querySelectorAll('[role="alert"]')].map((el) => el.textContent ?? "").join("\n");
+}
+
 async function openPostAWithFailedReply(): Promise<HTMLElement> {
   installNetwork();
   const { container } = await mountApp(opened);
@@ -84,6 +88,15 @@ async function openPostAWithFailedReply(): Promise<HTMLElement> {
   await setControlValue(replyTextarea(container), "My reply text");
   await clickReply(container);
   expect(postAttempts).toBe(1);
+  return container;
+}
+
+async function openPostAWithFailedReplyAndTradeFailure(): Promise<HTMLElement> {
+  const container = await openPostAWithFailedReply();
+  await act(() => Promise.resolve(pushToast("Trade failed", "destructive")));
+  await flush();
+  expect(alertText(container)).toContain("Hourly action limit exceeded");
+  expect(alertText(container)).toContain("Trade failed");
   return container;
 }
 
@@ -119,4 +132,40 @@ it('Leaving the post after a failed reply clears the failure notice (spec/social
   });
   await flush();
   expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+it('A successful retry clears only that reply failure notice (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const container = await openPostAWithFailedReplyAndTradeFailure();
+
+  await act(async () => {
+    await storeActions.createPost("Reply to B", { replyToPostId: "post-b" });
+  });
+  await flush();
+  expect(alertText(container)).toContain("Hourly action limit exceeded");
+  expect(alertText(container)).toContain("Trade failed");
+
+  await clickReply(container);
+  expect(alertText(container)).not.toContain("Hourly action limit exceeded");
+  expect(alertText(container)).toContain("Trade failed");
+  expect(container.textContent).toContain("Reply posted.");
+
+  await act(async () => {
+    await storeActions.navigate("/");
+  });
+  await flush();
+  expect(alertText(container)).toContain("Trade failed");
+});
+
+it('Going back after a failed reply clears only that reply failure notice (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const container = await openPostAWithFailedReplyAndTradeFailure();
+
+  await act(async () => {
+    window.history.back();
+    await flush();
+  });
+  await flush();
+
+  expect(getStoreSnapshot().route).toBe("Home");
+  expect(alertText(container)).not.toContain("Hourly action limit exceeded");
+  expect(alertText(container)).toContain("Trade failed");
 });

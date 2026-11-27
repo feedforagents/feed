@@ -54,6 +54,7 @@ import {
   applyDocumentTheme,
   canEnterRoute,
   clearNotices,
+  clearReplyFailureNotice,
   closeBlockDialog,
   closeComposeDialog,
   closeDeletePostDialog,
@@ -259,6 +260,10 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
 }
 
 function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
+  const prevPostId = getStoreSnapshot().activePostId;
+  if (prevPostId !== null && parsed.postId !== prevPostId) {
+    clearReplyFailureNotice(prevPostId);
+  }
   if (getStoreSnapshot().route === "PostDetail" && parsed.route !== "PostDetail") {
     closeThread();
   }
@@ -319,6 +324,10 @@ function guardRouteAccess(parsed: ReturnType<typeof parseLocation>, rawPath: str
 }
 
 async function redirectToHome(options?: { readonly replace?: boolean }): Promise<void> {
+  const prevPostId = getStoreSnapshot().activePostId;
+  if (prevPostId !== null) {
+    clearReplyFailureNotice(prevPostId);
+  }
   if (options?.replace) {
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", "/");
