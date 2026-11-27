@@ -79,6 +79,15 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
 
   const formattedPhone = storeActions.formatPhoneToE164("US", newPhone);
 
+  const handleClose = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      setStep("phone");
+      setNewPhone("");
+      setCode("");
+    }
+    onOpenChange(nextOpen);
+  };
+
   const handleStart = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!newPhone.trim()) return;
@@ -110,7 +119,7 @@ function PhoneChangeDialog({ open, onOpenChange }: { readonly open: boolean; rea
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="max-w-sm">
         <DialogTitle>{s.viewer?.phoneLast2 ? "Change phone number" : "Add phone number"}</DialogTitle>
         <DialogDescription>Verify an unused non-VoIP number in E.164 format. Updating numbers signs out other sessions.</DialogDescription>

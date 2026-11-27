@@ -402,7 +402,7 @@ export function ProfileScreen({ mode }: { readonly mode: UiMode }) {
       </Tabs>
 
       {activeTab === "posts" ? (
-        topLevelPosts.length === 0 ? (
+        topLevelPosts.length === 0 && !bundle.postsNextCursor ? (
           <EmptyState title="No posts yet" />
         ) : (
           <div className="flex flex-col">

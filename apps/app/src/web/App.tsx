@@ -49,7 +49,6 @@ import {
 } from "./icons.tsx";
 import { RightRail } from "./RightRail.tsx";
 import { toAppNavRoute } from "./routes.ts";
-import { ArticleDetailScreen } from "./screens/ArticleDetailScreen.tsx";
 import { AdminScreen, EmailMagicLinkScreen, LinkScreen, OAuthConsentScreen } from "./screens/AuthScreens.tsx";
 import { ChatsScreen } from "./screens/ChatsScreen.tsx";
 import { ExploreScreen } from "./screens/ExploreScreen.tsx";
@@ -421,13 +420,9 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
     case "Home":
       return <HomeScreen mode={mode} />;
     case "PostDetail":
-      return <PostDetailScreen mode={mode} />;
+      return <PostDetailScreen key={s.activePostId ?? "post"} mode={mode} />;
     case "Explore":
-      return s.activeArticleId ? (
-        <ArticleDetailScreen mode={mode} />
-      ) : (
-        <ExploreScreen mode={mode} />
-      );
+      return <ExploreScreen mode={mode} />;
     case "Markets":
       if (mode === "SocialMode") return <HomeScreen mode={mode} />;
       return s.walletView ? <WalletScreen /> : <MarketsScreen />;

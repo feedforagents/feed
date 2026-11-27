@@ -385,21 +385,23 @@ effect function isAuthorVisibleInStore(
 }
 
 // spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
-effect function isTraderActivityVisibleInStore(
+effect function traderActivityDeliveryInStore(
   store: Store.Shape | undefined,
   viewerId: string,
   traderId: string
-): boolean!! {
-  if (store === undefined) return false
-  return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
+): ("full" | "aggregate" | "none")!! {
+  if (store === undefined) return "none"
+  const res = try exit(store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
       `SELECT a.ui_mode, ${viewerBlockVisibilitySql("$1", "$2")} AS is_visible FROM feed_accounts a WHERE a.account_id = $1 LIMIT 1`,
       [viewerId, traderId]
     )
     const row = rows[0]
-    if (row === undefined) return false
-    return toText(row.ui_mode) !== "social" && Boolean(row.is_visible)
+    if (row === undefined || toText(row.ui_mode) === "social") return "none" as const
+    const isVisible = Boolean(row.is_visible)
+    return isVisible ? "full" as const : "aggregate" as const
   }))
+  return Exit.isSuccess(res) ? res.value : "none"
 }
 
 effect function isPostCreatedDeliverableInStore(
@@ -543,7 +545,7 @@ export effect function canDeliverRealtimeEventToViewer(
     case "article.published":
       return true
     case "market.perp":
-      return viewerId === undefined ? true : try isTraderActivityVisibleInStore(store, viewerId, event.actorId)
+      return viewerId === undefined ? true : (try traderActivityDeliveryInStore(store, viewerId, event.actorId)) === "full"
     case "post.created":
       return viewerId === undefined ? true : try isPostCreatedDeliverableInStore(store, viewerId, event)
     case "post.deleted":
@@ -587,6 +589,22 @@ export effect function canDeliverRealtimeEventToViewer(
   }
 }
 
+// spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+export effect function realtimeEventForViewer(
+  store: Store.Shape | undefined,
+  event: FeedRealtimeEvent,
+  viewerAccountId: string | null | undefined
+): (FeedRealtimeEvent | undefined)!! {
+  const viewerId = normalizeViewerId(viewerAccountId)
+  if (event.type !== "market.perp" || viewerId === undefined) {
+    return (try canDeliverRealtimeEventToViewer(store, event, viewerAccountId)) ? event : undefined
+  }
+  const delivery = try traderActivityDeliveryInStore(store, viewerId, event.actorId)
+  if (delivery === "full") return event
+  if (delivery === "none") return undefined
+  return { type: "world.tick", kind: "market", refId: event.ticker, createdAt: try Clock.currentTimeMillis }
+}
+
 export effect function publishFeedEvent(event: FeedRealtimeEvent): boolean!! {
   const maybeBus = try Effect.serviceOption(RealtimeBus)
   if (Option.isSome(maybeBus)) {
@@ -607,7 +625,10 @@ export effect function subscribeViewerFeedEvents(
   const maybeStore = try Effect.serviceOption(Store)
   const store = storeOverride ?? (Option.isSome(maybeStore) ? maybeStore.value : undefined)
   const events = try subscribeFeedEvents()
-  const delivered = Stream.filterEffect(events, (event) => canDeliverRealtimeEventToViewer(store, event, viewerAccountId))
+  const delivered = Stream.filter(
+    Stream.mapEffect(events, (event) => realtimeEventForViewer(store, event, viewerAccountId)),
+    (event): event is FeedRealtimeEvent => event !== undefined
+  )
   return Stream.mapEffect(delivered, (event) => personalizePostDeletedEvent(store, event, viewerAccountId))
 }
 

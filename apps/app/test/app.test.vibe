@@ -1004,6 +1004,50 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       [blocksListRes.status, blocksItems.length, mutesListRes.status, mutesItems.length],
       [200, 1, 200, 1]
     ))
+    const blockedSearchRes = try callApp("/api/users/search?q=parity_bob", { cookie: alice.cookie })
+    const blockedSearchItems = (try readJson(blockedSearchRes)).items as ReadonlyArray<Record<string, unknown>>
+    const anonSearchRes = try callApp("/api/users/search?q=parity_bob")
+    const anonSearchItems = (try readJson(anonSearchRes)).items as ReadonlyArray<Record<string, unknown>>
+    const mutedSearchRes = try callApp("/api/users/search?q=parity_charlie", { cookie: alice.cookie })
+    const mutedSearchItems = (try readJson(mutedSearchRes)).items as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.deepStrictEqual(
+      [
+        blockedSearchRes.status,
+        blockedSearchItems.some((item) => item.handle === "parity_bob"),
+        anonSearchItems.some((item) => item.handle === "parity_bob"),
+        mutedSearchItems.some((item) => item.handle === "parity_charlie")
+      ],
+      [200, false, true, false]
+    ))
+
+    // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
+    const heldOpenRes = try callApp("/api/markets/perp/NVDAI/open", {
+      cookie: alice.cookie,
+      json: { side: "long", collateralCents: 1000, leverage: 2 }
+    })
+    const heldPerpView = effect () => {
+      const markets = try readJson(try callApp("/api/markets", { cookie: alice.cookie }))
+      const market = (markets.perps as ReadonlyArray<Record<string, unknown>>).find((m) => m.ticker === "NVDAI")
+      const held = ((markets.positions as Record<string, unknown>).perpPositions as ReadonlyArray<Record<string, unknown>>)
+        .find((pos) => pos.ticker === "NVDAI")
+      return [Number(market?.markPriceCents), Number(market?.openInterestCents), Number(held?.markPriceCents)]
+    }
+    const heldBefore = try heldPerpView()
+    const bobOpposingRes = try callApp("/api/markets/perp/NVDAI/open", {
+      cookie: bob.cookie,
+      json: { side: "short", collateralCents: 4000, leverage: 5 }
+    })
+    const heldAfter = try heldPerpView()
+    try check(() => assert.deepStrictEqual(
+      [
+        heldOpenRes.status,
+        bobOpposingRes.status,
+        heldAfter[0]! < heldBefore[0]!,
+        heldAfter[1]! - heldBefore[1]!,
+        heldBefore[2] === heldBefore[0] && heldAfter[2] === heldAfter[0]
+      ],
+      [201, 201, true, 20000, true]
+    ))
 
     const bobOpenPos = try callApp("/api/markets/perp/XTRPC/open", {
       cookie: bob.cookie,
@@ -1057,6 +1101,9 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
     const anonJoined = anonFrames.join("\n")
     const aliceJoined = aliceFrames.join("\n")
     const bobId = String(bob.account.accountId)
+    const aliceMarketUpdates = aliceFrames
+      .filter((f) => f.includes("event: world.tick"))
+      .map((f) => f.trim().replace(/"createdAt":\d+/, '"createdAt":0'))
     try check(() => assert.deepStrictEqual(
       {
         anonHasNoPrivateChat: !anonJoined.includes("event: chat.message"),
@@ -1064,6 +1111,8 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
         aliceHasNoBlockedPost: !aliceJoined.includes("event: post.created"),
         aliceHasNoBlockedPerp: !aliceFrames.some((f) => f.includes("event: market.perp") && f.includes(bobId)),
         anonHasBobPerp: anonFrames.some((f) => f.includes("event: market.perp") && f.includes(bobId)),
+        aliceBlockedPerpUpdates: aliceMarketUpdates,
+        anonHasNoMarketUpdate: !anonJoined.includes("event: world.tick"),
         aliceHasPerpOpen: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"open"'),
         aliceHasPerpClose: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"close"') && aliceJoined.includes('"leverage":2')
       },
@@ -1073,6 +1122,11 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
         aliceHasNoBlockedPost: true,
         aliceHasNoBlockedPerp: true,
         anonHasBobPerp: true,
+        aliceBlockedPerpUpdates: [
+          'event: world.tick\ndata: {"type":"world.tick","kind":"market","refId":"NVDAI","createdAt":0}',
+          'event: world.tick\ndata: {"type":"world.tick","kind":"market","refId":"XTRPC","createdAt":0}'
+        ],
+        anonHasNoMarketUpdate: true,
         aliceHasPerpOpen: true,
         aliceHasPerpClose: true
       }

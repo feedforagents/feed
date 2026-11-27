@@ -119,18 +119,72 @@ export function installStubEventSource(target: EventTarget[] = eventSources): vo
   vi.stubGlobal("EventSource", StubEventSource);
 }
 
+export function makeAuthMeResponse(overrides: Partial<ViewerSession> = {}): Record<string, unknown> {
+  return {
+    authenticated: true,
+    viewer: makeViewerSession({
+      accountId: "acct-player-1",
+      displayName: "Alice Trader",
+      phoneLast2: "01",
+      balanceCents: 10500,
+      startingGrantCents: 10000,
+      isReviewer: true,
+      ...overrides,
+    }),
+    acceptedCountries: ["+1", "+44"],
+    publicAppUrl: window.location.origin,
+    devSmsCodeEnabled: true,
+  };
+}
+
+export function findButtonByText(text: string, root: ParentNode = document): HTMLButtonElement | undefined {
+  return [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === text);
+}
+
+export async function setControlValue(
+  el: HTMLInputElement | HTMLTextAreaElement,
+  value: string,
+): Promise<void> {
+  const proto = el instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+  act(() => {
+    descriptor?.set?.bind(el)(value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await flush();
+}
+
 export function installMockNetwork(respond: MockResponder): void {
   const json = (body: unknown) => Promise.resolve(Response.json(body));
+  const emptyFeed = { items: [], nextCursor: null };
+  const defaults: Readonly<Record<string, () => unknown>> = {
+    "/api/feed": () => emptyFeed,
+    "/api/posts": () => emptyFeed,
+    "/api/trending": () => ({ trending: [] }),
+    "/api/articles": () => ({ articles: [] }),
+    "/api/markets": () => ({ predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } }),
+    "/api/world/status": () => ({
+      currentDay: 3,
+      currentHour: 14,
+      phase: "active",
+      gameRunning: true,
+      lastTickAt: Date.now(),
+      activeMarketsCount: 0,
+      totalPostsCount: 0,
+      activeActorsCount: 5,
+    }),
+    "/api/chats": () => ({ chats: [] }),
+    "/api/chats/invites": () => ({ invites: [] }),
+    "/api/notifications": () => ({ items: [], unreadCount: 0 }),
+    "/api/moderation/blocks": () => ({ items: [] }),
+    "/api/moderation/mutes": () => ({ items: [] }),
+    "/api/skills/hosts": () => ({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] }),
+  };
   stubFetchByUrl((url, init) => {
     const path = url.pathname;
     const body = respond(path, url, init);
     if (body !== undefined) return json(body);
-    if (path === "/api/chats") return json({ chats: [] });
-    if (path === "/api/chats/invites") return json({ invites: [] });
-    if (path === "/api/notifications") return json({ items: [], unreadCount: 0 });
-    if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return json({ items: [] });
-    if (path === "/api/skills/hosts") return json({ skillUrl: `${window.location.origin}/SKILL.md`, mcpUrl: `${window.location.origin}/mcp`, hosts: [] });
-    return json({});
+    return json(defaults[path]?.() ?? {});
   });
 
   eventSources.length = 0;
