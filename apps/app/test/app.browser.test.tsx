@@ -1858,3 +1858,32 @@ it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Br
   });
   await expect.element(page.getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
 });
+
+it('post.engagement refreshes like and repost counts across Home, Explore and Profile (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")', async () => {
+  installMockNetwork();
+  explorePosts = [SAMPLE_POSTS[0]];
+  await renderApp();
+  await expect.element(page.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+  await act(() => {
+    liveEventSources[0].dispatchEvent(
+      new MessageEvent("post.engagement", {
+        data: JSON.stringify({ type: "post.engagement", postId: SAMPLE_POSTS[0].id, kind: "like", accountId: "acct-player-1", likeCount: 99, repostCount: 88 }),
+      }),
+    );
+  });
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(99);
+  expect(getStoreSnapshot().feedPosts[0]?.card.repostCount).toBe(88);
+  await act(async () => {
+    await storeActions.loadExplore("XTRPC");
+  });
+  expect(getStoreSnapshot().explore.posts[0]?.card.likeCount).toBe(99);
+  expect(getStoreSnapshot().explore.posts[0]?.card.repostCount).toBe(88);
+  act(() => {
+    setStoreState({ viewer: POST_DELETED_VIEWER, profileHandle: "ailonmusk" });
+  });
+  await act(async () => {
+    await storeActions.loadProfile("ailonmusk");
+  });
+  expect(getStoreSnapshot().profileBundle?.posts[0]?.card.likeCount).toBe(99);
+  expect(getStoreSnapshot().profileBundle?.posts[0]?.card.repostCount).toBe(88);
+});
