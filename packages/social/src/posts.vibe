@@ -917,14 +917,11 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
       const scoreNow = parsedCursor?.snapshotNow ?? now
       const baseConditions = [...conditions]
       const baseParams = [...params]
-      const runTopQuery = effect (applyRecencyWindow: boolean): FeedPage!StoreFailure => {
+      const cutoff = scoreNow - TOP_RECENCY_WINDOW_MS
+      const runTopQuery = effect (recent: boolean): FeedPage!StoreFailure => {
         const qConditions = [...baseConditions]
-        const qParams = [...baseParams]
-        if (applyRecencyWindow) {
-          const cutoff = scoreNow - TOP_RECENCY_WINDOW_MS
-          qParams.push(cutoff)
-          qConditions.push(`p.created_at >= $${qParams.length}`)
-        }
+        const qParams = [...baseParams, cutoff]
+        qConditions.push(`p.created_at ${recent ? ">=" : "<"} $${qParams.length}`)
         qParams.push(scoreNow)
         const nowParam = `$${qParams.length}`
         const scoreExpr = `((p.like_count * 2 + p.repost_count * 3 + p.reply_count * 2) * GREATEST(1, 24 - FLOOR(GREATEST(0, ${nowParam} - p.created_at) / 3600000)::int))`
@@ -940,6 +937,10 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
         qParams.push(limit + 1)
         const sql = `SELECT ${topSelectCols} FROM feed_posts p WHERE ${qConditions.join(" AND ")} ORDER BY ${topOrderBy} LIMIT $${qParams.length}`
         return try finishFeedPageTx(tx, sql, qParams, limit, viewerId, mode, input.tab, scoreNow)
+      }
+      const continuesOlderFallback = parsedCursor?.snapshotNow !== undefined && parsedCursor.createdAt < cutoff
+      if (continuesOlderFallback) {
+        return try runTopQuery(false)
       }
       const primary = try runTopQuery(true)
       if (primary.items.length > 0 || parsedCursor !== undefined) {
