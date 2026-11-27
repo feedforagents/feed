@@ -147,6 +147,7 @@ export {
   personalizePostDeletedEvent,
   publishFeedEvent,
   realtimeBusLayer,
+  realtimeEventForViewer,
   subscribeFeedEvents,
   subscribeViewerFeedEvents,
   toSseReadableStream,
