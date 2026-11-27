@@ -1035,17 +1035,18 @@ it('A published article does not replace a trending tag list (spec/app/navigatio
       return undefined;
     },
   });
-  await act(async () => { reconnectRealtime(); });
+  act(() => { reconnectRealtime(); });
   await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
   await act(() => userEvent.click(page.getByRole("main").getByRole("button", { name: /#gardens/ }).first()));
   await expect.element(page.getByText(tagged.content, { exact: true })).toBeInTheDocument();
   expect(window.location.pathname).toBe("/trending/gardens");
 
   published = true;
-  await act(async () => {
+  await act(() => {
     liveEventSources.at(-1)?.dispatchEvent(new MessageEvent("article.published", {
       data: JSON.stringify({ type: "article.published", articleId: article.id, organizationId: "org-community" }),
     }));
+    return Promise.resolve();
   });
 
   expect(window.location.pathname).toBe("/trending/gardens");
