@@ -653,8 +653,9 @@ export function setErrorNotice(message: string): void {
 }
 
 export function clearNotices(): void {
-  if (currentState.statusMessage !== null || currentState.errorMessage !== null) {
-    setStoreState({ statusMessage: null, errorMessage: null });
+  const keptToasts = currentState.toasts.filter((toast) => toast.tone !== "destructive");
+  if (currentState.statusMessage !== null || currentState.errorMessage !== null || keptToasts.length !== currentState.toasts.length) {
+    setStoreState({ statusMessage: null, errorMessage: null, toasts: keptToasts });
   }
 }
 
