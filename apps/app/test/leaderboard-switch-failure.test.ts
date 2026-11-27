@@ -2,28 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadLeaderboard } from "../src/web/store-world.ts";
-
-type Pending = { resolve: (value: Response) => void };
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function installQueryFetch() {
-  const pending = new Map<string, Pending>();
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, "https://feed.fun");
-    return new Promise<Response>((resolve) => {
-      pending.set(`${url.pathname}?${url.searchParams.toString()}`, { resolve });
-    });
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  return pending;
-}
+import { installDeferredFetch, jsonResponse, type Deferred } from "./deferred-fetch.ts";
 
 function pageBody(handle: string, page: number) {
   return {
@@ -66,9 +45,9 @@ function resetLeaderboard() {
   });
 }
 
-async function seedLoadedLeaderboard(pending: Map<string, Pending>) {
+async function seedLoadedLeaderboard(pending: Map<string, Deferred>) {
   const load = loadLeaderboard();
-  pending.get("/api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25")?.resolve(jsonResponse(pageBody("alice", 1)));
+  pending.get("GET /api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25")?.resolve(jsonResponse(pageBody("alice", 1)));
   await load;
   expect(getStoreSnapshot().leaderboard.map((row) => row.handle)).toEqual(["alice"]);
 }
@@ -85,11 +64,11 @@ afterEach(() => {
 describe("leaderboard switch failure", () => {
   it('keeps the loaded timeframe label when switching timeframe fails (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
     resetLeaderboard();
-    const pending = installQueryFetch();
+    const pending = installDeferredFetch();
     await seedLoadedLeaderboard(pending);
     const failing = loadLeaderboard({ timeframe: "7D", page: 1 });
     pending
-      .get("/api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=7D")
+      .get("GET /api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=7D")
       ?.resolve(jsonResponse({ message: "boom" }, 500));
     await failing;
     expect(controlsSummary()).toBe("audience=traders timeframe=ALL metric=net_profit page=1 rows=alice");
@@ -98,27 +77,27 @@ describe("leaderboard switch failure", () => {
 
   it('keeps the loaded page when paging fails (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
     resetLeaderboard();
-    const pending = installQueryFetch();
+    const pending = installDeferredFetch();
     await seedLoadedLeaderboard(pending);
     const failing = loadLeaderboard({ page: 2 });
-    pending.get("/api/leaderboard?scope=players&metric=net_profit&page=2&pageSize=25")?.resolve(jsonResponse({ message: "boom" }, 500));
+    pending.get("GET /api/leaderboard?scope=players&metric=net_profit&page=2&pageSize=25")?.resolve(jsonResponse({ message: "boom" }, 500));
     await failing;
     expect(controlsSummary()).toBe("audience=traders timeframe=ALL metric=net_profit page=1 rows=alice");
   });
 
   it('restores the loaded controls, not an intermediate switch, when the newest switch fails (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
     resetLeaderboard();
-    const pending = installQueryFetch();
+    const pending = installDeferredFetch();
     await seedLoadedLeaderboard(pending);
     const first = loadLeaderboard({ timeframe: "7D", page: 1 });
     const second = loadLeaderboard({ timeframe: "30D", page: 1 });
     pending
-      .get("/api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=30D")
+      .get("GET /api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=30D")
       ?.resolve(jsonResponse({ message: "boom" }, 500));
     await second;
     expect(controlsSummary()).toBe("audience=traders timeframe=ALL metric=net_profit page=1 rows=alice");
     pending
-      .get("/api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=7D")
+      .get("GET /api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=7D")
       ?.resolve(jsonResponse(pageBody("bob", 1)));
     await first;
     expect(controlsSummary()).toBe("audience=traders timeframe=ALL metric=net_profit page=1 rows=alice");
@@ -126,11 +105,11 @@ describe("leaderboard switch failure", () => {
 
   it('still applies a successful switch (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
     resetLeaderboard();
-    const pending = installQueryFetch();
+    const pending = installDeferredFetch();
     await seedLoadedLeaderboard(pending);
     const switching = loadLeaderboard({ timeframe: "7D", page: 1 });
     pending
-      .get("/api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=7D")
+      .get("GET /api/leaderboard?scope=players&metric=net_profit&page=1&pageSize=25&filter=traders&timeframe=7D")
       ?.resolve(jsonResponse(pageBody("bob", 1)));
     await switching;
     expect(controlsSummary()).toBe("audience=traders timeframe=7D metric=net_profit page=1 rows=bob");
