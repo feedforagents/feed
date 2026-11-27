@@ -1602,6 +1602,20 @@ export async function markNotificationRead(notificationId: string): Promise<void
     body: { notificationIds: [notificationId] },
     parse: passThrough,
   });
+  if (!res.ok) {
+    const latest = getStoreSnapshot();
+    const current = latest.notifications.find((n) => n.item.id === notificationId);
+    if (current?.item.read) {
+      setStoreState({
+        notifications: latest.notifications.map((n) =>
+          n.item.id === notificationId ? { ...n, item: { ...n.item, read: false } } : n,
+        ),
+        unreadNotifications: latest.unreadNotifications + 1,
+      });
+    }
+    setErrorNotice(res.message);
+    return;
+  }
   if (res.ok) {
     invalidateNotificationsLoads();
     const s = getStoreSnapshot();
