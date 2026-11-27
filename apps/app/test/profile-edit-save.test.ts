@@ -57,6 +57,34 @@ function openOwnProfile(): void {
   });
 }
 
+async function saveWhile(
+  changed: () => void,
+  patchResponse: Response = jsonResponse({
+    accountId: "alice",
+    handle: "alice",
+    displayName: "Alice Renamed",
+    bio: "New bio",
+    avatarUrl: null,
+    bannerUrl: null,
+  }),
+): Promise<boolean> {
+  openOwnProfile();
+  const pending = installDeferredFetch();
+  const saving = updateOwnProfile({
+    displayName: "Alice Renamed",
+    bio: "New bio",
+    avatarUrl: null,
+    bannerUrl: null,
+  });
+  changed();
+  pending.get("PATCH /api/users/me")?.resolve(patchResponse);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  for (const [key, held] of pending) {
+    if (key.startsWith("GET /api/users/alice")) held.resolve(Response.json({ message: "Profile load failed" }, { status: 500 }));
+  }
+  return saving;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   setStoreState({ viewer: null, profileBundle: null, profileHandle: null, toasts: [] });
@@ -115,29 +143,9 @@ describe("profile edit save", () => {
   });
 
   it('a save that lands after sign-out does not restore the signed-out viewer (spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown")', async () => {
-    openOwnProfile();
-    const pending = installDeferredFetch();
-    const saving = updateOwnProfile({
-      displayName: "Alice Renamed",
-      bio: "New bio",
-      avatarUrl: null,
-      bannerUrl: null,
+    const ok = await saveWhile(() => {
+      setStoreState({ viewer: null, profileBundle: null, profileHandle: null, route: "Home" });
     });
-    setStoreState({ viewer: null, profileBundle: null, profileHandle: null, route: "Home" });
-    pending.get("PATCH /api/users/me")?.resolve(jsonResponse({
-      accountId: "alice",
-      handle: "alice",
-      displayName: "Alice Renamed",
-      bio: "New bio",
-      avatarUrl: null,
-      bannerUrl: null,
-    }));
-    for (let i = 0; i < 30; i++) await Promise.resolve();
-    for (const [key, held] of pending) {
-      if (key.startsWith("GET /api/users/alice")) held.resolve(Response.json({ message: "Profile load failed" }, { status: 500 }));
-    }
-
-    const ok = await saving;
 
     expect(ok).toBe(false);
     expect(getStoreSnapshot().viewer).toBeNull();
@@ -145,30 +153,10 @@ describe("profile edit save", () => {
   });
 
   it('a save that lands after an account switch leaves the new viewer untouched (spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown")', async () => {
-    openOwnProfile();
-    const pending = installDeferredFetch();
-    const saving = updateOwnProfile({
-      displayName: "Alice Renamed",
-      bio: "New bio",
-      avatarUrl: null,
-      bannerUrl: null,
+    const ok = await saveWhile(() => {
+      const bob = { ...getStoreSnapshot().viewer!, accountId: "bob", handle: "bob", displayName: "Bob Player" };
+      setStoreState({ viewer: bob, profileBundle: null, profileHandle: null, route: "Home" });
     });
-    const bob = { ...getStoreSnapshot().viewer!, accountId: "bob", handle: "bob", displayName: "Bob Player" };
-    setStoreState({ viewer: bob, profileBundle: null, profileHandle: null, route: "Home" });
-    pending.get("PATCH /api/users/me")?.resolve(jsonResponse({
-      accountId: "alice",
-      handle: "alice",
-      displayName: "Alice Renamed",
-      bio: "New bio",
-      avatarUrl: null,
-      bannerUrl: null,
-    }));
-    for (let i = 0; i < 30; i++) await Promise.resolve();
-    for (const [key, held] of pending) {
-      if (key.startsWith("GET /api/users/alice")) held.resolve(Response.json({ message: "Profile load failed" }, { status: 500 }));
-    }
-
-    const ok = await saving;
 
     expect(ok).toBe(false);
     expect(getStoreSnapshot().viewer?.accountId).toBe("bob");
@@ -176,32 +164,25 @@ describe("profile edit save", () => {
   });
 
   it('a save keeps viewer fields that changed while it was in flight (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-    openOwnProfile();
-    const pending = installDeferredFetch();
-    const saving = updateOwnProfile({
-      displayName: "Alice Renamed",
-      bio: "New bio",
-      avatarUrl: null,
-      bannerUrl: null,
+    const ok = await saveWhile(() => {
+      setStoreState({ viewer: { ...getStoreSnapshot().viewer!, balanceCents: 7_777 } });
     });
-    setStoreState({ viewer: { ...getStoreSnapshot().viewer!, balanceCents: 7_777 } });
-    pending.get("PATCH /api/users/me")?.resolve(jsonResponse({
-      accountId: "alice",
-      handle: "alice",
-      displayName: "Alice Renamed",
-      bio: "New bio",
-      avatarUrl: null,
-      bannerUrl: null,
-    }));
-    for (let i = 0; i < 30; i++) await Promise.resolve();
-    for (const [key, held] of pending) {
-      if (key.startsWith("GET /api/users/alice")) held.resolve(Response.json({ message: "Profile load failed" }, { status: 500 }));
-    }
-
-    const ok = await saving;
 
     expect(ok).toBe(true);
     expect(getStoreSnapshot().viewer?.displayName).toBe("Alice Renamed");
     expect(getStoreSnapshot().viewer?.balanceCents).toBe(7_777);
+  });
+
+  it('a save that fails after sign-out shows no error notice (spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown")', async () => {
+    const ok = await saveWhile(
+      () => {
+        setStoreState({ viewer: null, profileBundle: null, profileHandle: null, route: "Home" });
+      },
+      Response.json({ message: "Save failed" }, { status: 500 }),
+    );
+
+    expect(ok).toBe(false);
+    expect(getStoreSnapshot().viewer).toBeNull();
+    expect(getStoreSnapshot().toasts).toHaveLength(0);
   });
 });
