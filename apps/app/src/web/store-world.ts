@@ -83,6 +83,38 @@ export function markRepostServerCountLanded(postId: string): void {
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
+let authorHideSeq = 0;
+const authorHiddenAtSeq = new Map<string, number>();
+
+function captureAuthorHides(): number {
+  return authorHideSeq;
+}
+
+function wasAuthorHiddenSince(handle: string, hidesAtStart: number): boolean {
+  return (authorHiddenAtSeq.get(handle.toLowerCase()) ?? 0) > hidesAtStart;
+}
+
+function dropAuthorsHiddenSince(
+  posts: ReadonlyArray<AppPost>,
+  hidesAtStart: number,
+): ReadonlyArray<AppPost> {
+  if (hidesAtStart === authorHideSeq) return posts;
+  const cleanPost = (p: AppPost): AppPost => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    const stripRepost = reposter !== undefined && wasAuthorHiddenSince(reposter, hidesAtStart);
+    const stripQuote = p.card.quotePost !== undefined && wasAuthorHiddenSince(p.card.quotePost.authorHandle, hidesAtStart);
+    if (!stripRepost && !stripQuote) return p;
+    return {
+      ...p,
+      card: {
+        ...p.card,
+        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
+        ...(stripQuote ? { quotePost: undefined } : {}),
+      },
+    };
+  };
+  return posts.filter((p) => !wasAuthorHiddenSince(p.card.authorHandle, hidesAtStart)).map(cleanPost);
+}
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
@@ -312,6 +344,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++feedRequestSeq;
   const engagementAtStart = captureEngagement();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ feedLoading: true });
   const url = appendAnonymousModeParam(`/api/feed?tab=${encodeURIComponent(tab)}`, s);
   const res = await requestJson(url, {
@@ -322,7 +355,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   if (res.ok) {
     feedLoadedTab = tab;
     setStoreState({
-      feedPosts: preserveEngagementSince(res.data.items, engagementAtStart),
+      feedPosts: dropAuthorsHiddenSince(preserveEngagementSince(res.data.items, engagementAtStart), hidesAtStart),
       feedNextCursor: res.data.nextCursor,
       feedLoading: false,
       pendingNewPostCount: 0,
@@ -356,6 +389,7 @@ export async function loadMoreFeed(): Promise<void> {
   const tab = s.feedTab;
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = feedRequestSeq;
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ feedLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/feed?tab=${encodeURIComponent(tab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
@@ -369,7 +403,7 @@ export async function loadMoreFeed(): Promise<void> {
   }
   if (res.ok) {
     setStoreState({
-      feedPosts: appendUniquePosts(latest.feedPosts, res.data.items),
+      feedPosts: appendUniquePosts(latest.feedPosts, dropAuthorsHiddenSince(res.data.items, hidesAtStart)),
       feedNextCursor: res.data.nextCursor,
       feedLoadingMore: false,
     });
@@ -2155,6 +2189,8 @@ async function toggleModeration(
     return;
   }
   if (!active) {
+    authorHideSeq += 1;
+    authorHiddenAtSeq.set(lower, authorHideSeq);
     filterAuthorOutOfFeeds(handle);
     if (getStoreSnapshot().feedTab === "following") {
       void loadFeed();
