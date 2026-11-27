@@ -421,7 +421,7 @@ function ActiveRouteScreen({ mode }: { readonly mode: UiMode }) {
     case "Home":
       return <HomeScreen mode={mode} />;
     case "PostDetail":
-      return <PostDetailScreen mode={mode} />;
+      return <PostDetailScreen key={s.activePostId ?? "post"} mode={mode} />;
     case "Explore":
       return s.activeArticleId ? (
         <ArticleDetailScreen mode={mode} />
