@@ -1139,9 +1139,22 @@ export async function markChatRead(chatId: string): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
   const cur = getStoreSnapshot();
   const target = cur.chats.find((c) => c.id === chatId);
+  const unreadChatNotifications = cur.notifications.filter(
+    (n) => n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read,
+  );
   if (target && target.unreadCount > 0) {
     setStoreState({
       chats: cur.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: 0 } : c)),
+    });
+  }
+  if (unreadChatNotifications.length > 0) {
+    setStoreState({
+      notifications: cur.notifications.map((n) =>
+        n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read
+          ? { ...n, item: { ...n.item, read: true } }
+          : n,
+      ),
+      unreadNotifications: Math.max(0, cur.unreadNotifications - unreadChatNotifications.length),
     });
   }
   await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {

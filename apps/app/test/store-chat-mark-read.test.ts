@@ -5,6 +5,7 @@ import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import { loadChatMessages, selectChat } from "../src/web/store-world.ts";
 import type { AppChatSummary } from "../src/web/types.ts";
+import { decodeNotifications } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
@@ -85,6 +86,44 @@ it("does not mark read when the room loads with no messages (spec/social/messagi
   await loadChatMessages("chat-1");
   expect(getStoreSnapshot().chatMessages).toEqual([]);
   expect(readPosts).toEqual([]);
+});
+
+it("clears the notification badge for the room's chat messages when the room is opened (spec/social/moderation.md, \"Story: In-app notifications and Social-mode presentation filtering\"; spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  const seeded = decodeNotifications({
+    notifications: [
+      {
+        id: "notif-chat-1",
+        kind: "chat_message",
+        chatId: "chat-1",
+        actorHandle: "bob",
+        actorName: "Bob",
+        title: "New direct message",
+        read: false,
+        createdAt: 1,
+      },
+      {
+        id: "notif-follow-1",
+        kind: "follow",
+        actorHandle: "carol",
+        actorName: "Carol",
+        title: "Carol followed you",
+        read: false,
+        createdAt: 1,
+      },
+    ],
+    unreadCount: 2,
+  });
+  setStoreState({
+    chats: [seedChat(1)],
+    notifications: seeded.items,
+    unreadNotifications: seeded.unreadCount,
+  });
+  await loadChatMessages("chat-1");
+  expect(readPosts).toEqual(["/api/chats/chat-1/read"]);
+  expect(getStoreSnapshot().chats.find((c) => c.id === "chat-1")?.unreadCount).toBe(0);
+  expect(getStoreSnapshot().notifications.find((n) => n.item.id === "notif-chat-1")?.item.read).toBe(true);
+  expect(getStoreSnapshot().notifications.find((n) => n.item.id === "notif-follow-1")?.item.read).toBe(false);
+  expect(getStoreSnapshot().unreadNotifications).toBe(1);
 });
 
 it("clears the list badge and keeps the switched-to room when a chat.message SSE event reloads the open room (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
