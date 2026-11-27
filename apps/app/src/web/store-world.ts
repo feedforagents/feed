@@ -406,6 +406,7 @@ let threadRequestSeq = 0;
 
 export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
   const s = getStoreSnapshot();
+  const prevSort = s.threadSort;
   const sort = sortOverride ?? s.threadSort;
   const viewerId = s.viewer?.accountId ?? null;
   threadRequestSeq += 1;
@@ -436,7 +437,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
     });
     return;
   }
-  setStoreState({ threadLoading: false });
+  setStoreState({ threadLoading: false, threadSort: prevSort });
   setErrorNotice(res.ok ? "Post not found" : res.message);
 }
 
