@@ -1,7 +1,7 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { toggleFollow } from "../src/web/store-world.ts";
+import { loadProfile, toggleFollow } from "../src/web/store-world.ts";
 import { aliceViewer, makeProfileBundle, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
 const bobBundle = () => makeProfileBundle("bob", "Bob Trader", 6, 4, false);
@@ -130,4 +130,84 @@ it('A follow that succeeds after the same profile refreshes resyncs the follower
     expect(current?.summary.isFollowing).toBe(true);
     expect(current?.summary.followersCount).toBe(7);
   });
+});
+
+function bobFollowingBundle() {
+  const bundle = makeProfileBundle("bob", "Bob Trader", 7, 4, false);
+  return { ...bundle, summary: { ...bundle.summary, isFollowing: true } };
+}
+
+function beginRefreshRace(profileBundle: ReturnType<typeof makeProfileBundle>, profileHandle: string, currentlyFollowing: boolean, freshProfile: Response) {
+  openProfile(profileBundle, profileHandle);
+  const follow = pendingResponse();
+  const staleProfile = pendingResponse();
+  let profileGets = 0;
+  stubFetchUrl((url) => {
+    if (url.includes("/follow")) return follow.promise;
+    profileGets += 1;
+    return profileGets === 1 ? staleProfile.promise : Promise.resolve(freshProfile);
+  });
+  const refresh = loadProfile(profileHandle);
+  const pending = toggleFollow("bob", currentlyFollowing);
+  return { follow, staleProfile, refresh, pending };
+}
+
+it('A follow that commits while a profile refresh is in flight keeps the Following state and follower count when the stale refresh lands (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const { follow, staleProfile, refresh, pending } = beginRefreshRace(bobBundle(), "bob", false, profileResponse("bob", "Bob Trader", 7, 4, true));
+  expect(getStoreSnapshot().profileBundle?.summary.isFollowing).toBe(true);
+  expect(getStoreSnapshot().profileBundle?.summary.followersCount).toBe(7);
+
+  follow.resolve(Response.json({ following: true }));
+  await pending;
+
+  staleProfile.resolve(profileResponse("bob", "Bob Trader", 6, 4, false));
+  await refresh;
+  await vi.waitFor(() => {
+    const current = getStoreSnapshot().profileBundle;
+    expect(current?.summary.isFollowing).toBe(true);
+    expect(current?.summary.followersCount).toBe(7);
+  });
+});
+
+it('An unfollow that commits while a profile refresh is in flight keeps the Follow state and follower count when the stale refresh lands (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const { follow, staleProfile, refresh, pending } = beginRefreshRace(bobFollowingBundle(), "bob", true, profileResponse("bob", "Bob Trader", 6, 4, false));
+  expect(getStoreSnapshot().profileBundle?.summary.isFollowing).toBe(false);
+  expect(getStoreSnapshot().profileBundle?.summary.followersCount).toBe(6);
+
+  follow.resolve(Response.json({ following: false }));
+  await pending;
+
+  staleProfile.resolve(profileResponse("bob", "Bob Trader", 7, 4, true));
+  await refresh;
+  await vi.waitFor(() => {
+    const current = getStoreSnapshot().profileBundle;
+    expect(current?.summary.isFollowing).toBe(false);
+    expect(current?.summary.followersCount).toBe(6);
+  });
+});
+
+it('A follow from the own profile that commits while an own-profile refresh is in flight keeps the Following count when the stale refresh lands (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const { follow, staleProfile, refresh, pending } = beginRefreshRace(aliceBundle(), "alice", false, profileResponse("alice", "Alice Player", 2, 5, false));
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+
+  follow.resolve(Response.json({ following: true }));
+  await pending;
+
+  staleProfile.resolve(profileResponse("alice", "Alice Player", 2, 4, false));
+  await refresh;
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+  });
+});
+
+it('A failed follow while a profile refresh is in flight still rolls back when the refresh lands (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const { follow, staleProfile, refresh, pending } = beginRefreshRace(bobBundle(), "bob", false, profileResponse("bob", "Bob Trader", 6, 4, false));
+  expect(getStoreSnapshot().profileBundle?.summary.followersCount).toBe(7);
+
+  await failFollow(follow, pending);
+
+  staleProfile.resolve(profileResponse("bob", "Bob Trader", 6, 4, false));
+  await refresh;
+
+  expectBobRolledBack();
 });

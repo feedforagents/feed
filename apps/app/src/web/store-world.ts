@@ -32,6 +32,7 @@ import {
   type AppPerpMarket,
   type AppPost,
   type AppPredictionMarket,
+  type AppProfileBundle,
   type ExploreAccountHit,
   type ExploreActorHit,
   decodeAlphaInvites,
@@ -81,6 +82,7 @@ export function markRepostServerCountLanded(postId: string): void {
   if (repostInFlight.has(postId)) repostServerCountLanded.add(postId);
 }
 const followInFlight = new Set<string>();
+let followChangeSeq = 0;
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
 let exploreRequestSeq = 0;
@@ -168,6 +170,33 @@ function preserveEngagementSince(
     }
     return { ...post, card: { ...post.card, ...now } };
   });
+}
+
+function preserveFollowSince(
+  fetched: AppProfileBundle,
+  lower: string,
+  followSeqAtStart: number,
+): AppProfileBundle {
+  if (followChangeSeq === followSeqAtStart) return fetched;
+  const local = getStoreSnapshot().profileBundle;
+  if (!local || local.summary.handle.toLowerCase() !== lower) return fetched;
+  const localSummary = local.summary;
+  const fetchedSummary = fetched.summary;
+  const flip = localSummary.isFollowing === fetchedSummary.isFollowing ? 0 : localSummary.isFollowing ? 1 : -1;
+  return {
+    ...fetched,
+    summary: {
+      ...fetchedSummary,
+      isFollowing: localSummary.isFollowing,
+      followersCount: Math.max(0, fetchedSummary.followersCount + flip),
+      followingCount: fetchedSummary.isOwnProfile ? localSummary.followingCount : fetchedSummary.followingCount,
+    },
+    posts: fetched.posts.map((p) =>
+      p.card.authorHandle.toLowerCase() === lower
+        ? { ...p, card: { ...p.card, isFollowingAuthor: localSummary.isFollowing } }
+        : p,
+    ),
+  };
 }
 
 export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost["card"]) => AppPost["card"]): void {
@@ -1750,6 +1779,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   }
   const loadId = ++profileLoadCount;
   const engagementAtStart = captureEngagement();
+  const followSeqAtStart = followChangeSeq;
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -1768,8 +1798,9 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   });
   if (loadId !== profileLoadCount || getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
+    const fetched = sameProfile ? preserveFollowSince(res.data, lower, followSeqAtStart) : res.data;
     setStoreState({
-      profileBundle: { ...res.data, posts: preserveEngagementSince(res.data.posts, engagementAtStart) },
+      profileBundle: { ...fetched, posts: preserveEngagementSince(fetched.posts, engagementAtStart) },
       profileLoading: false,
     });
     return;
@@ -2014,6 +2045,7 @@ export async function updateOwnProfile(payload: {
 }
 
 function patchFollowAcrossStore(handle: string, nextFollowing: boolean, optimisticBundleHandle?: string | null): void {
+  followChangeSeq += 1;
   const lower = handle.toLowerCase();
   const cur = getStoreSnapshot();
   const viewerHandle = cur.viewer?.handle.toLowerCase() ?? "";
@@ -2119,6 +2151,7 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
       setErrorNotice(res.message);
       return;
     }
+    followChangeSeq += 1;
     const cur = getStoreSnapshot();
     const curBundleHandle = cur.profileBundle?.summary.handle.toLowerCase() ?? null;
     const targetStateStale = curBundleHandle === lower
