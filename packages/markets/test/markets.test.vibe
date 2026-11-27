@@ -118,6 +118,19 @@ function closedPositionSummary(result: Awaited<ReturnType<typeof listClosedPosit
   }
 }
 
+function closedPerpPayoutSummary(result: Awaited<ReturnType<typeof listClosedPositions>> extends Effect.Effect<infer A, unknown, unknown> ? A : never) {
+  const item = result.items[0]
+  return {
+    totalCount: result.totalCount,
+    itemKind: item?.kind,
+    itemTicker: item?.ticker,
+    itemSide: item?.side,
+    itemCostBasisCents: item?.costBasisCents,
+    itemPayoutCents: item?.payoutCents,
+    itemRealizedPnlCents: item?.realizedPnlCents
+  }
+}
+
 const FEED_ACCOUNT_COLUMNS = `account_id, handle, display_name, bio, avatar_url, phone_hash, phone_last2,
   phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents,
   total_fees_paid_cents, is_admin, is_reviewer, reviewer_password_hash,
@@ -144,6 +157,11 @@ effect function createVerifiedAccount(accountId: string, handle: string, balance
       [accountId, handle, handle, `phone-hash-${accountId}`, now, balanceCents]
     )
   })
+}
+
+effect function seedAliceHundredDay(now: number): void!StoreFailure!Store {
+  try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
+  try seedHundredCorpMarket(now)
 }
 
 effect function marketErrorCode<A, R>(program: A!(MarketFailure | StoreFailure)!R): string!!R {
@@ -1195,8 +1213,7 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
 
 it.effect('Closed perp positions report payout equal to cash credited with open fees in cost basis (spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
   runWithSeededMarketDay(effect (now) => {
-    try createVerifiedAccount("user-alice", "alice", INITIAL_GRANT_CENTS)
-    try seedHundredCorpMarket(now)
+    try seedAliceHundredDay(now)
 
     const { close: longClose } = try openAndCloseUserPerp({
       ownerId: "user-alice",
@@ -1212,13 +1229,7 @@ it.effect('Closed perp positions report payout equal to cash credited with open 
 
     try check(() => assert.deepStrictEqual(
       {
-        totalCount: closed.totalCount,
-        itemKind: item?.kind,
-        itemTicker: item?.ticker,
-        itemSide: item?.side,
-        itemCostBasisCents: item?.costBasisCents,
-        itemPayoutCents: item?.payoutCents,
-        itemRealizedPnlCents: item?.realizedPnlCents,
+        ...closedPerpPayoutSummary(closed),
         payoutEqualsCashCredited: item?.payoutCents === longClose.netCreditCents,
         payoutEqualsLedgerCloseCredit: item?.payoutCents === closeLedgerDelta,
         payoutMinusCostEqualsRealizedPnl: (item?.payoutCents ?? 0) - (item?.costBasisCents ?? 0) === item?.realizedPnlCents,
@@ -1236,6 +1247,83 @@ it.effect('Closed perp positions report payout equal to cash credited with open 
         payoutEqualsLedgerCloseCredit: true,
         payoutMinusCostEqualsRealizedPnl: true,
         realizedMatchesReceipt: true
+      }
+    ))
+  })
+)
+
+it.effect('Flipping a perp does not count the new leg in the closed leg cost basis in listClosedPositions (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    try seedAliceHundredDay(now)
+    const opened = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 500,
+      leverage: 20
+    })
+    try TestClock.adjust(Duration.seconds(3_600))
+    const flipped = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 1000,
+      leverage: 20,
+      mode: "flip"
+    })
+    const ledger = try getPointLedger("user-alice", 10)
+    const closeLedgerDelta = ledger.find((entry) => entry.kind === "perp_close")?.deltaCents ?? null
+    const closed = try listClosedPositions({ accountId: "user-alice" })
+    const item = closed.items[0]
+    try check(() => assert.deepStrictEqual(
+      {
+        ...closedPerpPayoutSummary(closed),
+        closedPositionIdMatches: flipped.closedPositionId,
+        payoutEqualsCashCredited: item?.payoutCents === closeLedgerDelta,
+        payoutMinusCostEqualsRealizedPnl: (item?.payoutCents ?? 0) - (item?.costBasisCents ?? 0) === item?.realizedPnlCents,
+        realizedMatchesFlipReceipt: item?.realizedPnlCents === flipped.realizedPnlCents
+      },
+      {
+        totalCount: 1,
+        itemKind: "perp",
+        itemTicker: "HUND",
+        itemSide: "long",
+        itemCostBasisCents: 510,
+        itemPayoutCents: closeLedgerDelta,
+        itemRealizedPnlCents: flipped.realizedPnlCents,
+        closedPositionIdMatches: opened.positionId,
+        payoutEqualsCashCredited: true,
+        payoutMinusCostEqualsRealizedPnl: true,
+        realizedMatchesFlipReceipt: true
+      }
+    ))
+    try TestClock.adjust(Duration.seconds(3_600))
+    const shortClose = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: flipped.positionId
+    })
+    const ledgerAfter = try getPointLedger("user-alice", 10)
+    const shortCloseDelta = ledgerAfter.find((entry) => entry.kind === "perp_close")?.deltaCents ?? null
+    const closedAfter = try listClosedPositions({ accountId: "user-alice" })
+    const shortItem = closedAfter.items.find((entry) => entry.side === "short")
+    try check(() => assert.deepStrictEqual(
+      {
+        totalClosedCount: closedAfter.totalCount,
+        shortCostBasisCents: shortItem?.costBasisCents,
+        shortPayoutCents: shortItem?.payoutCents,
+        shortPayoutEqualsCashCredited: shortItem?.payoutCents === shortCloseDelta,
+        shortPayoutMinusCostEqualsRealizedPnl: (shortItem?.payoutCents ?? 0) - (shortItem?.costBasisCents ?? 0) === shortItem?.realizedPnlCents,
+        shortRealizedMatchesReceipt: shortItem?.realizedPnlCents === shortClose.realizedPnlCents
+      },
+      {
+        totalClosedCount: 2,
+        shortCostBasisCents: 1020,
+        shortPayoutCents: shortCloseDelta,
+        shortPayoutEqualsCashCredited: true,
+        shortPayoutMinusCostEqualsRealizedPnl: true,
+        shortRealizedMatchesReceipt: true
       }
     ))
   })

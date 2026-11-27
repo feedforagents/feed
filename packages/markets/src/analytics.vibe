@@ -584,7 +584,7 @@ export effect function listClosedPositions(input: {
     )
     const perpEntryRows = perpRows.length > 0
       ? try tx.query(
-          `SELECT t.market_ref AS ticker, t.notional_cents, t.fee_cents, t.created_at, l.delta_cents
+          `SELECT t.market_ref AS ticker, t.side, t.notional_cents, t.fee_cents, t.created_at, l.delta_cents
            FROM feed_trades t
            LEFT JOIN feed_point_ledger l ON l.ref_id = t.id AND l.account_id = $1
            WHERE t.trader_id = $1
@@ -643,6 +643,8 @@ export effect function listClosedPositions(input: {
         if (requiredText(entry.ticker) !== ticker) continue
         const entryTs = toInt(entry.created_at)
         if (entryTs < createdAt || (closedAt > 0 && entryTs > closedAt)) continue
+        const entrySide = requiredText(entry.side)
+        if (closedAt > createdAt && entryTs === closedAt && (entrySide === "open_long" || entrySide === "open_short")) continue
         const fee = toInt(entry.fee_cents)
         const ledgerDelta = optionalInt(entry.delta_cents)
         const entryMargin = ledgerDelta !== null && ledgerDelta < 0
