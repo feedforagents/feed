@@ -524,7 +524,7 @@ it.effect(
 )
 
 it.effect(
-  'following feed with replies included only shows followed users and self (spec/social/posts.md, "Story: following feed")',
+  'following feed with replies included only shows followed users and self (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
   () => withSocialWorld(effect {
     try seedChatParticipants()
     try followAccount("alice", "bob")
