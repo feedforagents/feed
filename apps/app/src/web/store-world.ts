@@ -76,6 +76,13 @@ let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
+let leaderboardLoadedControls: {
+  readonly audience: LeaderboardAudienceFilter;
+  readonly timeframe: LeaderboardTimeframe;
+  readonly scope: LeaderboardScope;
+  readonly metric: LeaderboardMetric;
+  readonly page: number;
+} = { audience: "traders", timeframe: "ALL", scope: "players", metric: "net_profit", page: 1 };
 let pnlHistoryRequestSeq = 0;
 let closedPositionsLoadCount = 0;
 let economyLoadCount = 0;
@@ -767,6 +774,13 @@ export async function loadLeaderboard(options?: {
   });
   if (reqSeq !== leaderboardRequestSeq) return;
   if (res.ok) {
+    leaderboardLoadedControls = {
+      audience,
+      timeframe,
+      scope: res.data.scope,
+      metric: res.data.metric,
+      page: res.data.page,
+    };
     setStoreState({
       leaderboard: res.data.entries,
       leaderboardAudience: audience,
@@ -781,7 +795,14 @@ export async function loadLeaderboard(options?: {
     });
     return;
   }
-  setStoreState({ leaderboardLoading: false });
+  setStoreState({
+    leaderboardLoading: false,
+    leaderboardAudience: leaderboardLoadedControls.audience,
+    leaderboardTimeframe: leaderboardLoadedControls.timeframe,
+    leaderboardScope: leaderboardLoadedControls.scope,
+    leaderboardMetric: leaderboardLoadedControls.metric,
+    leaderboardPage: leaderboardLoadedControls.page,
+  });
   setErrorNotice(res.message);
 }
 
