@@ -781,6 +781,35 @@ async function mountCustomMockApp(options: {
   }
 }
 
+async function mountCustomHomeFeed(
+  items: ReadonlyArray<unknown>,
+  extra?: (path: string) => Promise<Response> | undefined,
+) {
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/feed") return Promise.resolve(Response.json({ items, nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+      return extra?.(path);
+    },
+  });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+  return page.getByRole("main");
+}
+
+async function mountCustomExploreArticles(articles: ReadonlyArray<{ readonly id: string }>) {
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles }));
+      const match = articles.find((article) => path === `/api/articles/${article.id}`);
+      if (match) return Promise.resolve(Response.json(match));
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  return page.getByRole("main");
+}
+
 async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
   const network = installMockNetwork(options ?? {});
   await renderApp();
@@ -894,6 +923,30 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
   await expect.element(page.getByText("Shipping orbital GPUs before breakfast. $XTRPC bears stay mad.")).toBeInTheDocument();
   await act(() => userEvent.click(page.getByRole("tab", { name: "Trades" })));
   await expect.element(page.getByText("BUY YES").first()).toBeInTheDocument();
+});
+
+it('Public post links preserve URL parentheses but not surrounding prose (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const orchard = "http://127.0.0.1:8787/resources/Orchard_(garden)";
+  const club = "http://127.0.0.1:8787/resources/Club";
+  const posts = [
+    `Read the orchard page: ${orchard}`,
+    `A link in prose (see ${club}).`,
+    `The guide is available (see ${orchard}).`,
+  ].map((content, index) => ({
+    ...SAMPLE_POSTS[0],
+    id: `garden-resource-${index}`,
+    content,
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+  }));
+  const main = await mountCustomHomeFeed(posts);
+  await expect.element(main.getByRole("link", { name: club, exact: true })).toHaveAttribute("href", club);
+  const orchardLinks = main.getByRole("link", { name: orchard, exact: true });
+  await expect.element(orchardLinks.first()).toHaveAttribute("href", orchard);
+  await expect.element(orchardLinks.last()).toHaveAttribute("href", orchard);
+  expect(orchardLinks.elements()).toHaveLength(2);
 });
 
 it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
@@ -1078,6 +1131,26 @@ it('Late likes never land on another profile (spec/app/navigation.md, "Story: Br
   expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["browser-post-1"]);
 });
 
+it('Back from a News article restores the full article list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const articles = Array.from({ length: 6 }, (_, index) => ({
+    id: `garden-news-${index + 1}`,
+    title: `Garden club bulletin ${index + 1}`,
+    body: "The community plant swap starts on Saturday.",
+    publishedAt: Date.now() - index * 60_000,
+  }));
+  const olderArticle = articles[5];
+  const main = await mountCustomExploreArticles(articles);
+  const news = main.getByRole("tab", { name: "News", exact: true });
+  await act(() => userEvent.click(news));
+  const openArticle = main.getByRole("button", { name: `Read full article: ${olderArticle.title}` });
+  await act(() => userEvent.click(openArticle));
+  await expect.element(main.getByRole("heading", { name: olderArticle.title, exact: true })).toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(news).toHaveAttribute("aria-selected", "true");
+  await expect.element(openArticle).toBeInTheDocument();
+});
+
 it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const tagged = {
     ...SAMPLE_POSTS[0],
@@ -1125,6 +1198,124 @@ it('A published article does not replace a trending tag list (spec/app/navigatio
   await expect.element(page.getByText(tagged.content, { exact: true })).toBeInTheDocument();
   await expect.element(page.getByText(untagged.content, { exact: true })).not.toBeInTheDocument();
   await expect.element(page.getByText(article.title, { exact: true })).toBeInTheDocument();
+});
+
+it('Publishes a pasted post whose trimmed text fits the limit (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const text = "Garden club plant swap this Saturday. ".repeat(8).slice(0, 279) + ".";
+  const submitted: string[] = [];
+  await mountCustomMockApp({
+    authenticated: true,
+    handle(path, _url, init) {
+      if (path === "/api/posts" && init?.method === "POST") {
+        if (typeof init.body === "string") submitted.push(init.body);
+        return Promise.resolve(Response.json({ ...SAMPLE_POSTS[0], id: "plant-swap", content: text }, { status: 201 }));
+      }
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+
+  const main = page.getByRole("main");
+  const draft = main.getByRole("textbox", { name: "Post text", exact: true });
+  const publish = main.getByRole("button", { name: "Post", exact: true });
+  await act(() => userEvent.fill(draft, text + "!"));
+  await expect.element(publish).toBeDisabled();
+  await expect.element(main.getByText("-1", { exact: true })).toBeInTheDocument();
+  await act(() => userEvent.fill(draft, text + " "));
+  await expect.element(publish).toBeEnabled();
+  await expect.element(main.getByText("0", { exact: true })).toBeInTheDocument();
+  await act(() => userEvent.fill(draft, text + "\n"));
+  await expect.element(publish).toBeEnabled();
+  await act(() => userEvent.click(publish));
+  await expect.element(draft).toHaveValue("");
+  expect(submitted).toEqual([JSON.stringify({ content: text })]);
+});
+
+it('Post copy controls report the clipboard outcome (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const post = {
+    ...SAMPLE_POSTS[0],
+    content: "Public plant swap on Saturday.",
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+  };
+  const writeText = vi.spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValueOnce(new DOMException("Permission denied", "NotAllowedError"))
+    .mockResolvedValueOnce(undefined);
+  const main = await mountCustomHomeFeed([post]);
+  const copied = page.getByText("Link copied to clipboard.", { exact: true });
+  await act(() => userEvent.click(main.getByRole("button", { name: "Share post", exact: true })));
+  await expect.element(page.getByText("Could not copy the post link.", { exact: true })).toBeInTheDocument();
+  await expect.element(copied).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "More post actions", exact: true })));
+  await act(() => userEvent.click(page.getByRole("menuitem", { name: "Copy link", exact: true })));
+  await expect.element(copied).toBeInTheDocument();
+  expect(writeText.mock.calls).toEqual([[`${window.location.origin}/post/${post.id}`], [`${window.location.origin}/post/${post.id}`]]);
+  writeText.mockRestore();
+});
+
+it('Keyboard activation follows the hashtag inside a quoted post (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const original = {
+    ...SAMPLE_POSTS[0],
+    id: "garden-original",
+    content: "The plant swap starts Saturday #gardens",
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: ["gardens"],
+  };
+  const quote = {
+    ...original,
+    id: "garden-quote",
+    content: "I'll bring some extra seeds.",
+    hashtags: [],
+    quotePostId: original.id,
+    quotePost: original,
+  };
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/feed") return Promise.resolve(Response.json({ items: [quote], nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+      if (path === "/api/trending/gardens") return Promise.resolve(Response.json({ tag: "gardens", posts: [original] }));
+      return undefined;
+    },
+  });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+  const tag = page.getByRole("main").getByRole("button", { name: "#gardens", exact: true });
+  await expect.element(tag).toBeInTheDocument();
+  const tagButton = tag.element();
+  if (tagButton instanceof HTMLElement) tagButton.focus();
+  await expect.element(tag).toHaveFocus();
+  await act(() => userEvent.keyboard("{Enter}"));
+  await expect.element(page.getByRole("button", { name: "Clear tag", exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/trending/gardens");
+});
+
+it('Post detail uses the same local month as the rest of the timestamp (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const post = {
+    ...SAMPLE_POSTS[0],
+    id: "garden-month-boundary",
+    content: "The October garden calendar is ready.",
+    createdAt: new Date(2026, 9, 1, 0, 5).getTime(),
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+  };
+  const utcMonth = vi.spyOn(Date.prototype, "getUTCMonth").mockReturnValue(8);
+  try {
+    const main = await mountCustomHomeFeed([post], (path) =>
+      path === `/api/posts/${post.id}` ? Promise.resolve(Response.json({ post, ancestors: [], replies: [] })) : undefined,
+    );
+    await act(() => userEvent.click(main.getByText(post.content, { exact: true })));
+    await expect.element(main.getByText("12:05 AM · Oct 1, 2026", { exact: true })).toBeInTheDocument();
+  } finally {
+    utcMonth.mockRestore();
+  }
 });
 
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
@@ -2048,4 +2239,33 @@ it('Shows the not-found screen when a reply disappears before opening (spec/app/
   await act(() => userEvent.click(page.getByRole("button", { name: "Back", exact: true })));
   await expect.element(page.getByText(parent.content, { exact: true })).toBeInTheDocument();
   expect(window.location.pathname).toBe(`/post/${parent.id}`);
+});
+
+it('Opening another article replaces all paragraphs even when two share an opener (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const opener = "The neighborhood garden volunteers will ";
+  const firstParagraph = opener + "bring seeds for the morning exchange.";
+  const secondParagraph = opener + "sort tools for the afternoon workshop.";
+  const libraryParagraph = "The library will be open to readers until five.";
+  const garden = {
+    id: "garden-schedule",
+    title: "Garden Volunteer Schedule",
+    body: `${firstParagraph}\n\n${secondParagraph}`,
+    publishedAt: Date.now() - 60_000,
+  };
+  const library = {
+    id: "library-hours",
+    title: "Library Holiday Hours",
+    body: `## Saturday opening\n\n${libraryParagraph}`,
+    publishedAt: Date.now(),
+  };
+  const main = await mountCustomExploreArticles([library, garden]);
+  const earlier = main.getByText(firstParagraph, { exact: true });
+  const later = main.getByText(secondParagraph, { exact: true });
+  await act(() => userEvent.click(main.getByRole("button", { name: `Read full article: ${garden.title}` })));
+  await expect.element(earlier).toBeInTheDocument();
+  await expect.element(later).toBeInTheDocument();
+  await act(() => userEvent.click(main.getByRole("button", { name: `Read full article: ${library.title}` })));
+  await expect.element(main.getByText(libraryParagraph, { exact: true })).toBeInTheDocument();
+  await expect.element(earlier).not.toBeInTheDocument();
+  await expect.element(later).not.toBeInTheDocument();
 });

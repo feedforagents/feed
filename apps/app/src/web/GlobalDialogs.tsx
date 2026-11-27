@@ -104,6 +104,12 @@ export function GlobalDialogs() {
     }
   };
 
+  const closeReport = () => {
+    setReportCategory("Spam");
+    setReportDetails("");
+    storeActions.closeReportDialog();
+  };
+
   const handleReportSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!s.reportTarget) return;
@@ -111,11 +117,7 @@ export function GlobalDialogs() {
     setReportBusy(true);
     const ok = await storeActions.submitReport(s.reportTarget.kind, s.reportTarget.id, reason);
     setReportBusy(false);
-    if (ok) {
-      setReportCategory("Spam");
-      setReportDetails("");
-      storeActions.closeReportDialog();
-    }
+    if (ok) closeReport();
   };
 
   return (
@@ -152,11 +154,7 @@ export function GlobalDialogs() {
       <Dialog
         open={s.reportTarget !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            setReportCategory("Spam");
-            setReportDetails("");
-            storeActions.closeReportDialog();
-          }
+          if (!open) closeReport();
         }}
       >
         <DialogContent className="max-w-md">
@@ -183,7 +181,12 @@ export function GlobalDialogs() {
               onChange={(e) => setReportDetails(e.target.value)}
             />
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={storeActions.closeReportDialog}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={closeReport}
+              >
                 Cancel
               </Button>
               <Button type="submit" variant="destructive" size="sm" loading={reportBusy}>

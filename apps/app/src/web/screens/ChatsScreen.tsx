@@ -69,7 +69,7 @@ function GroupManagementDialog({
     setInviteHandle(value);
     const cleaned = value.trim().replace(/^@/, "");
     if (cleaned.length >= 2) {
-      void storeActions.searchAccounts(cleaned).then((res) => setSuggestions(res.accounts));
+      void storeActions.searchAccounts(cleaned).then((res) => { if (res) setSuggestions(res.accounts); });
     } else {
       setSuggestions([]);
     }
@@ -278,7 +278,7 @@ function NewChatDialogs({
                   setDmHandle(val);
                   const cleaned = val.trim().replace(/^@/, "");
                   if (cleaned.length >= 2) {
-                    void storeActions.searchAccounts(cleaned).then((res) => setDmAccounts(res.accounts));
+                    void storeActions.searchAccounts(cleaned).then((res) => { if (res) setDmAccounts(res.accounts); });
                   } else {
                     setDmAccounts([]);
                   }
@@ -324,7 +324,7 @@ function NewChatDialogs({
                   setGroupSearch(val);
                   const cleaned = val.trim().replace(/^@/, "");
                   if (cleaned.length >= 2) {
-                    void storeActions.searchAccounts(cleaned).then((res) => setGroupAccounts(res.accounts));
+                    void storeActions.searchAccounts(cleaned).then((res) => { if (res) setGroupAccounts(res.accounts); });
                   } else {
                     setGroupAccounts([]);
                   }
