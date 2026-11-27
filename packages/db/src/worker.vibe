@@ -217,20 +217,12 @@ BEGIN
     WHERE conname = 'feed_perp_positions_size_within_leverage'
       AND conrelid = 'feed_perp_positions'::regclass
   ) THEN
-    ALTER TABLE feed_perp_positions
-      ADD CONSTRAINT feed_perp_positions_size_within_leverage
-      CHECK (size_cents <= margin_cents * leverage) NOT VALID;
-  END IF;
-  IF EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'feed_perp_positions_size_within_leverage'
-      AND conrelid = 'feed_perp_positions'::regclass
-      AND NOT convalidated
-  ) THEN
-    IF NOT EXISTS (SELECT 1 FROM feed_perp_positions WHERE size_cents > margin_cents * leverage) THEN
-      ALTER TABLE feed_perp_positions VALIDATE CONSTRAINT feed_perp_positions_size_within_leverage;
+    IF EXISTS (SELECT 1 FROM feed_perp_positions WHERE size_cents > margin_cents * leverage) THEN
+      RAISE WARNING 'feed_perp_positions: rows violate size <= margin * leverage; constraint NOT added until they are repaired';
     ELSE
-      RAISE WARNING 'feed_perp_positions: existing rows violate size_within_leverage; constraint left NOT VALID';
+      ALTER TABLE feed_perp_positions
+        ADD CONSTRAINT feed_perp_positions_size_within_leverage
+        CHECK (size_cents <= margin_cents * leverage);
     END IF;
   END IF;
 END $$;`)
