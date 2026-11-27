@@ -571,7 +571,9 @@ export function SettingsScreen({ mode }: { readonly mode: UiMode }) {
                 hasAtRiskOpenPositions={hasAtRiskOpenPositions(s)}
                 onModeChange={storeActions.toggleUiModeFromControl}
                 onReturnToGame={() => {
-                  void storeActions.setPlayMode("game").then(() => storeActions.navigate("/markets"));
+                  void storeActions.setPlayMode("game").then((saved) => {
+                    if (saved) void storeActions.navigate("/markets");
+                  });
                 }}
               />
             </div>

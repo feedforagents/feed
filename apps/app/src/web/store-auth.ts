@@ -701,10 +701,10 @@ export async function refreshViewerSurfaces(): Promise<void> {
   await Promise.all(tasks);
 }
 
-export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
+export async function setPlayMode(nextMode: "game" | "social"): Promise<boolean> {
   const s = getStoreSnapshot();
   const prevMode = s.viewer ? s.viewer.uiMode : s.localUiMode;
-  if (prevMode === nextMode) return;
+  if (prevMode === nextMode) return true;
   const leavingGameRoute = nextMode === "social" && (s.route === "Markets" || s.route === "Leaderboard" || s.walletView);
   if (!s.viewer) {
     syncMachineUiMode(nextMode);
@@ -718,7 +718,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
       walletView: leavingGameRoute ? false : s.walletView,
     });
     await refreshViewerSurfaces();
-    return;
+    return true;
   }
   const res = await requestJson("/api/auth/mode", {
     method: "POST",
@@ -727,7 +727,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   });
   if (!res.ok) {
     setErrorNotice(res.message);
-    return;
+    return false;
   }
   syncMachineUiMode(nextMode);
   if (leavingGameRoute) {
@@ -741,6 +741,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   });
   setStatusNotice(nextMode === "social" ? "Social mode enabled." : "Game mode enabled.");
   await refreshViewerSurfaces();
+  return true;
 }
 
 export function toggleUiModeFromControl(next: UiMode): void {
