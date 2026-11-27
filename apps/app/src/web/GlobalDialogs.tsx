@@ -104,6 +104,12 @@ export function GlobalDialogs() {
     }
   };
 
+  const closeReport = () => {
+    setReportCategory("Spam");
+    setReportDetails("");
+    storeActions.closeReportDialog();
+  };
+
   const handleReportSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!s.reportTarget) return;
@@ -111,11 +117,7 @@ export function GlobalDialogs() {
     setReportBusy(true);
     const ok = await storeActions.submitReport(s.reportTarget.kind, s.reportTarget.id, reason);
     setReportBusy(false);
-    if (ok) {
-      setReportCategory("Spam");
-      setReportDetails("");
-      storeActions.closeReportDialog();
-    }
+    if (ok) closeReport();
   };
 
   return (
@@ -152,11 +154,7 @@ export function GlobalDialogs() {
       <Dialog
         open={s.reportTarget !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            setReportCategory("Spam");
-            setReportDetails("");
-            storeActions.closeReportDialog();
-          }
+          if (!open) closeReport();
         }}
       >
         <DialogContent className="max-w-md">
@@ -187,11 +185,7 @@ export function GlobalDialogs() {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => {
-                  setReportCategory("Spam");
-                  setReportDetails("");
-                  storeActions.closeReportDialog();
-                }}
+                onClick={closeReport}
               >
                 Cancel
               </Button>

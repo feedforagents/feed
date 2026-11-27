@@ -1178,7 +1178,7 @@ effect function executeProtectedAccountTool(
         side,
         collateralCents,
         leverage,
-...(perpMode === undefined ? {} : { mode: perpMode })
+        ...(perpMode === undefined ? {} : { mode: perpMode })
       })
       return {
         previewOnly: true,
@@ -1566,7 +1566,7 @@ effect function executeProtectedTradeTool(
         side,
         collateralCents,
         leverage,
-...(perpMode === undefined ? {} : { mode: perpMode }),
+        ...(perpMode === undefined ? {} : { mode: perpMode }),
         ...perpTradeMeta(args, caller.clientName)
       })
       try maybePublishFeedEvent({
@@ -1603,9 +1603,9 @@ effect function executeProtectedTradeTool(
       const positionId = asOptionalString(args.positionId) ?? ""
       const sizeCents = try resolveCloseSizeCents(args)
       const closePct = typeof args.closePct === "number" && Number.isFinite(args.closePct) ? args.closePct : undefined
-        if (sizeCents !== undefined && closePct !== undefined) {
-          throw new InvalidRpcParamsFailure({ message: "provide only one of sizeCents/sizePts/closePct" })
-        }
+      if (sizeCents !== undefined && closePct !== undefined) {
+        throw new InvalidRpcParamsFailure({ message: "provide only one of sizeCents/sizePts/closePct" })
+      }
       const openPositions = try listPerpPositions(caller.accountId)
       const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({

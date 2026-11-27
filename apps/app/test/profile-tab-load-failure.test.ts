@@ -2,51 +2,16 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadProfileLikes, loadProfileReplies, loadProfileTrades } from "../src/web/store-world.ts";
-import { aliceViewer, postRaw, resetModerationStore } from "./moderation-fixtures.ts";
-
-function bobBundle() {
-  return {
-    summary: {
-      displayName: "Bob Trader",
-      handle: "bob",
-      followersCount: 6,
-      followingCount: 4,
-      isFollowing: false,
-      isMuted: false,
-      isBlocked: false,
-      isOwnProfile: false,
-    },
-    id: "bob",
-    kind: "user" as const,
-    postsCount: 0,
-    createdAtMs: 0,
-    actorMeta: null,
-    orgMeta: null,
-    viewerFollowedBy: false,
-    viewerBlockedBy: false,
-    tradeCount: null,
-    openPositionCount: null,
-    posts: [],
-    postsNextCursor: null,
-    positions: [],
-  };
-}
+import { aliceViewer, makeProfileBundle, postRaw, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
 function openBobProfile() {
   setStoreState({
     viewer: aliceViewer,
-    profileBundle: bobBundle(),
+    profileBundle: makeProfileBundle("bob", "Bob Trader", 6, 4, false),
     profileHandle: "bob",
     route: "Profile",
     errorMessage: null,
     toasts: [],
-  });
-}
-
-function stubFetch(handler: (url: string) => Promise<Response>) {
-  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    return handler(url);
   });
 }
 
@@ -68,7 +33,7 @@ afterEach(() => {
 
 it('A failed Replies tab load reports the failure instead of presenting an empty list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   openBobProfile();
-  stubFetch(() => failedResponse("Replies unavailable"));
+  stubFetchUrl(() => failedResponse("Replies unavailable"));
 
   await loadProfileReplies("bob");
 
@@ -79,7 +44,7 @@ it('A failed Replies tab load reports the failure instead of presenting an empty
 
 it('A failed Likes tab load reports the failure instead of presenting an empty list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   openBobProfile();
-  stubFetch(() => failedResponse("Likes unavailable"));
+  stubFetchUrl(() => failedResponse("Likes unavailable"));
 
   await loadProfileLikes("bob");
 
@@ -90,7 +55,7 @@ it('A failed Likes tab load reports the failure instead of presenting an empty l
 
 it('A failed Trades tab load reports the failure instead of presenting an empty list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   openBobProfile();
-  stubFetch(() => failedResponse("Trades unavailable"));
+  stubFetchUrl(() => failedResponse("Trades unavailable"));
 
   await loadProfileTrades("bob");
 
@@ -101,7 +66,7 @@ it('A failed Trades tab load reports the failure instead of presenting an empty 
 
 it('A successful Replies tab load shows the replies with no failure notice (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   openBobProfile();
-  stubFetch(() => Promise.resolve(Response.json({
+  stubFetchUrl(() => Promise.resolve(Response.json({
     items: [postRaw({ id: "bob-reply", authorId: "bob", authorHandle: "bob", authorDisplayName: "Bob Trader", replyToPostId: "post-x" })],
     nextCursor: null,
   })));
@@ -115,7 +80,7 @@ it('A successful Replies tab load shows the replies with no failure notice (spec
 it('A Replies load that fails after leaving the profile stays silent (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   openBobProfile();
   let resolveFetch: (res: Response) => void = () => undefined;
-  stubFetch(() => new Promise<Response>((settle) => { resolveFetch = settle; }));
+  stubFetchUrl(() => new Promise<Response>((settle) => { resolveFetch = settle; }));
 
   const pending = loadProfileReplies("bob");
   setStoreState({ route: "Home", profileHandle: null, profileBundle: null });

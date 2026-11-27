@@ -4,7 +4,7 @@ import { act } from "react";
 import type { Root } from "react-dom/client";
 import { expect, it } from "vitest";
 import { setStoreState } from "../src/web/store-core.ts";
-import { flush, installAppTestLifecycle, installMockNetwork, mountApp } from "./app-test-helpers.tsx";
+import { findButtonByText, flush, installAppTestLifecycle, installMockNetwork, makeAuthMeResponse, mountApp, setControlValue } from "./app-test-helpers.tsx";
 
 const opened: Root[] = [];
 
@@ -13,42 +13,9 @@ installAppTestLifecycle(opened, () => {
 });
 
 function respond(path: string): unknown {
-  if (path === "/api/auth/me") {
-    return {
-      authenticated: true,
-      viewer: {
-        accountId: "acct-player-1",
-        handle: "alice",
-        displayName: "Alice Trader",
-        bio: "",
-        avatarUrl: null,
-        bannerUrl: null,
-        phoneLast2: "01",
-        uiMode: "game",
-        balanceCents: 10500,
-        startingGrantCents: 10000,
-        isAdmin: false,
-        isReviewer: true,
-        agentGrant: null,
-      },
-      acceptedCountries: ["+1", "+44"],
-      publicAppUrl: window.location.origin,
-      devSmsCodeEnabled: true,
-    };
-  }
+  if (path === "/api/auth/me") return makeAuthMeResponse();
   if (path === "/api/auth/phone/change/start") return {};
-  if (path === "/api/feed" || path === "/api/posts") return { items: [], nextCursor: null };
-  if (path === "/api/trending") return { trending: [] };
-  if (path === "/api/articles") return { articles: [] };
-  if (path === "/api/markets") return { predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } };
-  if (path === "/api/world/status") {
-    return { currentDay: 3, currentHour: 14, phase: "active", gameRunning: true, lastTickAt: Date.now(), activeMarketsCount: 0, totalPostsCount: 0, activeActorsCount: 5 };
-  }
   return undefined;
-}
-
-function buttonByText(text: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === text);
 }
 
 function phoneInput(): HTMLInputElement | null {
@@ -59,20 +26,11 @@ function codeInput(): HTMLInputElement | null {
   return document.querySelector<HTMLInputElement>("#change-phone-code");
 }
 
-async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
-  const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
-  act(() => {
-    descriptor?.set?.bind(input)(value);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await flush();
-}
-
 async function clickChangePhone(): Promise<void> {
-  for (let i = 0; i < 50 && !buttonByText("Change phone"); i += 1) {
+  for (let i = 0; i < 50 && !findButtonByText("Change phone"); i += 1) {
     await flush();
   }
-  await act(() => Promise.resolve(buttonByText("Change phone")?.click()));
+  await act(() => Promise.resolve(findButtonByText("Change phone")?.click()));
   await flush();
   for (let i = 0; i < 50 && !phoneInput() && !codeInput(); i += 1) {
     await flush();
@@ -107,7 +65,7 @@ it('reopening the phone change dialog after closing it starts over at an empty p
   await openPhoneDialog();
   const input = phoneInput();
   if (!input) throw new Error("phone input missing");
-  await typeInto(input, "+14155550199");
+  await setControlValue(input, "+14155550199");
   await submitPhoneForm();
   expect(codeInput()).not.toBeNull();
 
@@ -119,7 +77,7 @@ it('reopening the phone change dialog after closing it starts over at an empty p
 
   const reopened = phoneInput();
   if (!reopened) throw new Error("phone input missing after reopen");
-  await typeInto(reopened, "+14155550199");
+  await setControlValue(reopened, "+14155550199");
   await closeDialog();
   await clickChangePhone();
 

@@ -1370,52 +1370,31 @@ effect function handleWorldStatusAndUserSearch(
     const viewerId = session?.accountId
     const store = try Store
     const items = try store.transaction(effect (tx: Tx) => {
-      const accountRows = viewerId === undefined
-        ? try tx.query(
-            `SELECT fa.account_id AS id, fa.handle, fa.display_name, fa.avatar_url
-             FROM feed_accounts fa
-             LEFT JOIN accounts a ON a.key = fa.account_id
-             WHERE fa.is_reviewer = false
-               AND (a.key IS NULL OR a.status = 'active')
-               AND (fa.handle ILIKE $1 ESCAPE '\\' OR fa.display_name ILIKE $1 ESCAPE '\\')
-             ORDER BY CASE WHEN fa.handle ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, fa.handle ASC
-             LIMIT $3`,
-            [like, prefix, limit]
-          )
-        : try tx.query(
-            `SELECT fa.account_id AS id, fa.handle, fa.display_name, fa.avatar_url
-             FROM feed_accounts fa
-             LEFT JOIN accounts a ON a.key = fa.account_id
-             WHERE fa.is_reviewer = false
-               AND (a.key IS NULL OR a.status = 'active')
-               AND (fa.handle ILIKE $1 ESCAPE '\\' OR fa.display_name ILIKE $1 ESCAPE '\\')
-               AND ${viewerAuthorVisibilitySql("$3", "fa.account_id")}
-             ORDER BY CASE WHEN fa.handle ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, fa.handle ASC
-             LIMIT $4`,
-            [like, prefix, viewerId, limit]
-          )
-      const actorRows = viewerId === undefined
-        ? try tx.query(
-            `SELECT id, username AS handle, name AS display_name, profile_image_url AS avatar_url
-             FROM feed_actors
-             WHERE id NOT LIKE 'test-%'
-               AND id NOT LIKE 'org-%'
-               AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\')
-             ORDER BY CASE WHEN username ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, name ASC
-             LIMIT $3`,
-            [like, prefix, limit]
-          )
-        : try tx.query(
-            `SELECT id, username AS handle, name AS display_name, profile_image_url AS avatar_url
-             FROM feed_actors
-             WHERE id NOT LIKE 'test-%'
-               AND id NOT LIKE 'org-%'
-               AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\')
-               AND ${viewerAuthorVisibilitySql("$3", "id")}
-             ORDER BY CASE WHEN username ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, name ASC
-             LIMIT $4`,
-            [like, prefix, viewerId, limit]
-          )
+      const searchParams = viewerId === undefined ? [like, prefix, limit] : [like, prefix, viewerId, limit]
+      const limitParam = viewerId === undefined ? "$3" : "$4"
+      const accountVisibility = viewerId === undefined ? "" : ` AND ${viewerAuthorVisibilitySql("$3", "fa.account_id")}`
+      const actorVisibility = viewerId === undefined ? "" : ` AND ${viewerAuthorVisibilitySql("$3", "id")}`
+      const accountRows = try tx.query(
+        `SELECT fa.account_id AS id, fa.handle, fa.display_name, fa.avatar_url
+         FROM feed_accounts fa
+         LEFT JOIN accounts a ON a.key = fa.account_id
+         WHERE fa.is_reviewer = false
+           AND (a.key IS NULL OR a.status = 'active')
+           AND (fa.handle ILIKE $1 ESCAPE '\\' OR fa.display_name ILIKE $1 ESCAPE '\\')${accountVisibility}
+         ORDER BY CASE WHEN fa.handle ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, fa.handle ASC
+         LIMIT ${limitParam}`,
+        searchParams
+      )
+      const actorRows = try tx.query(
+        `SELECT id, username AS handle, name AS display_name, profile_image_url AS avatar_url
+         FROM feed_actors
+         WHERE id NOT LIKE 'test-%'
+           AND id NOT LIKE 'org-%'
+           AND (username ILIKE $1 ESCAPE '\\' OR name ILIKE $1 ESCAPE '\\')${actorVisibility}
+         ORDER BY CASE WHEN username ILIKE $2 ESCAPE '\\' THEN 0 ELSE 1 END, name ASC
+         LIMIT ${limitParam}`,
+        searchParams
+      )
       const users = accountRows.map((row) => ({
         id: toText(row.id) ?? "",
         handle: toText(row.handle) ?? "",

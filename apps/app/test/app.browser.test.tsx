@@ -781,6 +781,35 @@ async function mountCustomMockApp(options: {
   }
 }
 
+async function mountCustomHomeFeed(
+  items: ReadonlyArray<unknown>,
+  extra?: (path: string) => Promise<Response> | undefined,
+) {
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/feed") return Promise.resolve(Response.json({ items, nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+      return extra?.(path);
+    },
+  });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+  return page.getByRole("main");
+}
+
+async function mountCustomExploreArticles(articles: ReadonlyArray<{ readonly id: string }>) {
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles }));
+      const match = articles.find((article) => path === `/api/articles/${article.id}`);
+      if (match) return Promise.resolve(Response.json(match));
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  return page.getByRole("main");
+}
+
 async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
   const network = installMockNetwork(options ?? {});
   await renderApp();
@@ -912,16 +941,7 @@ it('Public post links preserve URL parentheses but not surrounding prose (spec/a
     ticker: null,
     cashtags: [],
   }));
-  await mountCustomMockApp({
-    handle(path) {
-      if (path === "/api/feed") return Promise.resolve(Response.json({ items: posts, nextCursor: null }));
-      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
-      return undefined;
-    },
-  });
-
-  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
-  const main = page.getByRole("main");
+  const main = await mountCustomHomeFeed(posts);
   await expect.element(main.getByRole("link", { name: club, exact: true })).toHaveAttribute("href", club);
   const orchardLinks = main.getByRole("link", { name: orchard, exact: true });
   await expect.element(orchardLinks.first()).toHaveAttribute("href", orchard);
@@ -1119,17 +1139,7 @@ it('Back from a News article restores the full article list (spec/app/navigation
     publishedAt: Date.now() - index * 60_000,
   }));
   const olderArticle = articles[5];
-  await mountCustomMockApp({
-    handle(path) {
-      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles }));
-      if (path === `/api/articles/${olderArticle.id}`) return Promise.resolve(Response.json(olderArticle));
-      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
-      return undefined;
-    },
-  });
-
-  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
-  const main = page.getByRole("main");
+  const main = await mountCustomExploreArticles(articles);
   const news = main.getByRole("tab", { name: "News", exact: true });
   await act(() => userEvent.click(news));
   const openArticle = main.getByRole("button", { name: `Read full article: ${olderArticle.title}` });
@@ -1233,16 +1243,7 @@ it('Post copy controls report the clipboard outcome (spec/app/navigation.md, "St
   const writeText = vi.spyOn(navigator.clipboard, "writeText")
     .mockRejectedValueOnce(new DOMException("Permission denied", "NotAllowedError"))
     .mockResolvedValueOnce(undefined);
-  await mountCustomMockApp({
-    handle(path) {
-      if (path === "/api/feed") return Promise.resolve(Response.json({ items: [post], nextCursor: null }));
-      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
-      return undefined;
-    },
-  });
-
-  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
-  const main = page.getByRole("main");
+  const main = await mountCustomHomeFeed([post]);
   const copied = page.getByText("Link copied to clipboard.", { exact: true });
   await act(() => userEvent.click(main.getByRole("button", { name: "Share post", exact: true })));
   await expect.element(page.getByText("Could not copy the post link.", { exact: true })).toBeInTheDocument();
@@ -1307,17 +1308,9 @@ it('Post detail uses the same local month as the rest of the timestamp (spec/app
   };
   const utcMonth = vi.spyOn(Date.prototype, "getUTCMonth").mockReturnValue(8);
   try {
-    await mountCustomMockApp({
-      handle(path) {
-        if (path === "/api/feed") return Promise.resolve(Response.json({ items: [post], nextCursor: null }));
-        if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
-        if (path === `/api/posts/${post.id}`) return Promise.resolve(Response.json({ post, ancestors: [], replies: [] }));
-        return undefined;
-      },
-    });
-
-    await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
-    const main = page.getByRole("main");
+    const main = await mountCustomHomeFeed([post], (path) =>
+      path === `/api/posts/${post.id}` ? Promise.resolve(Response.json({ post, ancestors: [], replies: [] })) : undefined,
+    );
     await act(() => userEvent.click(main.getByText(post.content, { exact: true })));
     await expect.element(main.getByText("12:05 AM · Oct 1, 2026", { exact: true })).toBeInTheDocument();
   } finally {
@@ -2265,18 +2258,7 @@ it('Opening another article replaces all paragraphs even when two share an opene
     body: `## Saturday opening\n\n${libraryParagraph}`,
     publishedAt: Date.now(),
   };
-  await mountCustomMockApp({
-    handle(path) {
-      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles: [library, garden] }));
-      if (path === `/api/articles/${garden.id}`) return Promise.resolve(Response.json(garden));
-      if (path === `/api/articles/${library.id}`) return Promise.resolve(Response.json(library));
-      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
-      return undefined;
-    },
-  });
-
-  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
-  const main = page.getByRole("main");
+  const main = await mountCustomExploreArticles([library, garden]);
   const earlier = main.getByText(firstParagraph, { exact: true });
   const later = main.getByText(secondParagraph, { exact: true });
   await act(() => userEvent.click(main.getByRole("button", { name: `Read full article: ${garden.title}` })));

@@ -379,12 +379,13 @@ function perpOrderFields(
       required: true,
       minimum: 1,
       maximum: 20,
-      description: leverageDescription,
-    }
+      description: leverageDescription
+    },
     mode: {
-    kind: "enum",
+      kind: "enum",
       values: ["flip"],
       description: "Flip the existing position to the opposite side instead of reducing it. Omit for the default open, add, or reduce behaviour."
+    }
   }
 }
 
