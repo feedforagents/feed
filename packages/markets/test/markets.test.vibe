@@ -1417,7 +1417,7 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
         holdingsAfterSell: [38_460],
         sellBeyondHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
         exactLimitSell: [38_460, 50_000, 600_080, 1_200, 1_200, 25_000_020],
-        holdingsAfterExactSell: [0],
+        holdingsAfterExactSell: [],
         secondNpcSellCode: "INSUFFICIENT_SPOT_INVENTORY",
         secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY"
       }
