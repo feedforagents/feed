@@ -1705,5 +1705,17 @@ it.effect("displayed liquidation price is the exact sweep boundary", () =>
     assert.deepStrictEqual(try sweepLiquidatedIds(), [])
     try setHundredCorpPrices(liqC)
     assert.deepStrictEqual(try sweepLiquidatedIds(), [shortC.position.id])
+
+    try setHundredCorpPrices(10_000)
+    try createVerifiedAccount("user-liq-d", "liqdave", 500_000)
+    const shortD = try openPerpPosition({ ownerId: "user-liq-d", ownerKind: "user", ticker: "HUND", side: "short", collateralCents: 1_000, leverage: 1 })
+    try TestClock.adjust(Duration.seconds(6 * 3_600))
+    try accruePerpFunding()
+    const heldD = try listPerpPositions("user-liq-d")
+    const liqD = heldD[0]?.liquidationPriceCents ?? 0
+    try setHundredCorpPrices(liqD - 1)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [])
+    try setHundredCorpPrices(liqD)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [shortD.position.id])
   })
 )
