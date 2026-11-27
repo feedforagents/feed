@@ -47,7 +47,7 @@ describe("sign out and the Latest feed load", () => {
     const signingOut = logout();
     pending.get("POST /api/auth/logout")?.resolve(jsonResponse({}));
     await tick();
-    pending.get("GET /api/feed")?.resolve(errorResponse());
+    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(errorResponse());
     await signingOut;
     const s = getStoreSnapshot();
     expect(s.viewer).toBeNull();
@@ -64,7 +64,7 @@ describe("sign out and the Latest feed load", () => {
     const signingOut = logout();
     pending.get("POST /api/auth/logout")?.resolve(jsonResponse({}));
     await tick();
-    pending.get("GET /api/feed")?.resolve(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201500000:latest-1" }));
+    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201500000:latest-1" }));
     await signingOut;
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
@@ -75,7 +75,7 @@ describe("sign out and the Latest feed load", () => {
     const pending = installDeferredFetch();
     seedFollowingPage();
     const loading = loadMoreFeed();
-    pending.get("GET /api/feed")?.resolve(errorResponse());
+    pending.get("GET /api/feed?tab=following&cursor=1764201600000%3Afollowing-1")?.resolve(errorResponse());
     await loading;
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["following-1"]);
