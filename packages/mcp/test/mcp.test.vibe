@@ -11,6 +11,7 @@ import {
   exchangeOAuthToken,
   getActiveAgentGrant,
   getLoopbackCode,
+  lookupDeviceCodeForUser,
   registerDynamicClient,
   startPhoneVerification,
   verifyPhoneCode,
@@ -66,6 +67,23 @@ module node {
   }
 
   /** @throws {never} */
+  export function installCimdFetch(cimdUrl: string, clientName: string, fetchedUrls: Array<string>): () => void {
+    const original = globalThis.fetch
+    globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const target = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+      fetchedUrls.push(target)
+      const found = target === cimdUrl
+      const body = found
+        ? { client_id: cimdUrl, client_name: clientName, redirect_uris: ["https://verified-agent.example/callback"], token_endpoint_auth_method: "none" }
+        : { error: "not_found" }
+      return new Response(JSON.stringify(body), { status: found ? 200 : 404, headers: { "content-type": "application/json" } })
+    }
+    return () => {
+      globalThis.fetch = original
+    }
+  }
+
+  /** @throws {never} */
   export function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
     if (left.byteLength !== right.byteLength) return false
     for (let index = 0; index < left.byteLength; index += 1) {
@@ -74,7 +92,7 @@ module node {
     return true
   }
 }
-import { bytesEqual, makeWebRequest, pkceS256Challenge, readDiskSkillBytes, readResponseBytes, sha256HexBytes } from node
+import { bytesEqual, installCimdFetch, makeWebRequest, pkceS256Challenge, readDiskSkillBytes, readResponseBytes, sha256HexBytes } from node
 
 const DISK_SKILL_URL = new URL("../../../skills/feed/SKILL.md", import.meta.url)
 
@@ -1169,6 +1187,41 @@ it.effect('MCP start_sign_in enforces the same 30/hr per-IP device-code budget a
     },
     { firstThirtyLimitedOk: true, thirtyFirstLimited: "rate_limited", unlimitedAllOk: true }
   ))
+}))
+
+it.effect('MCP start_sign_in shows the verified CIMD client_name at /link, not the caller clientName (spec/auth/oauth.md, "Clients register via CIMD or DCR for hosted callbacks or RFC 8252 loopback redirects only"; spec/auth/oauth.md, "Story: Authorize headless agents through RFC 8628 device flow at `/link`")', () => scoped(effect {
+  const cimdUrl = "https://verified-agent.example/oauth/client.json"
+  const unownedUrl = "https://unowned-agent.example/oauth/client.json"
+  const fetchedUrls: Array<string> = []
+  try acquireRelease(
+    sync(() => installCimdFetch(cimdUrl, "Verified Example Agent", fetchedUrls)),
+    (restore) => sync(restore)
+  )
+  try withSeededWorld(effect (authConfig) => {
+    const unowned = try callMcpTool(1, "start_sign_in", { clientId: unownedUrl, clientName: "Feed Official App" }, authConfig)
+    const verified = unwrapToolPayload(try callMcpTool(2, "start_sign_in", { clientId: cimdUrl.replace("https://", "HTTPS://"), clientName: "Feed Official App" }, authConfig))
+    const verifiedLookup = try lookupDeviceCodeForUser(String(verified.userCode ?? ""))
+    const fallback = unwrapToolPayload(try callMcpTool(3, "start_sign_in", {}, authConfig))
+    const fallbackLookup = try lookupDeviceCodeForUser(String(fallback.userCode ?? ""))
+    const limitedIp = { "cf-connecting-ip": "203.0.113.100" }
+    for (let i = 0; i < 30; i += 1) {
+      try callMcpTool(10 + i, "start_sign_in", {}, authConfig, undefined, limitedIp)
+    }
+    const rateLimitedCimd = try callMcpTool(50, "start_sign_in", { clientId: unownedUrl }, authConfig, undefined, limitedIp)
+    try check(() => {
+      assert.strictEqual(unwrapToolError(unowned).error, "invalid_client")
+      assert.strictEqual(isRateLimitedToolResult(rateLimitedCimd), true)
+      assert.deepStrictEqual(
+        [verified.clientId, verified.clientName, verifiedLookup.clientId, verifiedLookup.clientName],
+        [cimdUrl, "Verified Example Agent", cimdUrl, "Verified Example Agent"]
+      )
+      assert.deepStrictEqual(
+        [fallbackLookup.clientId, fallbackLookup.clientName, /^https?:\/\//i.test(fallbackLookup.clientId)],
+        [fallback.clientId, "Feed MCP Agent", false]
+      )
+      assert.deepStrictEqual(fetchedUrls, [unownedUrl, cimdUrl])
+    })
+  })
 }))
 
 effect function seedTestPerp(tx: Tx, ticker: string, now: number) {

@@ -63,8 +63,13 @@ export interface WorkerEnv extends Readonly<Record<string, unknown>> {
 }
 
 const bootstrappedConnections = new Set<string>()
-const workerIsolateId = randomIsolateId()
+let workerIsolateId: string | undefined
 const isolateBusRuntimes = new Map<string, ManagedRuntime.ManagedRuntime<RealtimeBus, never>>()
+
+function getWorkerIsolateId(): string {
+  workerIsolateId ??= randomIsolateId()
+  return workerIsolateId
+}
 
 function connectionStringForEnv(env: WorkerEnv): string | undefined {
   const hyperdriveUrl = env.HYPERDRIVE?.connectionString?.trim()
@@ -157,7 +162,7 @@ async function sharedRealtimeBusLayer(connectionString: string): Promise<Layer.L
   if (runtime === undefined) {
     runtime = ManagedRuntime.make(
       createDbBackedRealtimeBusLayer(perCheckWorkerStore(connectionString), {
-        isolateId: workerIsolateId
+        isolateId: getWorkerIsolateId()
       })
     )
     isolateBusRuntimes.set(connectionString, runtime)

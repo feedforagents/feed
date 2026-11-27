@@ -274,6 +274,7 @@ function installMockNetwork(
     holdLeaderboardScope?: string;
     holdPnlRange?: string;
     holdClosedPositionsFirst?: boolean;
+    holdEconomyFirst?: boolean;
     holdProfileReplies?: boolean;
     readonly perps?: ReadonlyArray<Record<string, unknown>>;
     readonly threadFetch?: (path: string) => Promise<Response> | null;
@@ -296,6 +297,8 @@ function installMockNetwork(
   const requestedPnlRanges = new Set<string>();
   const heldClosedPositions: Array<() => void> = [];
   let closedPositionsCalls = 0;
+  const heldEconomy: Array<() => void> = [];
+  let economyCalls = 0;
   const heldReplies = new Map<string, Array<(res: Response) => void>>();
   const requestedReplies = new Set<string>();
   profileShouldFail = false;
@@ -589,15 +592,17 @@ function installMockNetwork(
       return json(body);
     }
     if (path === "/api/economy/me") {
-      return json({
+      economyCalls += 1;
+      const fresh = options.holdEconomyFirst && economyCalls > 1;
+      const body = {
         economy: {
           accountId: viewerIsReviewer ? "acct-player-1" : "acct-email-1",
-          balanceCents: viewerBalanceCents,
+          balanceCents: fresh ? 9900 : viewerBalanceCents,
           positionValueCents: viewerIsReviewer ? 1028 : 0,
-          equityCents: viewerIsReviewer ? 11528 : viewerBalanceCents,
+          equityCents: fresh ? 10928 : viewerIsReviewer ? 11528 : viewerBalanceCents,
           startingGrantCents: 10000,
           totalFeesPaidCents: 10,
-          netProfitCents: viewerIsReviewer ? 1528 : 0,
+          netProfitCents: fresh ? 928 : viewerIsReviewer ? 1528 : 0,
         },
         ledger: [
           {
@@ -609,7 +614,13 @@ function installMockNetwork(
             createdAt: Date.now() - 3_600_000,
           },
         ],
-      });
+      };
+      if (options.holdEconomyFirst && economyCalls === 1) {
+        return new Promise<Response>((resolve) => {
+          heldEconomy.push(() => resolve(Response.json(body)));
+        });
+      }
+      return json(body);
     }
     if (path === "/api/explore") {
       const query = url.searchParams.get("q") ?? "";
@@ -706,6 +717,10 @@ function installMockNetwork(
     releaseClosedPositions: () => {
       for (const release of heldClosedPositions.splice(0)) release();
     },
+    economyRequested: () => economyCalls > 0,
+    releaseEconomy: () => {
+      for (const release of heldEconomy.splice(0)) release();
+    },
     repliesRequested: (handle: string) => requestedReplies.has(handle),
     releaseReplies: (handle: string, items: unknown[]) => {
       for (const release of heldReplies.get(handle)?.splice(0) ?? []) {
@@ -784,6 +799,14 @@ async function mountSignedInApp(options?: Parameters<typeof installMockNetwork>[
   await act(() => userEvent.click(signInBtn));
   await signInAsReviewer();
   return network;
+}
+
+async function selectSeedMarket(network: Awaited<ReturnType<typeof mountApp>>) {
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await act(() => Promise.resolve());
+  expect(network.historyRequested("1D")).toBe(true);
 }
 
 async function signInAsReviewer() {
@@ -938,11 +961,7 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
 it('Stale market history is dropped after switching ranges (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
   const network = await mountApp({ holdHistoryRange: "1D" });
 
-  act(() => {
-    storeActions.selectMarket("prediction", "seed-market-1");
-  });
-  await act(() => Promise.resolve());
-  expect(network.historyRequested("1D")).toBe(true);
+  await selectSeedMarket(network);
   expect(getStoreSnapshot().marketTimeRange).toBe("1D");
 
   await act(() => storeActions.setMarketTimeRange("1W"));
@@ -964,11 +983,7 @@ it('Market refresh in flight loads the newly selected market (spec/markets/predi
   expect(getStoreSnapshot().route).toBe("Markets");
   await act(() => storeActions.setMarketTimeRange("1D"));
 
-  act(() => {
-    storeActions.selectMarket("prediction", "seed-market-1");
-  });
-  await act(() => Promise.resolve());
-  expect(network.historyRequested("1D")).toBe(true);
+  await selectSeedMarket(network);
 
   network.releaseHistory("1D");
   await act(() => Promise.resolve());
@@ -1093,6 +1108,55 @@ it('Back from a News article restores the full article list (spec/app/navigation
   await expect.element(openArticle).toBeInTheDocument();
 });
 
+it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const tagged = {
+    ...SAMPLE_POSTS[0],
+    id: "tagged-gardens",
+    content: "Plant swap this Saturday #gardens",
+    marketId: null,
+    ticker: null,
+    marketBadge: null,
+    cashtags: [],
+    hashtags: ["gardens"],
+  };
+  const untagged = { ...tagged, id: "untagged-gardens", content: "Private gardens open Tuesday", hashtags: [] };
+  const article = { id: "garden-news", title: "Spring planting bulletin", body: "Community news", publishedAt: Date.now() };
+  let published = false;
+  await mountCustomMockApp({
+    handle(path, url) {
+      if (path === "/api/explore") {
+        return Promise.resolve(Response.json({
+          trending: [{ kind: "hashtag", tag: "#gardens", postCount: 1 }],
+          articles: published ? [article] : [],
+          search: { posts: url.searchParams.get("q") === "gardens" ? [tagged, untagged] : [] },
+        }));
+      }
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      if (path === "/api/trending/gardens") return Promise.resolve(Response.json({ tag: "gardens", posts: [tagged] }));
+      if (path === "/api/articles") return Promise.resolve(Response.json({ articles: published ? [article] : [] }));
+      return undefined;
+    },
+  });
+  act(() => { reconnectRealtime(); });
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  await act(() => userEvent.click(page.getByRole("main").getByRole("button", { name: /#gardens/ }).first()));
+  await expect.element(page.getByText(tagged.content, { exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/trending/gardens");
+
+  published = true;
+  act(() => {
+    liveEventSources.at(-1)?.dispatchEvent(new MessageEvent("article.published", {
+      data: JSON.stringify({ type: "article.published", articleId: article.id, organizationId: "org-community" }),
+    }));
+  });
+
+  expect(window.location.pathname).toBe("/trending/gardens");
+  await expect.element(page.getByRole("button", { name: "Clear tag" })).toBeInTheDocument();
+  await expect.element(page.getByText(tagged.content, { exact: true })).toBeInTheDocument();
+  await expect.element(page.getByText(untagged.content, { exact: true })).not.toBeInTheDocument();
+  await expect.element(page.getByText(article.title, { exact: true })).toBeInTheDocument();
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 
@@ -1176,6 +1240,27 @@ it('Stale closed positions are dropped after a newer refresh (spec/markets/econo
   expect(getStoreSnapshot().closedPositions).toHaveLength(1);
   expect(getStoreSnapshot().closedPositions[0]?.realizedPnlPts).toBe(222);
   expect(getStoreSnapshot().closedPositionsLoading).toBe(false);
+});
+
+it('Stale economy is dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountSignedInApp({ holdEconomyFirst: true });
+
+  act(() => {
+    void storeActions.loadEconomy();
+  });
+  await act(() => Promise.resolve());
+  expect(network.economyRequested()).toBe(true);
+
+  await act(() => storeActions.loadEconomy());
+  expect(getStoreSnapshot().economy?.balanceCents).toBe(9900);
+  expect(getStoreSnapshot().economy?.equityCents).toBe(10928);
+
+  network.releaseEconomy();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().economy?.balanceCents).toBe(9900);
+  expect(getStoreSnapshot().economy?.equityCents).toBe(10928);
+  expect(getStoreSnapshot().economyLoading).toBe(false);
 });
 
 it('Late replies never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
@@ -1961,4 +2046,36 @@ it('Stale thread fetch loses to a newer open (spec/app/navigation.md, "Story: Br
     expect(getStoreSnapshot().activeThread?.post.card.id).toBe("browser-post-2");
   });
   await expect.element(page.getByText("Second post for the stale thread fetch probe.")).toBeInTheDocument();
+});
+
+it('Shows the not-found screen when a reply disappears before opening (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const parent = { ...SAMPLE_THREAD.post, content: "Plant swap on Saturday.", marketId: null, marketBadge: null, ticker: null, cashtags: [] };
+  const reply = {
+    ...parent,
+    id: "removed-reply",
+    replyToPostId: parent.id,
+    content: "I'll bring some extra seeds.",
+  };
+  installMockNetwork({
+    threadFetch: (path) => {
+      if (path === `/api/posts/${parent.id}`) {
+        return Promise.resolve(Response.json({ ...SAMPLE_THREAD, post: parent, replies: [reply] }));
+      }
+      if (path === `/api/posts/${reply.id}`) {
+        return Promise.resolve(Response.json({ error: "Post not found" }, { status: 404 }));
+      }
+      return null;
+    },
+  });
+  await openThreadDetail();
+  await expect.element(page.getByText(parent.content, { exact: true })).toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByText(reply.content, { exact: true })));
+  expect(window.location.pathname).toBe(`/post/${reply.id}`);
+  await expect.element(page.getByRole("button", { name: "Back to Home" })).toBeInTheDocument();
+  await expect.element(page.getByText(parent.content, { exact: true })).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(page.getByText(parent.content, { exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe(`/post/${parent.id}`);
 });

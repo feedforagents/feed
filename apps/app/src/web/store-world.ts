@@ -78,6 +78,7 @@ let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
 let pnlHistoryRequestSeq = 0;
 let closedPositionsLoadCount = 0;
+let economyLoadCount = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -392,7 +393,12 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   threadRequestSeq += 1;
   const requestSeq = threadRequestSeq;
   const engagementAtStart = captureEngagement();
-  setStoreState({ threadLoading: true, activePostId: postId, threadSort: sort });
+  setStoreState({
+    threadLoading: true,
+    activePostId: postId,
+    threadSort: sort,
+    activeThread: s.activeThread?.post.card.id === postId ? s.activeThread : null,
+  });
   recordPublicView("PostDetail");
   const baseUrl = `/api/posts/${encodeURIComponent(postId)}?sort=${encodeURIComponent(sort)}`;
   const res = await requestJson(appendAnonymousModeParam(baseUrl, s), {
@@ -476,10 +482,23 @@ export async function createPost(
     const matchesActiveMarket =
       (options?.ticker && cur.selectedMarketKind === "perp" && cur.selectedMarketId?.toUpperCase() === options.ticker.toUpperCase()) ||
       (options?.marketId && cur.selectedMarketKind === "prediction" && cur.selectedMarketId === options.marketId);
+    const bundle = cur.profileBundle;
+    const bundleIsAuthor =
+      bundle !== null && bundle.summary.handle.toLowerCase() === res.data.card.authorHandle.toLowerCase();
+    const bundleHasPost = bundleIsAuthor && bundle.posts.some((p) => p.card.id === res.data?.card.id);
     setStoreState({
       feedPosts: [res.data, ...cur.feedPosts.filter((p) => p.card.id !== res.data?.card.id)],
       ...(matchesActiveMarket
         ? { marketSocialPosts: [res.data, ...cur.marketSocialPosts.filter((p) => p.card.id !== res.data?.card.id)] }
+        : {}),
+      ...(bundleIsAuthor && !bundleHasPost
+        ? {
+            profileBundle: {
+              ...bundle,
+              posts: [res.data, ...bundle.posts],
+              postsCount: bundle.postsCount + 1,
+            },
+          }
         : {}),
     });
   } else {
@@ -798,8 +817,10 @@ export async function jumpToMyLeaderboardRank(): Promise<void> {
 
 export async function loadEconomy(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const loadId = ++economyLoadCount;
   setStoreState({ economyLoading: true });
   const res = await requestJson("/api/economy/me", { parse: decodeEconomy });
+  if (loadId !== economyLoadCount) return;
   if (res.ok) {
     setStoreState({
       economy: res.data.economy,

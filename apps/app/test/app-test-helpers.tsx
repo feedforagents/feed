@@ -34,6 +34,62 @@ export function makeViewerSession(overrides: Partial<ViewerSession> = {}): Viewe
   };
 }
 
+export function makeRawPost(createdAt: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "post-x",
+    authorId: "alice",
+    authorKind: "user",
+    authorHandle: "alice",
+    authorDisplayName: "Alice Player",
+    content: "Alice market note",
+    replyToPostId: null,
+    quotePostId: null,
+    quotePost: null,
+    repostedByHandle: null,
+    repostedByName: null,
+    likeCount: 0,
+    repostCount: 0,
+    replyCount: 0,
+    likedByViewer: false,
+    repostedByViewer: false,
+    createdAt,
+    ...overrides,
+  };
+}
+
+export function makeRawProfileBundle(input: {
+  readonly handle: string;
+  readonly displayName: string;
+  readonly createdAt: number;
+  readonly postsCount: number;
+  readonly posts: ReadonlyArray<Record<string, unknown>>;
+}): Record<string, unknown> {
+  return {
+    profile: {
+      id: input.handle,
+      kind: "user",
+      handle: input.handle,
+      displayName: input.displayName,
+      bio: "",
+      avatarUrl: null,
+      bannerUrl: null,
+      createdAt: input.createdAt,
+      followersCount: 0,
+      followingCount: 0,
+      postsCount: input.postsCount,
+      viewerFollows: false,
+      viewerFollowedBy: false,
+      viewerBlocks: false,
+      viewerBlockedBy: false,
+      viewerMutes: false,
+      isParody: false,
+    },
+    posts: input.posts,
+    nextCursor: null,
+    positions: { predictionPositions: [], perpPositions: [] },
+  };
+}
+
 export function requestUrl(input: RequestInfo | URL, base = window.location.origin): URL {
   const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
   return new URL(raw, base);
