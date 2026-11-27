@@ -1763,6 +1763,9 @@ export async function updateOwnProfile(payload: {
   setStatusNotice("Profile updated.");
   if (s.route === "Profile" && s.profileBundle?.summary.isOwnProfile) {
     await loadProfile(s.viewer.handle);
+    if (getStoreSnapshot().profileReplies.length > 0) {
+      await loadProfileReplies(s.viewer.handle);
+    }
   }
   return true;
 }
