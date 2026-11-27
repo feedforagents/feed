@@ -1172,6 +1172,39 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       [logoutRes.status, reusedCookieEconomyRes.status, reusedCookieMeBody.authenticated, repeatLogoutRes.status, secondCookieMeAfterLogout.authenticated, logoutClearsCookie],
       [200, 401, false, 200, true, true]
     ))
+
+    // spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"
+    const explorePeople = effect (query: string) => {
+      const body = try readJson(try callApp(`/api/explore?q=${query}`))
+      return (body.search as { readonly accounts: ReadonlyArray<Record<string, unknown>> }).accounts.map((account) => account.handle)
+    }
+    const peopleBeforeDelete = try explorePeople("parity_alice")
+    const deleteAccountRes = try callApp("/api/auth/account/delete", { method: "POST", cookie: secondCookie })
+    const mcpSearchAfterDelete = try readJson(try callApp("/mcp", {
+      json: { jsonrpc: "2.0", id: 90, method: "tools/call", params: { name: "search", arguments: { query: "deleted", kind: "users" } } }
+    }))
+    const mcpPeopleAfterDelete = ((mcpSearchAfterDelete.result as Record<string, unknown>).structuredContent as { readonly accounts: ReadonlyArray<Record<string, unknown>> }).accounts
+    const mentionSearchAfterDelete = (try readJson(try callApp("/api/users/search?q=deleted"))).items
+    const explorePeopleAfterDelete = try explorePeople("deleted")
+    const activePeopleAfterDelete = try explorePeople("parity_bob")
+    try check(() => assert.deepStrictEqual(
+      {
+        peopleBeforeDelete,
+        deleteStatus: deleteAccountRes.status,
+        explorePeopleAfterDelete,
+        activePeopleAfterDelete,
+        mcpPeopleAfterDelete: mcpPeopleAfterDelete.map((account) => account.handle),
+        mentionSearchAfterDelete
+      },
+      {
+        peopleBeforeDelete: ["parity_alice"],
+        deleteStatus: 200,
+        explorePeopleAfterDelete: [],
+        activePeopleAfterDelete: ["parity_bob"],
+        mcpPeopleAfterDelete: [],
+        mentionSearchAfterDelete: []
+      }
+    ))
   }
 }, 180_000)
 

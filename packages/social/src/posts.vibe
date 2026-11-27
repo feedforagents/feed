@@ -1606,7 +1606,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const mode = input.mode ?? (try readViewerUiModeTx(tx, viewerId))
-    const accountWhere = "is_reviewer = false AND (lower(handle) LIKE $1 ESCAPE '\\' OR lower(display_name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(display_name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\')"
+    const accountWhere = "is_reviewer = false AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = feed_accounts.account_id AND a.status <> 'active') AND (lower(handle) LIKE $1 ESCAPE '\\' OR lower(display_name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(display_name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\')"
     const accountOrder = "CASE WHEN lower(handle) = $3 OR lower(display_name) = $3 THEN 0 WHEN lower(handle) LIKE $4 ESCAPE '\\' OR lower(display_name) LIKE $4 ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC"
     const accountRows = viewerId === undefined
       ? try tx.query(
