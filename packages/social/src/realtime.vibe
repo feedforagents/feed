@@ -25,6 +25,7 @@ export type FeedRealtimeEvent =
       readonly postId: string
       readonly kind: "like" | "unlike" | "repost" | "unrepost"
       readonly accountId: string
+      readonly postAuthorId?: string
       readonly likeCount: number
       readonly repostCount: number
     }
@@ -456,6 +457,34 @@ effect function isNotificationDeliverableInStore(
   }))
 }
 
+effect function isPostEngagementAuthorVisibleInStore(
+  store: Store.Shape | undefined,
+  viewerId: string,
+  event: Extract<FeedRealtimeEvent, { readonly type: "post.engagement" }>
+): boolean!! {
+  const fieldAuthorId = event.postAuthorId ?? null
+  if (fieldAuthorId !== null && fieldAuthorId !== "") {
+    if (fieldAuthorId === viewerId) return true
+    return try isAuthorVisibleInStore(store, viewerId, fieldAuthorId)
+  }
+  if (store === undefined) return false
+  return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      "SELECT author_id FROM feed_posts WHERE id = $1 LIMIT 1",
+      [event.postId]
+    )
+    const postAuthorId = toText(rows[0]?.author_id) ?? ""
+    if (postAuthorId === "") return false
+    if (postAuthorId === viewerId) return true
+    const visRows = try tx.query(
+      "SELECT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = $2) OR (b.blocker_id = $2 AND b.blocked_id = $1)) AS is_blocked, EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = $1 AND m.muted_id = $2) AS is_muted",
+      [viewerId, postAuthorId]
+    )
+    const row = visRows[0]
+    if (row === undefined) return false
+    return !row.is_blocked && !row.is_muted
+  }))
+}
 export effect function canDeliverRealtimeEventToViewer(
   store: Store.Shape | undefined,
   event: FeedRealtimeEvent,
@@ -477,7 +506,9 @@ export effect function canDeliverRealtimeEventToViewer(
     case "post.deleted":
       return viewerId === undefined ? true : try isAuthorVisibleInStore(store, viewerId, event.authorId)
     case "post.engagement":
-      return viewerId === undefined ? true : try isAuthorVisibleInStore(store, viewerId, event.accountId)
+      if (viewerId === undefined) return true
+      if (!try isAuthorVisibleInStore(store, viewerId, event.accountId)) return false
+      return try isPostEngagementAuthorVisibleInStore(store, viewerId, event)
     case "chat.message":
       return viewerId === undefined
         ? false
