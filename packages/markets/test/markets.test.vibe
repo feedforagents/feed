@@ -1476,6 +1476,29 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
       side: "sell",
       quoteCents: 100
     }))
+    // spec/markets/economy.md, "Initial grants are fixed at 100 pts, balances stay non-negative, and net profit excludes only the starting grant"
+    const npcBoardRow = effect () => {
+      const board = try getLeaderboard({ scope: "characters", metric: "net_profit", page: 1, pageSize: 200 })
+      const row = board.entries.find((entry) => entry.accountId === "ailon-musk")!
+      return [row.startingGrantCents, row.netProfitCents]
+    }
+    const boardBeforeTslaDrain = try npcBoardRow()
+    const tslaDrain = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "TSLAI",
+      side: "sell",
+      quoteCents: 1_719_026
+    })
+    const holdingsAfterTslaDrain = try holdingsFor("ailon-musk", "TSLAI")
+    const boardAfterTslaDrain = try npcBoardRow()
+    try seedFeedWorld()
+    const holdingsAfterReseed = try holdingsFor("ailon-musk", "TSLAI")
+    const resellAfterReseedCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "TSLAI",
+      side: "sell",
+      quoteCents: 100
+    }))
     try check(() => assert.deepStrictEqual(
       {
         seededTslaHoldings: seededTslaHoldings.map((row) => toInt(row.base_units)),
@@ -1491,7 +1514,13 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
         exactLimitSell: [exactLimitSell.baseDelta, exactLimitSell.baseReserve, exactLimitSell.quoteReserveCents, exactLimitSell.indexPriceCents, exactLimitSell.markPriceCents, exactLimitSell.balanceAfterCents],
         holdingsAfterExactSell: holdingsAfterExactSell.map((row) => toInt(row.base_units)),
         secondNpcSellCode,
-        secondTickerSellCode
+        secondTickerSellCode,
+        tslaDrainBaseDelta: tslaDrain.baseDelta,
+        holdingsAfterTslaDrain: holdingsAfterTslaDrain.map((row) => toInt(row.base_units)),
+        boardBeforeTslaDrain,
+        boardAfterTslaDrain,
+        holdingsAfterReseed: holdingsAfterReseed.map((row) => toInt(row.base_units)),
+        resellAfterReseedCode
       },
       {
         seededTslaHoldings: [8_164],
@@ -1505,9 +1534,15 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
         holdingsAfterSell: [38_460],
         sellBeyondHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
         exactLimitSell: [38_460, 50_000, 600_080, 1_200, 1_200, 25_000_020],
-        holdingsAfterExactSell: [],
+        holdingsAfterExactSell: [0],
         secondNpcSellCode: "INSUFFICIENT_SPOT_INVENTORY",
-        secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY"
+        secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY",
+        tslaDrainBaseDelta: 8_163,
+        holdingsAfterTslaDrain: [0],
+        boardBeforeTslaDrain: [36_501_164, -307],
+        boardAfterTslaDrain: [36_501_164, -281_134],
+        holdingsAfterReseed: [0],
+        resellAfterReseedCode: "INSUFFICIENT_SPOT_INVENTORY"
       }
     ))
   })

@@ -586,12 +586,6 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
         "UPDATE feed_npc_spot_holdings SET base_units = base_units - $3, updated_at = $4 WHERE actor_id = $1 AND ticker = $2",
         [input.actorId, input.ticker, baseDelta, now]
       )
-      if (heldBase === baseDelta) {
-        try tx.query(
-          "DELETE FROM feed_npc_spot_holdings WHERE actor_id = $1 AND ticker = $2",
-          [input.actorId, input.ticker]
-        )
-      }
       cashDelta = input.quoteCents
     }
     const nextIndexPriceCents = safeIndexPriceCents(nextQuote, nextBase)
