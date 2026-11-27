@@ -289,8 +289,13 @@ function ExploreMarketsList() {
 }
 
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
-  const { activeArticleId } = useAppStore();
-  const [browseTab, setBrowseTab] = useState<BrowseTab>("trending");
+  const { activeArticleId, exploreNewsRequest } = useAppStore();
+  const [browseTab, setBrowseTab] = useState<BrowseTab>(exploreNewsRequest === null ? "trending" : "news");
+  const [handledNewsRequest, setHandledNewsRequest] = useState(exploreNewsRequest);
+  if (exploreNewsRequest !== null && exploreNewsRequest !== handledNewsRequest) {
+    setHandledNewsRequest(exploreNewsRequest);
+    setBrowseTab("news");
+  }
   return activeArticleId
     ? <ArticleDetailScreen mode={mode} />
     : <ExploreBrowseScreen mode={mode} browseTab={browseTab} setBrowseTab={setBrowseTab} />;

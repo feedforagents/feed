@@ -963,6 +963,47 @@ it('Public post links preserve URL parentheses but not surrounding prose (spec/a
   expect(orchardLinks.elements()).toHaveLength(2);
 });
 
+it('Latest News See all opens the full News list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const articles = Array.from({ length: 6 }, (_, index) => ({
+    id: `garden-story-${index + 1}`,
+    title: `Garden club story ${index + 1}`,
+    body: "Community event news.",
+    publishedAt: Date.now() - index * 60_000,
+  }));
+  const older = articles[5];
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles }));
+      if (path === `/api/articles/${older.id}`) return Promise.resolve(Response.json(older));
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+  const home = page.getByRole("button", { name: "Home", exact: true }).first();
+  const explore = page.getByRole("button", { name: "Explore", exact: true }).first();
+  const main = page.getByRole("main");
+  const news = main.getByRole("tab", { name: "News", exact: true });
+  const olderArticle = main.getByRole("button", { name: `Read full article: ${older.title}`, exact: true });
+  await act(() => userEvent.click(explore));
+  await expect.element(main.getByRole("heading", { name: "Top Stories", exact: true })).toBeInTheDocument();
+  await act(() => userEvent.click(home));
+  const latestNews = page.getByRole("region", { name: "Latest news" });
+  await act(() => userEvent.click(latestNews.getByRole("button", { name: "See all", exact: true })));
+  await expect.element(news).toHaveAttribute("aria-selected", "true");
+  await expect.element(olderArticle).toBeInTheDocument();
+
+  await act(() => userEvent.click(olderArticle));
+  await expect.element(main.getByRole("heading", { name: older.title, exact: true })).toBeInTheDocument();
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(news).toHaveAttribute("aria-selected", "true");
+  await expect.element(olderArticle).toBeInTheDocument();
+
+  await act(() => userEvent.click(home));
+  await act(() => userEvent.click(explore));
+  await expect.element(main.getByRole("tab", { name: "Trending", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect.element(olderArticle).not.toBeInTheDocument();
+});
+
 it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
   await mountAppAtHome();
 

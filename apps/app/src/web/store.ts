@@ -260,7 +260,7 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
   }
 }
 
-function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
+function applyParsedLocation(parsed: ReturnType<typeof parseLocation>, exploreNewsRequest: number | null = null): void {
   const prevPostId = getStoreSnapshot().activePostId;
   if (prevPostId !== null && parsed.postId !== prevPostId) {
     clearReplyFailureNotice(prevPostId);
@@ -295,6 +295,7 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
     activePostId: parsed.postId,
     activeArticleId: parsed.articleId,
     activeTrendingTag: parsed.trendingTag,
+    exploreNewsRequest,
     walletView: parsed.walletView,
     ...(parsed.exploreQuery !== null ? { exploreQuery: parsed.exploreQuery } : {}),
     ...(parsed.settingsTab ? { settingsTab: parsed.settingsTab } : {}),
@@ -373,7 +374,7 @@ async function redirectToHome(options?: { readonly replace?: boolean }): Promise
   await loadFeed();
 }
 
-export async function navigate(path: string): Promise<void> {
+async function navigateWithNewsRequest(path: string, exploreNewsRequest: number | null): Promise<void> {
   const url = new URL(path, "https://feed.local");
   const parsed = parseLocation(url.pathname, url.search);
   clearNotices();
@@ -400,8 +401,18 @@ export async function navigate(path: string): Promise<void> {
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
   sendApp({ type: "navigateApp", targetRoute: parsed.route });
   recordPublicView(parsed.route);
-  applyParsedLocation(parsed);
+  applyParsedLocation(parsed, exploreNewsRequest);
   await loadDataForRoute(parsed.route, url.search);
+}
+
+export function navigate(path: string): Promise<void> {
+  return navigateWithNewsRequest(path, null);
+}
+
+let nextExploreNewsRequest = 0;
+
+function openExploreNews(): void {
+  void navigateWithNewsRequest("/explore", ++nextExploreNewsRequest);
 }
 
 export function navigateRoute(route: AppNavRoute): void {
@@ -758,6 +769,7 @@ function openPredictionQuickTrade(marketId: string, side: "yes" | "no"): void {
 
 export const storeActions = {
   navigate,
+  openExploreNews,
   navigateTargetUrl,
   openPredictionQuickTrade,
   navigateRoute,

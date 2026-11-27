@@ -174,7 +174,7 @@ export function RightRail({ mode }: { readonly mode: UiMode }) {
             <h2 className="text-base font-bold text-foreground">Latest News</h2>
             <button
               type="button"
-              onClick={() => { void storeActions.navigate("/explore"); }}
+              onClick={storeActions.openExploreNews}
               className="text-xs font-medium text-primary hover:underline"
             >
               See all
