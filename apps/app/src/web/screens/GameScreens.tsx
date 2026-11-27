@@ -298,7 +298,7 @@ export function WalletScreen() {
                 void storeActions.navigate(`/markets/perps/${encodeURIComponent(found.marketId)}`);
                 return;
               }
-              void storeActions.navigate(`/markets/predictions/${encodeURIComponent(found.marketId)}`);
+              storeActions.openPredictionQuickTrade(found.marketId, found.rawSide === "no" ? "no" : "yes");
             }}
             onClosePosition={(id) => {
               const found = openPositions.find((pos) => pos.row.id === id);

@@ -2,40 +2,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { toggleFollow } from "../src/web/store-world.ts";
-import { aliceViewer, resetModerationStore } from "./moderation-fixtures.ts";
+import { aliceViewer, makeProfileBundle, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
-function bundle(handle: string, displayName: string, followersCount: number, followingCount: number, isOwnProfile: boolean) {
-  return {
-    summary: {
-      displayName,
-      handle,
-      followersCount,
-      followingCount,
-      isFollowing: false,
-      isMuted: false,
-      isBlocked: false,
-      isOwnProfile,
-    },
-    id: handle,
-    kind: "user" as const,
-    postsCount: 0,
-    createdAtMs: 0,
-    actorMeta: null,
-    orgMeta: null,
-    viewerFollowedBy: false,
-    viewerBlockedBy: false,
-    tradeCount: null,
-    openPositionCount: null,
-    posts: [],
-    postsNextCursor: null,
-    positions: [],
-  };
-}
+const bobBundle = () => makeProfileBundle("bob", "Bob Trader", 6, 4, false);
+const aliceBundle = () => makeProfileBundle("alice", "Alice Player", 2, 4, true);
 
-const bobBundle = () => bundle("bob", "Bob Trader", 6, 4, false);
-const aliceBundle = () => bundle("alice", "Alice Player", 2, 4, true);
-
-function openProfile(profileBundle: ReturnType<typeof bundle>, profileHandle: string) {
+function openProfile(profileBundle: ReturnType<typeof makeProfileBundle>, profileHandle: string) {
   setStoreState({ viewer: aliceViewer, profileBundle, profileHandle, route: "Profile" });
 }
 
@@ -45,24 +17,17 @@ function pendingResponse() {
   return { promise, resolve: (res: Response) => resolve(res) };
 }
 
-function stubFetch(handler: (url: string) => Promise<Response>) {
-  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    return handler(url);
-  });
-}
-
 function beginFollow(profileBundle = bobBundle(), profileHandle = "bob") {
   openProfile(profileBundle, profileHandle);
   const follow = pendingResponse();
-  stubFetch(() => follow.promise);
+  stubFetchUrl(() => follow.promise);
   return { follow, pending: toggleFollow("bob", false) };
 }
 
 function beginFollowWithProfileResponse(response: Response) {
   openProfile(bobBundle(), "bob");
   const follow = pendingResponse();
-  stubFetch((url) => url.includes("/follow") ? follow.promise : Promise.resolve(response));
+  stubFetchUrl((url) => url.includes("/follow") ? follow.promise : Promise.resolve(response));
   return { follow, pending: toggleFollow("bob", false) };
 }
 

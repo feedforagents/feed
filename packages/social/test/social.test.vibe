@@ -46,6 +46,7 @@ import {
   personalizePostDeletedEvent,
   reactToMessage,
   realtimeBusLayer,
+  realtimeEventForViewer,
   removeGroupMember,
   renameGroupChat,
   reportTarget,
@@ -524,6 +525,84 @@ it.effect(
 )
 
 it.effect(
+  'following feed with replies included only shows followed users and self (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+    try followAccount("alice", "bob")
+    const alicePost = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Alice following-feed post"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const bobPost = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob following-feed post"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const carolPost = try createPost({
+      authorId: "carol",
+      authorKind: "user",
+      content: "Carol unfollowed post"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const bobReply = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob reply to Alice",
+      replyToPostId: alicePost.id
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const carolReply = try createPost({
+      authorId: "carol",
+      authorKind: "user",
+      content: "Carol reply to Alice",
+      replyToPostId: alicePost.id
+    })
+    const withReplies = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, includeReplies: true })
+    const filterAll = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, filter: "all" })
+    const onlyReplies = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, onlyReplies: true })
+    const filterReplies = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, filter: "replies" })
+    const postsOnly = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+    try check(() => assert.deepStrictEqual({
+      withReplies: [
+        withReplies.items.some((p) => p.id === alicePost.id),
+        withReplies.items.some((p) => p.id === bobPost.id),
+        withReplies.items.some((p) => p.id === bobReply.id),
+        withReplies.items.some((p) => p.id === carolPost.id),
+        withReplies.items.some((p) => p.id === carolReply.id)
+      ],
+      filterAll: [
+        filterAll.items.some((p) => p.id === bobReply.id),
+        filterAll.items.some((p) => p.id === carolPost.id),
+        filterAll.items.some((p) => p.id === carolReply.id)
+      ],
+      onlyReplies: [
+        onlyReplies.items.some((p) => p.id === bobReply.id),
+        onlyReplies.items.some((p) => p.id === carolReply.id)
+      ],
+      filterReplies: [
+        filterReplies.items.some((p) => p.id === bobReply.id),
+        filterReplies.items.some((p) => p.id === carolReply.id)
+      ],
+      postsOnly: [
+        postsOnly.items.some((p) => p.id === alicePost.id),
+        postsOnly.items.some((p) => p.id === bobPost.id),
+        postsOnly.items.some((p) => p.id === bobReply.id),
+        postsOnly.items.some((p) => p.id === carolPost.id)
+      ]
+    }, {
+      withReplies: [true, true, true, false, false],
+      filterAll: [true, false, false],
+      onlyReplies: [true, false],
+      filterReplies: [true, false],
+      postsOnly: [true, true, false, false]
+    }))
+  })
+)
+
+it.effect(
   'DMs, user groups, reactions, retired team chat refusal, and NPC alpha invites (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
   () => withSocialWorld(effect {
     try seedChatParticipants()
@@ -915,6 +994,20 @@ it.effect(
       anonymousViewer: try canDeliverRealtimeEventToViewer(store, userPerpEvent("carol"), null),
       brokenStore: try canDeliverRealtimeEventToViewer(brokenStore, userPerpEvent("carol"), "bob")
     }
+    // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
+    const aggregateFrame = { type: "world.tick", kind: "market", refId: "NVDAI", createdAt: try Clock.currentTimeMillis }
+    const perpFrames = {
+      viewerBlocksTrader: try realtimeEventForViewer(store, userPerpEvent("carol"), "alice"),
+      traderBlocksViewer: try realtimeEventForViewer(store, { type: "market.perp", action: "close", actorId: "alice", ticker: "NVDAI", side: "short", sizeCents: 1, leverage: 20, positionId: "pos-alice" }, "carol"),
+      viewerMutesTrader: try realtimeEventForViewer(store, userPerpEvent("bob"), "alice"),
+      unrelatedGameViewer: try realtimeEventForViewer(store, userPerpEvent("carol"), "bob"),
+      socialModeViewer: try realtimeEventForViewer(store, userPerpEvent("carol"), "dave"),
+      socialModeOwnTrade: try realtimeEventForViewer(store, userPerpEvent("dave"), "dave"),
+      anonymousViewer: try realtimeEventForViewer(store, userPerpEvent("carol"), null),
+      brokenStore: try realtimeEventForViewer(brokenStore, userPerpEvent("carol"), "alice"),
+      otherEventKept: try realtimeEventForViewer(store, inviteEvent, "alice"),
+      otherEventDropped: try realtimeEventForViewer(store, inviteEvent, "bob")
+    }
 
     try check(() => assert.deepStrictEqual({
       rateKeys: [
@@ -973,7 +1066,8 @@ it.effect(
         sseFailClosedBrokenStoreChat,
         sseFailClosedMissingStoreChat
       ],
-      perpStream
+      perpStream,
+      perpFrames
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -1025,6 +1119,18 @@ it.effect(
         socialModeOwnTrade: false,
         anonymousViewer: true,
         brokenStore: false
+      },
+      perpFrames: {
+        viewerBlocksTrader: aggregateFrame,
+        traderBlocksViewer: aggregateFrame,
+        viewerMutesTrader: userPerpEvent("bob"),
+        unrelatedGameViewer: userPerpEvent("carol"),
+        socialModeViewer: undefined,
+        socialModeOwnTrade: undefined,
+        anonymousViewer: userPerpEvent("carol"),
+        brokenStore: undefined,
+        otherEventKept: inviteEvent,
+        otherEventDropped: undefined
       }
     }))
   })
@@ -1137,6 +1243,43 @@ it.effect(
       ]
     }))
   })
+)
+
+it.effect(
+  'paginates older For You fallback posts without changing the recent window (spec/social/posts.md, "Story: Like, repost, follow, and block enforcement")',
+  () => effect {
+    try TestClock.setTime(1_760_000_000_000)
+    provide localStoreLayer({ kind: "pglite", file: undefined }), realtimeBusLayer {
+      try migrateFeedSchema()
+      try seedAccount("gardener", "gardener", "Garden Club")
+      for (let i = 0; i < 27; i += 1) {
+        try createPost({ authorId: "gardener", authorKind: "user", content: `Garden club notice ${i + 1}` })
+      }
+      try TestClock.adjust(Duration.hours(25))
+
+      const oldFirst = try listFeedPosts({ tab: "top", limit: 25 })
+      const oldSecond = try listFeedPosts({ tab: "top", cursor: oldFirst.nextCursor ?? undefined, limit: 25 })
+      try TestClock.adjust(Duration.seconds(1))
+      for (let i = 0; i < 27; i += 1) {
+        try createPost({ authorId: "gardener", authorKind: "user", content: `Fresh garden notice ${i + 1}` })
+      }
+      const oldContinuation = try listFeedPosts({ tab: "top", cursor: oldFirst.nextCursor ?? undefined, limit: 25 })
+      const recentFirst = try listFeedPosts({ tab: "top", limit: 25 })
+      const recentSecond = try listFeedPosts({ tab: "top", cursor: recentFirst.nextCursor ?? undefined, limit: 25 })
+      try check(() => {
+        assert.lengthOf(oldFirst.items, 25)
+        assert.isString(oldFirst.nextCursor)
+        assert.lengthOf(oldSecond.items, 2)
+        assert.isNull(oldSecond.nextCursor)
+        assert.deepStrictEqual(oldContinuation.items.map((p) => p.id), oldSecond.items.map((p) => p.id))
+        assert.lengthOf(recentFirst.items, 25)
+        assert.isString(recentFirst.nextCursor)
+        assert.lengthOf(recentSecond.items, 2)
+        assert.isNull(recentSecond.nextCursor)
+        assert.isTrue(recentSecond.items.every((p) => p.content.startsWith("Fresh garden notice")))
+      })
+    }
+  }
 )
 
 it.effect(

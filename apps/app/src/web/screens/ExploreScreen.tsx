@@ -19,6 +19,7 @@ import { SearchIcon, XIcon } from "../icons.tsx";
 import { FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
 import type { AppArticle } from "../types.ts";
+import { ArticleDetailScreen } from "./ArticleDetailScreen.tsx";
 
 type BrowseTab = "trending" | "news" | "people" | "orgs" | "markets";
 type SearchTab = "top" | "latest" | "people" | "orgs" | "markets";
@@ -288,10 +289,21 @@ function ExploreMarketsList() {
 }
 
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
+  const { activeArticleId } = useAppStore();
+  const [browseTab, setBrowseTab] = useState<BrowseTab>("trending");
+  return activeArticleId
+    ? <ArticleDetailScreen mode={mode} />
+    : <ExploreBrowseScreen mode={mode} browseTab={browseTab} setBrowseTab={setBrowseTab} />;
+}
+
+function ExploreBrowseScreen({ mode, browseTab, setBrowseTab }: {
+  readonly mode: UiMode;
+  readonly browseTab: BrowseTab;
+  readonly setBrowseTab: (tab: BrowseTab) => void;
+}) {
   const s = useAppStore();
   const [draftQuery, setDraftQuery] = useState(s.exploreQuery);
   const [syncedQuery, setSyncedQuery] = useState(s.exploreQuery);
-  const [browseTab, setBrowseTab] = useState<BrowseTab>("trending");
   const [searchTab, setSearchTab] = useState<SearchTab>("top");
 
   if (s.exploreQuery !== syncedQuery) {

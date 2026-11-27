@@ -147,6 +147,7 @@ export {
   personalizePostDeletedEvent,
   publishFeedEvent,
   realtimeBusLayer,
+  realtimeEventForViewer,
   subscribeFeedEvents,
   subscribeViewerFeedEvents,
   toSseReadableStream,
@@ -155,3 +156,5 @@ export {
   type SseResponseOptions,
   type SseStreamOptions
 } from "./realtime.vibe"
+
+export { viewerAuthorVisibilitySql } from "./visibility.vibe"

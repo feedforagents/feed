@@ -553,7 +553,7 @@ export function formatJoinedLabel(ms: number): string | undefined {
 export function formatFullTimestamp(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "";
   const d = new Date(ms);
-  const month = MONTH_NAMES[d.getUTCMonth()] ?? "Jan";
+  const month = MONTH_NAMES[d.getMonth()] ?? "Jan";
   const hours = d.getHours();
   const mins = String(d.getMinutes()).padStart(2, "0");
   const period = hours >= 12 ? "PM" : "AM";

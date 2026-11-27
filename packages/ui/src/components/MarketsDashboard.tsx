@@ -49,8 +49,8 @@ export interface PredictionMarketRow {
   endsAtLabel: string;
   /** Optional numeric resolution timestamp in ms for sorting. */
   endsAtMs?: number;
-  /** Lifecycle status of the prediction market (`active`, `resolved`, or `cancelled`). */
-  status?: "active" | "resolved" | "cancelled";
+  /** Lifecycle status of the prediction market (`active`, `expired`, `resolved`, or `cancelled`). */
+  status?: "active" | "expired" | "resolved" | "cancelled";
   /** Settled outcome when `status` is `resolved`. */
   resolvedOutcome?: "yes" | "no" | null;
   /** True when starred in the trader's watchlist. */
@@ -329,6 +329,8 @@ function PredictionsMarketsTable({
                     </Badge>
                   ) : market.status === "cancelled" ? (
                     <Badge variant="secondary">Cancelled</Badge>
+                  ) : market.status === "expired" ? (
+                    <Badge variant="secondary">Expired</Badge>
                   ) : (
                     market.endsAtLabel
                   )}
@@ -412,14 +414,14 @@ export function MarketsDashboard({
   }, [perpMarkets, favoritesOnly, normalizedQuery, perpSort, perpSortDir]);
 
   const hasClosedPredictions = useMemo(
-    () => predictionMarkets.some((m) => m.status === "resolved" || m.status === "cancelled"),
+    () => predictionMarkets.some((m) => m.status === "resolved" || m.status === "cancelled" || m.status === "expired"),
     [predictionMarkets],
   );
 
   const visiblePredictions = useMemo(() => {
     const filtered = predictionMarkets.filter((m) => {
       if (hasClosedPredictions) {
-        const isClosed = m.status === "resolved" || m.status === "cancelled";
+        const isClosed = m.status === "resolved" || m.status === "cancelled" || m.status === "expired";
         if (predStatusFilter === "active" && isClosed) return false;
         if (predStatusFilter === "resolved" && !isClosed) return false;
       }
