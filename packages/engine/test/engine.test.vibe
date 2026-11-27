@@ -776,6 +776,25 @@ it.effect('RSS headlines decode decimal and hexadecimal character references bef
   assert.deepStrictEqual(headlines, [{ title: "OpenAGI & MetAI ’ the — deal", sourceUrl: "https://example.test/feed.xml" }])
 })
 
+it.effect('An exhausted LLM budget defers clues without failing the markets tick, so price snapshots still record (spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+  const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
+  try withSeededEngine(liveNow, effect {
+    const spent = try reserveLlmBudget({ attemptId: "exhaust-budget", estimatedMicros: 100_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: liveNow })
+    try confirmLlmSpend({ attemptId: spent.attemptId, actualMicros: 100_000_000, nowMs: liveNow })
+    const tick = try runMarketsTick(liveNow)
+    const clueRows = try queryRows("SELECT clue_key FROM feed_npc_market_clues")
+    const snapshotRows = try queryRows("SELECT market_kind FROM feed_market_price_history WHERE recorded_at = $1", [liveNow])
+    const health = (try queryRows("SELECT last_status FROM feed_tick_health WHERE job_name = 'markets-tick'"))[0] ?? {}
+    try check(() => {
+      assert.deepStrictEqual(
+        [tick.skipped, tick.cluesPublished, clueRows.length, toText(health.last_status)],
+        [false, 0, 0, "ok"],
+      )
+      assert.isTrue(snapshotRows.some((r) => toText(r.market_kind) === "prediction"))
+    })
+  })
+}))
+
 it.effect('NPCs execute full trading and social actions, alpha invites honor blocks and cooldowns, and atomic settlement publishes clean proof articles and NEW MARKET posts (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', () => scoped(effect {
   const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
   try withSeededEngine(liveNow, effect {

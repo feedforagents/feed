@@ -423,7 +423,7 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       signalGuidance: describeClueSignalGuidance(signal, clueTarget.slug),
       worldContext: candidates.snapshot.worldContext,
     })
-    const completion = try generateCompletion({
+    const completion = generateCompletion({
       promptId: "cluePost",
       system: rendered.system,
       user: rendered.user,
@@ -431,7 +431,8 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       temperature: rendered.temperature,
       nowMs: resolvedNow,
       actorId,
-    })
+    }) catch effect () => null
+    if (completion === null) continue
     const clueContent = sanitizeNarrativeText(stripLeadingSelfPrefix(completion.text, actorName, actorHandle), 260)
     const matchedOrgTicker = [...findMatchedOrgIds(`${question} ${description}`)]
       .map((id) => orgById.get(id)?.ticker?.toUpperCase())
