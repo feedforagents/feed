@@ -1,5 +1,9 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 
+export function viewerBlockVisibilitySql(viewerParam: string, otherColumn: string): string {
+  return `NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = ${viewerParam} AND b.blocked_id = ${otherColumn}) OR (b.blocker_id = ${otherColumn} AND b.blocked_id = ${viewerParam}))`
+}
+
 export function viewerAuthorVisibilitySql(viewerParam: string, authorColumn: string): string {
-  return `NOT EXISTS (SELECT 1 FROM feed_blocks b WHERE (b.blocker_id = ${viewerParam} AND b.blocked_id = ${authorColumn}) OR (b.blocker_id = ${authorColumn} AND b.blocked_id = ${viewerParam})) AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = ${viewerParam} AND m.muted_id = ${authorColumn})`
+  return `${viewerBlockVisibilitySql(viewerParam, authorColumn)} AND NOT EXISTS (SELECT 1 FROM feed_mutes m WHERE m.muter_id = ${viewerParam} AND m.muted_id = ${authorColumn})`
 }

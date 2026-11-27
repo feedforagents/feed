@@ -1,6 +1,6 @@
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering"
 import { Store, toInt, toText, type Tx } from "@repo/db"
-import { viewerAuthorVisibilitySql } from "./visibility.vibe"
+import { viewerAuthorVisibilitySql, viewerBlockVisibilitySql } from "./visibility.vibe"
 
 export type FeedRealtimeEvent =
   | {
@@ -360,6 +360,24 @@ effect function isAuthorVisibleInStore(
   }))
 }
 
+// spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+effect function isTraderActivityVisibleInStore(
+  store: Store.Shape | undefined,
+  viewerId: string,
+  traderId: string
+): boolean!! {
+  if (store === undefined) return false
+  return try runFailClosedLookup(store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT a.ui_mode, ${viewerBlockVisibilitySql("$1", "$2")} AS is_visible FROM feed_accounts a WHERE a.account_id = $1 LIMIT 1`,
+      [viewerId, traderId]
+    )
+    const row = rows[0]
+    if (row === undefined) return false
+    return toText(row.ui_mode) !== "social" && Boolean(row.is_visible)
+  }))
+}
+
 effect function isPostCreatedDeliverableInStore(
   store: Store.Shape | undefined,
   viewerId: string,
@@ -494,13 +512,14 @@ export effect function canDeliverRealtimeEventToViewer(
   switch (event.type) {
     case "world.tick":
     case "market.spot":
-    case "market.perp":
     case "market.prediction":
     case "market.clue":
     case "market.resolved":
     case "org.posted":
     case "article.published":
       return true
+    case "market.perp":
+      return viewerId === undefined ? true : try isTraderActivityVisibleInStore(store, viewerId, event.actorId)
     case "post.created":
       return viewerId === undefined ? true : try isPostCreatedDeliverableInStore(store, viewerId, event)
     case "post.deleted":
