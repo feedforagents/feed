@@ -380,7 +380,11 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   const specTab = toSpecTab(tab);
   sendNav({ type: "selectFeedTab", tab: specTab });
   sendApp({ type: "selectTab", tab: specTab });
-  setStoreState({ feedTab: tab });
+  if (tab !== s.feedTab) {
+    setStoreState({ feedTab: tab, feedPosts: [], feedNextCursor: null, feedLoadingMore: false, pendingNewPostCount: 0 });
+  } else {
+    setStoreState({ feedTab: tab });
+  }
   await loadFeed(tab);
 }
 
