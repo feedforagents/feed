@@ -1274,6 +1274,44 @@ it.effect('The perp price chart counts each NPC spot trade once, matching its tr
   })
 )
 
+it.effect('Adding to a perp keeps the unrealized P&L of both legs, so a short gains nothing by adding (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    try createVerifiedAccount("user-bob", "bob", INITIAL_GRANT_CENTS)
+    try createVerifiedAccount("user-carol", "carol", INITIAL_GRANT_CENTS)
+    try seedHundredCorpMarket(now)
+    const legs = (side: "long" | "short", ownerId: string) =>
+      openPerpPosition({ ownerId, ownerKind: "user", ticker: "HUND", side, collateralCents: 1_000, leverage: 20 })
+    const shortFirst = try legs("short", "user-bob")
+    const longFirst = try legs("long", "user-carol")
+    for (let i = 0; i < 4; i += 1) {
+      try executeNpcSpotTrade({ actorId: "ailon-musk", ticker: "HUND", side: "buy", quoteCents: 100_000 })
+    }
+    const shortAdded = try legs("short", "user-bob")
+    const longAdded = try legs("long", "user-carol")
+    const mark = longAdded.executionPriceCents
+    const legPnl = (side: "long" | "short", size: number, entry: number) =>
+      Math.floor((side === "long" ? size * (mark - entry) : size * (entry - mark)) / entry)
+    const summary = (side: "long" | "short", first: typeof shortFirst, added: typeof shortFirst) => {
+      const size = first.position.sizeCents
+      const harmonic = (2 * size * first.executionPriceCents * added.executionPriceCents) / (size * added.executionPriceCents + size * first.executionPriceCents)
+      return {
+        entry: added.position.entryPriceCents,
+        harmonicEntry: side === "long" ? Math.ceil(harmonic) : Math.floor(harmonic),
+        pnlGainFromAdding: legPnl(side, 2 * size, added.position.entryPriceCents) - legPnl(side, size, first.executionPriceCents) - legPnl(side, size, added.executionPriceCents) > 1
+      }
+    }
+    const short = summary("short", shortFirst, shortAdded)
+    const long = summary("long", longFirst, longAdded)
+    try check(() => {
+      assert.isTrue(shortAdded.executionPriceCents > shortFirst.executionPriceCents * 1.1)
+      assert.deepStrictEqual(
+        { short: [short.entry, short.pnlGainFromAdding], long: [long.entry, long.pnlGainFromAdding] },
+        { short: [short.harmonicEntry, false], long: [long.harmonicEntry, false] }
+      )
+    })
+  })
+)
+
 it.effect('Closed perp positions report payout equal to cash credited with open fees in cost basis (spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
   runWithSeededMarketDay(effect (now) => {
     try seedAliceHundredDay(now)

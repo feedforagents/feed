@@ -283,11 +283,16 @@ function blendWeightedEntryPrice(
   addEntry: number,
   side: PerpSide
 ): number {
-  const totalSize = prevSize + addSize
-  if (totalSize <= 0) return Math.max(1, addEntry)
-  const weighted = (prevEntry * prevSize + addEntry * addSize) / totalSize
-  const rounded = side === "long" ? Math.ceil(weighted) : Math.floor(weighted)
-  return Math.max(1, rounded)
+  if (prevSize <= 0 || prevEntry <= 0) return Math.max(1, addEntry)
+  try {
+    const num = BigInt(prevSize + addSize) * BigInt(prevEntry) * BigInt(addEntry)
+    const den = BigInt(prevSize) * BigInt(addEntry) + BigInt(addSize) * BigInt(prevEntry)
+    const quo = num / den
+    const rounded = side === "long" && quo * den < num ? quo + 1n : quo
+    return Math.max(1, Number(rounded))
+  } catch {
+    return Math.max(1, addEntry)
+  }
 }
 
 export function computeLiquidationPriceCents(pos: PerpPosition): number {
