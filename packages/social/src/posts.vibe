@@ -894,7 +894,7 @@ export effect function listFeedPosts(input: ListFeedPostsInput): FeedPage!(Socia
     if (viewerId !== undefined) {
       params.push(viewerId)
       const v = `$${params.length}`
-          conditions.push(viewerAuthorVisibilitySql(v, "p.author_id"))
+      conditions.push(viewerAuthorVisibilitySql(v, "p.author_id"))
     if (input.tab === "following") {
       conditions.push(`(p.author_id = ${v} OR EXISTS (SELECT 1 FROM feed_follows f WHERE f.follower_id = ${v} AND f.target_id = p.author_id))`)
     }
