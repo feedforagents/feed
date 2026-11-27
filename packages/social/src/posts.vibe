@@ -299,7 +299,7 @@ function toAuthorKind(raw: unknown): PostAuthorKind {
   return value === "npc" ? "npc" : value === "org" ? "org" : "user"
 }
 
-function socialModeMarketExclusionSql(alias: string): string {
+export function socialModeMarketExclusionSql(alias: string): string {
   return `NOT ((${alias}.author_kind = 'org' AND (${alias}.market_id IS NOT NULL OR ${alias}.ticker IS NOT NULL)) OR ${alias}.content ILIKE 'NEW MARKET (%' OR ${alias}.content ILIKE '%prediction market resolution%' OR ${alias}.content ILIKE 'Settlement Wire:%' OR ${alias}.content ILIKE 'Admin Resolution:%')`
 }
 
