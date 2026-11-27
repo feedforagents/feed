@@ -1566,3 +1566,58 @@ it.effect("prediction, perp, and NPC spot write helpers stamp explicit nowMs tim
     ))
   }
 })
+
+it.effect('Perp funding skips a position opened in the current game period after the clock runs ahead of wall time (spec/markets/spotPerp.md, "Story: 8-hour funding accrual and mark-price liquidation")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 1, 0, 0))
+  try runWithSeededDb(effect {
+    const store = try Store
+    const wallNow = try Clock.currentTimeMillis
+    const gameNow = wallNow + 8 * 3_600_000
+    const wallPeriod = Math.floor(wallNow / 28_800_000)
+    try createVerifiedAccount("user-alice", "alice", 50_000)
+    try createVerifiedAccount("user-bob", "bob", 50_000)
+    const skew = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 20
+    })
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        "UPDATE feed_world_state SET last_tick_at = $1, funding_cutover_period = $2 WHERE singleton = true",
+        [gameNow, wallPeriod]
+      )
+    })
+    const opened = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 5
+    })
+    const funding = try accruePerpFunding(gameNow)
+    const alicePositions = try listPerpPositions("user-alice")
+    const alicePosition = alicePositions.find((p) => p.id === opened.positionId)
+    try check(() => assert.deepStrictEqual(
+      {
+        skewSizeCents: skew.sizeCents,
+        fundingPeriod: funding.period,
+        fundingAccruedCount: funding.accruedCount,
+        aliceCreatedAt: alicePosition?.createdAt,
+        aliceAccruedFundingCents: alicePosition?.accruedFundingCents,
+        aliceLastFundingPeriod: alicePosition?.lastFundingPeriod
+      },
+      {
+        skewSizeCents: 20_000,
+        fundingPeriod: wallPeriod + 1,
+        fundingAccruedCount: 1,
+        aliceCreatedAt: gameNow,
+        aliceAccruedFundingCents: 0,
+        aliceLastFundingPeriod: 0
+      }
+    ))
+  })
+})
