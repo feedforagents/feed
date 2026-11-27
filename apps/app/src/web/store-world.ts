@@ -107,6 +107,48 @@ function findPostInState(postId: string): AppPost | undefined {
     ?? s.explore.posts.find((p) => p.card.id === postId);
 }
 
+type EngagementState = Pick<AppPost["card"], "liked" | "likeCount" | "reposted" | "repostCount">;
+
+function engagementOf(card: AppPost["card"]): EngagementState {
+  return { liked: card.liked, likeCount: card.likeCount, reposted: card.reposted, repostCount: card.repostCount };
+}
+
+function captureEngagement(): ReadonlyMap<string, EngagementState> {
+  const s = getStoreSnapshot();
+  const captured = new Map<string, EngagementState>();
+  const lists: ReadonlyArray<ReadonlyArray<AppPost>> = [
+    s.feedPosts,
+    s.explore.posts,
+    s.profileBundle?.posts ?? [],
+    s.profileReplies,
+    s.profileLikes,
+    s.marketSocialPosts,
+    s.activeThread ? [s.activeThread.post, ...(s.activeThread.parentPost ? [s.activeThread.parentPost] : []), ...s.activeThread.ancestors, ...s.activeThread.replies] : [],
+  ];
+  for (const list of lists) {
+    for (const post of list) {
+      if (!captured.has(post.card.id)) captured.set(post.card.id, engagementOf(post.card));
+    }
+  }
+  return captured;
+}
+
+function preserveEngagementSince(
+  posts: ReadonlyArray<AppPost>,
+  captured: ReadonlyMap<string, EngagementState>,
+): ReadonlyArray<AppPost> {
+  return posts.map((post) => {
+    const start = captured.get(post.card.id);
+    const current = findPostInState(post.card.id);
+    if (!start || !current) return post;
+    const now = engagementOf(current.card);
+    if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
+      return post;
+    }
+    return { ...post, card: { ...post.card, ...now } };
+  });
+}
+
 export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost["card"]) => AppPost["card"]): void {
   const patchPost = (post: AppPost): AppPost =>
     post.card.id === postId ? { ...post, card: updater(post.card) } : post;
@@ -248,6 +290,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const tab = tabOverride ?? s.feedTab;
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++feedRequestSeq;
+  const engagementAtStart = captureEngagement();
   setStoreState({ feedLoading: true });
   const url = appendAnonymousModeParam(`/api/feed?tab=${encodeURIComponent(tab)}`, s);
   const res = await requestJson(url, {
@@ -257,7 +300,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
     setStoreState({
-      feedPosts: res.data.items,
+      feedPosts: preserveEngagementSince(res.data.items, engagementAtStart),
       feedNextCursor: res.data.nextCursor,
       feedLoading: false,
       pendingNewPostCount: 0,
@@ -348,6 +391,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   const viewerId = s.viewer?.accountId ?? null;
   threadRequestSeq += 1;
   const requestSeq = threadRequestSeq;
+  const engagementAtStart = captureEngagement();
   setStoreState({ threadLoading: true, activePostId: postId, threadSort: sort });
   recordPublicView("PostDetail");
   const baseUrl = `/api/posts/${encodeURIComponent(postId)}?sort=${encodeURIComponent(sort)}`;
@@ -356,7 +400,16 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   });
   if (requestSeq !== threadRequestSeq) return;
   if (res.ok && res.data) {
-    setStoreState({ activeThread: res.data, threadLoading: false });
+    const thread = res.data;
+    setStoreState({
+      activeThread: {
+        post: preserveEngagementSince([thread.post], engagementAtStart)[0] ?? thread.post,
+        parentPost: thread.parentPost ? preserveEngagementSince([thread.parentPost], engagementAtStart)[0] ?? thread.parentPost : null,
+        ancestors: preserveEngagementSince(thread.ancestors, engagementAtStart),
+        replies: preserveEngagementSince(thread.replies, engagementAtStart),
+      },
+      threadLoading: false,
+    });
     return;
   }
   setStoreState({ threadLoading: false });
@@ -496,7 +549,7 @@ export async function toggleLike(postId: string): Promise<void> {
     patchPostCardAcrossStore(postId, (card) => ({
       ...card,
       liked: serverLiked,
-      likeCount: serverCount,
+      likeCount: Math.max(0, card.likeCount + (serverCount - optimisticCount)),
     }));
   } finally {
     likeInFlight.delete(postId);
@@ -537,7 +590,7 @@ export async function repostPost(postId: string): Promise<void> {
     patchPostCardAcrossStore(postId, (card) => ({
       ...card,
       reposted: serverReposted,
-      repostCount: serverCount,
+      repostCount: Math.max(0, card.repostCount + (serverCount - optimisticCount)),
     }));
   } finally {
     repostInFlight.delete(postId);
@@ -549,6 +602,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const q = queryOverride ?? s.exploreQuery;
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++exploreRequestSeq;
+  const engagementAtStart = captureEngagement();
   setStoreState({ exploreLoading: true, exploreQuery: q });
   const url = appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(q.trim())}`, s);
   const needMarkets = s.perps.length === 0;
@@ -577,7 +631,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     const cur = getStoreSnapshot();
     const isBrowse = q.trim() === "";
     setStoreState({
-      explore: res.data,
+      explore: { ...res.data, posts: preserveEngagementSince(res.data.posts, engagementAtStart) },
       ...(isBrowse && res.data.trending.length > 0 ? { rightRailTrending: res.data.trending } : {}),
       ...(isBrowse && res.data.articles.length > 0 ? { rightRailArticles: res.data.articles } : {}),
       exploreLoading: false,
@@ -596,6 +650,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
   const s = getStoreSnapshot();
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++exploreRequestSeq;
+  const engagementAtStart = captureEngagement();
   setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag, exploreLoading: true });
   const url = appendAnonymousModeParam(`/api/trending/${encodeURIComponent(cleanTag)}`, s);
   const res = await requestJson(url, {
@@ -607,7 +662,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
     setStoreState({
       explore: {
         ...cur.explore,
-        posts: res.data.items,
+        posts: preserveEngagementSince(res.data.items, engagementAtStart),
         accounts: [],
         actors: [],
         organizations: [],
@@ -1592,6 +1647,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     return;
   }
   const loadId = ++profileLoadCount;
+  const engagementAtStart = captureEngagement();
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -1610,7 +1666,10 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   });
   if (loadId !== profileLoadCount || getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
-    setStoreState({ profileBundle: res.data, profileLoading: false });
+    setStoreState({
+      profileBundle: { ...res.data, posts: preserveEngagementSince(res.data.posts, engagementAtStart) },
+      profileLoading: false,
+    });
     return;
   }
   const cur = getStoreSnapshot().profileBundle;
@@ -1630,6 +1689,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
   const loadId = ++profileRepliesLoadCount;
+  const engagementAtStart = captureEngagement();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -1645,7 +1705,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   if (res.ok) {
-    setStoreState({ profileReplies: res.data.items, profileRepliesLoading: false });
+    setStoreState({ profileReplies: preserveEngagementSince(res.data.items, engagementAtStart), profileRepliesLoading: false });
     return;
   }
   setStoreState({ profileRepliesLoading: false });
@@ -1672,6 +1732,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
   const handle = (handleOrSelf ?? s.profileBundle?.summary.handle ?? s.profileHandle ?? s.viewer?.handle ?? "").replace(/^@/, "").trim();
   if (!handle) return;
   const loadId = ++profileLikesLoadCount;
+  const engagementAtStart = captureEngagement();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileLikesLoading: true });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
@@ -1684,7 +1745,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   if (res.ok) {
-    setStoreState({ profileLikes: res.data.items, profileLikesLoading: false });
+    setStoreState({ profileLikes: preserveEngagementSince(res.data.items, engagementAtStart), profileLikesLoading: false });
     return;
   }
   setStoreState({ profileLikesLoading: false });
