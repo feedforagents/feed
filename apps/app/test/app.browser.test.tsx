@@ -273,6 +273,7 @@ function installMockNetwork(
     holdLeaderboardScope?: string;
     holdPnlRange?: string;
     holdClosedPositionsFirst?: boolean;
+    holdEconomyFirst?: boolean;
     holdProfileReplies?: boolean;
     readonly perps?: ReadonlyArray<Record<string, unknown>>;
     readonly threadFetch?: (path: string) => Promise<Response> | null;
@@ -295,6 +296,8 @@ function installMockNetwork(
   const requestedPnlRanges = new Set<string>();
   const heldClosedPositions: Array<() => void> = [];
   let closedPositionsCalls = 0;
+  const heldEconomy: Array<() => void> = [];
+  let economyCalls = 0;
   const heldReplies = new Map<string, Array<(res: Response) => void>>();
   const requestedReplies = new Set<string>();
   profileShouldFail = false;
@@ -588,15 +591,17 @@ function installMockNetwork(
       return json(body);
     }
     if (path === "/api/economy/me") {
-      return json({
+      economyCalls += 1;
+      const fresh = economyCalls > 1;
+      const body = {
         economy: {
           accountId: viewerIsReviewer ? "acct-player-1" : "acct-email-1",
-          balanceCents: viewerBalanceCents,
+          balanceCents: fresh ? 9900 : viewerBalanceCents,
           positionValueCents: viewerIsReviewer ? 1028 : 0,
-          equityCents: viewerIsReviewer ? 11528 : viewerBalanceCents,
+          equityCents: fresh ? 10928 : viewerIsReviewer ? 11528 : viewerBalanceCents,
           startingGrantCents: 10000,
           totalFeesPaidCents: 10,
-          netProfitCents: viewerIsReviewer ? 1528 : 0,
+          netProfitCents: fresh ? 928 : viewerIsReviewer ? 1528 : 0,
         },
         ledger: [
           {
@@ -608,7 +613,13 @@ function installMockNetwork(
             createdAt: Date.now() - 3_600_000,
           },
         ],
-      });
+      };
+      if (options.holdEconomyFirst && economyCalls === 1) {
+        return new Promise<Response>((resolve) => {
+          heldEconomy.push(() => resolve(Response.json(body)));
+        });
+      }
+      return json(body);
     }
     if (path === "/api/explore") {
       const query = url.searchParams.get("q") ?? "";
@@ -704,6 +715,10 @@ function installMockNetwork(
     closedPositionsRequested: () => closedPositionsCalls > 0,
     releaseClosedPositions: () => {
       for (const release of heldClosedPositions.splice(0)) release();
+    },
+    economyRequested: () => economyCalls > 0,
+    releaseEconomy: () => {
+      for (const release of heldEconomy.splice(0)) release();
     },
     repliesRequested: (handle: string) => requestedReplies.has(handle),
     releaseReplies: (handle: string, items: unknown[]) => {
@@ -1131,6 +1146,31 @@ it('Stale closed positions are dropped after a newer refresh (spec/markets/econo
   expect(getStoreSnapshot().closedPositions).toHaveLength(1);
   expect(getStoreSnapshot().closedPositions[0]?.realizedPnlPts).toBe(222);
   expect(getStoreSnapshot().closedPositionsLoading).toBe(false);
+});
+
+it('Stale economy is dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountApp({ holdEconomyFirst: true });
+
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await signInAsReviewer();
+
+  act(() => {
+    void storeActions.loadEconomy();
+  });
+  await act(() => Promise.resolve());
+  expect(network.economyRequested()).toBe(true);
+
+  await act(() => storeActions.loadEconomy());
+  expect(getStoreSnapshot().economy?.balanceCents).toBe(9900);
+  expect(getStoreSnapshot().economy?.equityCents).toBe(10928);
+
+  network.releaseEconomy();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().economy?.balanceCents).toBe(9900);
+  expect(getStoreSnapshot().economy?.equityCents).toBe(10928);
+  expect(getStoreSnapshot().economyLoading).toBe(false);
 });
 
 it('Late replies never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {

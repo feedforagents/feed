@@ -77,6 +77,7 @@ let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
 let pnlHistoryRequestSeq = 0;
 let closedPositionsLoadCount = 0;
+let economyLoadCount = 0;
 
 function appendUniquePosts(
   existing: ReadonlyArray<AppPost>,
@@ -742,8 +743,10 @@ export async function jumpToMyLeaderboardRank(): Promise<void> {
 
 export async function loadEconomy(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const loadId = ++economyLoadCount;
   setStoreState({ economyLoading: true });
   const res = await requestJson("/api/economy/me", { parse: decodeEconomy });
+  if (loadId !== economyLoadCount) return;
   if (res.ok) {
     setStoreState({
       economy: res.data.economy,
