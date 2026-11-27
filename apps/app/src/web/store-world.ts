@@ -1002,11 +1002,11 @@ export async function previewPerpOrder(
 
 let marketsLoadCount = 0;
 
-export async function loadMarkets(): Promise<void> {
+export async function loadMarkets(): Promise<boolean> {
   const loadId = ++marketsLoadCount;
   setStoreState({ marketsLoading: true });
   const mktRes = await requestJson("/api/markets", { parse: passThrough });
-  if (loadId !== marketsLoadCount) return;
+  if (loadId !== marketsLoadCount) return true;
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
@@ -1061,6 +1061,7 @@ export async function loadMarkets(): Promise<void> {
       void loadMarketDetails(selectedMarketKind, selectedMarketId);
     }
   }
+  return mktRes.ok && isRecord(mktRes.data);
 }
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
@@ -1148,7 +1149,10 @@ async function executeTradeRequest({
     ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
   setStatusNotice(formatReceiptMessage ? formatReceiptMessage(res.data) : statusMessage);
-  await loadMarkets();
+  const refreshed = await loadMarkets();
+  if (!refreshed) {
+    setErrorNotice("Trade executed, but your positions could not be refreshed.");
+  }
   return true;
 }
 
