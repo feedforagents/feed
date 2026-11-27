@@ -415,6 +415,29 @@ it("surfaces a failed thread refresh after a successful send instead of silently
   expect(s.errorMessage).toBe("Message sent, but the thread failed to refresh.");
 });
 
+it("surfaces a failed message load when a conversation is opened instead of showing an empty thread (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
+      return Promise.resolve(Response.json({ message: "Load exploded" }, { status: 500 }));
+    }
+    return fallbackReadOrNotFound(url, method, readPosts);
+  }, "http://localhost");
+  setStoreState({
+    chats: [seedChat(0)],
+    selectedChatId: null,
+    chatMessages: [],
+    toasts: [],
+    errorMessage: null,
+  });
+  await selectChat("chat-1");
+  const s = getStoreSnapshot();
+  expect(s.selectedChatId).toBe("chat-1");
+  expect(s.chatMessages).toEqual([]);
+  expect(s.toasts.map((t) => t.message)).toEqual(["Failed to load messages. Please try again."]);
+  expect(s.errorMessage).toBe("Failed to load messages. Please try again.");
+});
+
 function seedChatNotifications() {
   const seeded = decodeNotifications({
     notifications: [
