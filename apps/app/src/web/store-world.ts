@@ -94,6 +94,12 @@ export function markRepostServerCountLanded(postId: string): void {
 export function markRepostOwnEngagementLanded(postId: string, kind: string): void {
   if (repostInFlightKind.get(postId) === kind) repostOwnEngagementLanded.add(postId);
 }
+
+const replyLiveCountLanded = new Set<string>();
+
+export function markReplyLiveCountLanded(replyPostId: string): void {
+  replyLiveCountLanded.add(replyPostId);
+}
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
@@ -562,6 +568,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
       setErrorNotice("Post not found");
       return;
     }
+    for (const reply of thread.replies) replyLiveCountLanded.delete(reply.card.id);
     const parentPost = thread.parentPost && !wasPostDeletedSince(thread.parentPost.card.id, deletionsAtStart)
       ? dropPostsDeletedSince(preserveEngagementSince([thread.parentPost], engagementAtStart), deletionsAtStart)[0] ?? null
       : null;
@@ -648,6 +655,25 @@ export async function createPost(
     clearReplyFailureNotice(options.replyToPostId);
   }
   setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
+  if (res.data && options?.replyToPostId) {
+    const created = res.data;
+    const liveCountLanded = replyLiveCountLanded.delete(created.card.id);
+    const curThread = getStoreSnapshot().activeThread;
+    if (curThread && curThread.post.card.id === options.replyToPostId && !curThread.replies.some((r) => r.card.id === created.card.id)) {
+      const replies = getStoreSnapshot().threadSort === "newest"
+        ? [created, ...curThread.replies]
+        : [...curThread.replies, created];
+      setStoreState({
+        activeThread: {
+          ...curThread,
+          post: liveCountLanded
+            ? curThread.post
+            : { ...curThread.post, card: { ...curThread.post.card, replyCount: curThread.post.card.replyCount + 1 } },
+          replies,
+        },
+      });
+    }
+  }
   const cur = getStoreSnapshot();
   if (res.data && !options?.replyToPostId) {
     const matchesActiveMarket =
