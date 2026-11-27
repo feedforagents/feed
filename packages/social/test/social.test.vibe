@@ -524,6 +524,84 @@ it.effect(
 )
 
 it.effect(
+  'following feed with replies included only shows followed users and self (spec/social/posts.md, "Story: following feed")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+    try followAccount("alice", "bob")
+    const alicePost = try createPost({
+      authorId: "alice",
+      authorKind: "user",
+      content: "Alice following-feed post"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const bobPost = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob following-feed post"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const carolPost = try createPost({
+      authorId: "carol",
+      authorKind: "user",
+      content: "Carol unfollowed post"
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const bobReply = try createPost({
+      authorId: "bob",
+      authorKind: "user",
+      content: "Bob reply to Alice",
+      replyToPostId: alicePost.id
+    })
+    try TestClock.adjust(Duration.seconds(1))
+    const carolReply = try createPost({
+      authorId: "carol",
+      authorKind: "user",
+      content: "Carol reply to Alice",
+      replyToPostId: alicePost.id
+    })
+    const withReplies = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, includeReplies: true })
+    const filterAll = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, filter: "all" })
+    const onlyReplies = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, onlyReplies: true })
+    const filterReplies = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50, filter: "replies" })
+    const postsOnly = try listFeedPosts({ tab: "following", viewerId: "alice", mode: "game", limit: 50 })
+    try check(() => assert.deepStrictEqual({
+      withReplies: [
+        withReplies.items.some((p) => p.id === alicePost.id),
+        withReplies.items.some((p) => p.id === bobPost.id),
+        withReplies.items.some((p) => p.id === bobReply.id),
+        withReplies.items.some((p) => p.id === carolPost.id),
+        withReplies.items.some((p) => p.id === carolReply.id)
+      ],
+      filterAll: [
+        filterAll.items.some((p) => p.id === bobReply.id),
+        filterAll.items.some((p) => p.id === carolPost.id),
+        filterAll.items.some((p) => p.id === carolReply.id)
+      ],
+      onlyReplies: [
+        onlyReplies.items.some((p) => p.id === bobReply.id),
+        onlyReplies.items.some((p) => p.id === carolReply.id)
+      ],
+      filterReplies: [
+        filterReplies.items.some((p) => p.id === bobReply.id),
+        filterReplies.items.some((p) => p.id === carolReply.id)
+      ],
+      postsOnly: [
+        postsOnly.items.some((p) => p.id === alicePost.id),
+        postsOnly.items.some((p) => p.id === bobPost.id),
+        postsOnly.items.some((p) => p.id === bobReply.id),
+        postsOnly.items.some((p) => p.id === carolPost.id)
+      ]
+    }, {
+      withReplies: [true, true, true, false, false],
+      filterAll: [true, false, false],
+      onlyReplies: [true, false],
+      filterReplies: [true, false],
+      postsOnly: [true, true, false, false]
+    }))
+  })
+)
+
+it.effect(
   'DMs, user groups, reactions, retired team chat refusal, and NPC alpha invites (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave")',
   () => withSocialWorld(effect {
     try seedChatParticipants()
