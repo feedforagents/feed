@@ -973,6 +973,11 @@ export async function loadWorldStatus(): Promise<void> {
   }
 }
 
+export function resetAccountLoads(): void {
+  pnlHistoryRequestSeq += 1;
+  feedLoadedTab = "latest";
+}
+
 export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer) return;

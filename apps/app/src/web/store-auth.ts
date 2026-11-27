@@ -38,6 +38,7 @@ import {
   loadTrending,
   openThread,
   repostPost,
+  resetAccountLoads,
   selectFeedTab,
   startDirectChat,
   submitPerpOrder,
@@ -127,6 +128,10 @@ export async function hydrateAuth(): Promise<void> {
     devEmailLinkEnabled,
   } = res.data;
   if (authenticated && viewer) {
+    const switchedAccount = prevViewerId !== null && prevViewerId !== viewer.accountId;
+    if (switchedAccount) {
+      clearAccountStateKeepingRoute();
+    }
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
     sendApp({ type: "verifyPhoneSms", codeValid: true, isNewAccount: false });
@@ -157,10 +162,16 @@ export async function hydrateAuth(): Promise<void> {
     });
     if (prevViewerId !== viewer.accountId) {
       notifyAuthChanged();
+      if (switchedAccount) {
+        await refreshViewerSurfaces();
+      }
     } else if (prevUiMode !== viewer.uiMode) {
       await loadNotifications();
     }
     return;
+  }
+  if (prevViewerId !== null) {
+    clearAccountStateKeepingRoute();
   }
   const snap = getStoreSnapshot();
   const currentRoute = snap.route;
@@ -183,6 +194,7 @@ export async function hydrateAuth(): Promise<void> {
   });
   if (prevViewerId !== null) {
     notifyAuthChanged();
+    await refreshViewerSurfaces();
   }
 }
 
@@ -839,15 +851,28 @@ async function performSignOut({
     setErrorNotice(res.message);
     return;
   }
+  pushBrowserRoute("Home");
+  setStoreState({ route: "Home", walletView: false });
+  clearAccountState();
+  setStatusNotice(statusMessage);
+  notifyAuthChanged();
+  await loadFeed("latest");
+}
+
+function clearAccountStateKeepingRoute(): void {
+  const { activePostId, profileHandle } = getStoreSnapshot();
+  clearAccountState();
+  setStoreState({ activePostId, profileHandle });
+}
+
+function clearAccountState(): void {
   clearPersistedPendingAction();
   sendNav({ type: "signOutNav" });
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
-  pushBrowserRoute("Home");
+  resetAccountLoads();
   setStoreState({
     viewer: null,
-    route: "Home",
-    walletView: false,
     feedTab: "latest",
     chats: [],
     selectedChatId: null,
@@ -859,6 +884,9 @@ async function performSignOut({
     closedPositions: [],
     economy: null,
     ledger: [],
+    pnlTimeRange: "ALL",
+    pnlHistory: [],
+    pnlHistoryLoading: false,
     perpPreview: null,
     leaderboardCurrentUser: null,
     blockedAccounts: [],
@@ -888,9 +916,6 @@ async function performSignOut({
     devEmailMagicLinkUrl: null,
     pendingAction: null,
   });
-  setStatusNotice(statusMessage);
-  notifyAuthChanged();
-  await loadFeed("latest");
 }
 
 export async function logout(): Promise<void> {
