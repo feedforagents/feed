@@ -28,6 +28,7 @@ import {
   type UiFeedTab,
 } from "./store-core.ts";
 import {
+  type AppNotification,
   type AppPerpMarket,
   type AppPost,
   type AppPredictionMarket,
@@ -1423,14 +1424,52 @@ export async function respondGroupInvite(inviteId: string, accept: boolean): Pro
 }
 
 let notificationsLoadCount = 0;
+let notificationsMutationCount = 0;
+let notificationsIdsBeforeMutation = new Set<string>();
+
+function invalidateNotificationsLoads(): void {
+  notificationsLoadCount += 1;
+  notificationsMutationCount += 1;
+}
+
+function captureNotificationIdsBeforeMutation(): void {
+  notificationsIdsBeforeMutation = new Set(getStoreSnapshot().notifications.map((n) => n.item.id));
+}
+
+function mergeNotificationsFromDiscardedRefetch(items: readonly AppNotification[]): boolean {
+  const s = getStoreSnapshot();
+  const payloadIds = new Set(items.map((n) => n.item.id));
+  const merged: AppNotification[] = [];
+  for (const n of items) {
+    const local = s.notifications.find((l) => l.item.id === n.item.id);
+    if (local) {
+      merged.push(local);
+    } else if (!notificationsIdsBeforeMutation.has(n.item.id)) {
+      merged.push(n);
+    }
+  }
+  for (const l of s.notifications) {
+    if (!payloadIds.has(l.item.id)) merged.push(l);
+  }
+  if (merged.length === s.notifications.length && merged.every((n, i) => n === s.notifications[i])) return false;
+  setStoreState({
+    notifications: merged,
+    unreadNotifications: merged.filter((n) => !n.item.read).length,
+  });
+  return true;
+}
 
 export async function loadNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
   const loadId = ++notificationsLoadCount;
+  const mutationCount = notificationsMutationCount;
   setStoreState({ notificationsLoading: true });
   const res = await requestJson("/api/notifications", { parse: decodeNotifications });
   if (loadId !== notificationsLoadCount) {
     setStoreState({ notificationsLoading: false });
+    if (mutationCount !== notificationsMutationCount && res.ok && mergeNotificationsFromDiscardedRefetch(res.data.items)) {
+      void loadNotifications();
+    }
     return;
   }
   if (res.ok) {
@@ -1450,6 +1489,7 @@ export async function markNotificationRead(notificationId: string): Promise<void
   const cur = getStoreSnapshot();
   const target = cur.notifications.find((n) => n.item.id === notificationId);
   if (!target || target.item.read) return;
+  captureNotificationIdsBeforeMutation();
   setStoreState({
     notifications: cur.notifications.map((n) =>
       n.item.id === notificationId ? { ...n, item: { ...n.item, read: true } } : n,
@@ -1461,8 +1501,17 @@ export async function markNotificationRead(notificationId: string): Promise<void
     body: { notificationIds: [notificationId] },
     parse: passThrough,
   });
-  if (res.ok && isRecord(res.data) && typeof res.data.unreadCount === "number") {
-    setStoreState({ unreadNotifications: res.data.unreadCount });
+  if (res.ok) {
+    invalidateNotificationsLoads();
+    const s = getStoreSnapshot();
+    setStoreState({
+      notifications: s.notifications.map((n) =>
+        n.item.id === notificationId ? { ...n, item: { ...n.item, read: true } } : n,
+      ),
+    });
+    if (isRecord(res.data) && typeof res.data.unreadCount === "number") {
+      setStoreState({ unreadNotifications: res.data.unreadCount });
+    }
   }
 }
 
@@ -1471,7 +1520,8 @@ export async function markAllNotificationsRead(): Promise<void> {
   const accountId = initial.viewer?.accountId;
   if (!accountId) return;
   const mode = currentUiMode(initial);
-  notificationsLoadCount += 1;
+  captureNotificationIdsBeforeMutation();
+  invalidateNotificationsLoads();
   const res = await requestJson("/api/notifications/read", {
     method: "POST",
     body: {},
@@ -1483,6 +1533,7 @@ export async function markAllNotificationsRead(): Promise<void> {
     setErrorNotice(res.message);
     return;
   }
+  invalidateNotificationsLoads();
   if (currentUiMode(s) !== mode) {
     await loadNotifications();
     return;
@@ -1498,6 +1549,7 @@ export async function markAllNotificationsRead(): Promise<void> {
 
 export async function clearNotifications(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  captureNotificationIdsBeforeMutation();
   const res = await requestJson("/api/notifications", {
     method: "DELETE",
     parse: passThrough,
@@ -1506,6 +1558,7 @@ export async function clearNotifications(): Promise<void> {
     setErrorNotice(res.message);
     return;
   }
+  invalidateNotificationsLoads();
   setStoreState({
     notifications: [],
     unreadNotifications: 0,

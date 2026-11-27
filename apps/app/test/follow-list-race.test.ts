@@ -2,30 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { loadFollowList } from "../src/web/store-world.ts";
-
-type Deferred = {
-  resolve: (value: Response) => void;
-};
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function installDeferredFetch() {
-  const pending = new Map<string, Deferred>();
-  const fetchMock: typeof fetch = (input) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, "https://feed.fun").pathname;
-    return new Promise<Response>((resolve) => {
-      pending.set(path, { resolve });
-    });
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  return pending;
-}
+import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
 
 const followingRows = {
   items: [
@@ -49,11 +26,11 @@ describe("follow-list race", () => {
     const pending = installDeferredFetch();
     const first = loadFollowList("alice", "following");
     const second = loadFollowList("alice", "followers");
-    pending.get("/api/users/alice/followers")?.resolve(jsonResponse(followersRows));
+    pending.get("GET /api/users/alice/followers")?.resolve(jsonResponse(followersRows));
     await second;
     expect(getStoreSnapshot().followListKind).toBe("followers");
     expect(getStoreSnapshot().followListItems.map((entry) => entry.handle)).toEqual(["dave"]);
-    pending.get("/api/users/alice/following")?.resolve(jsonResponse(followingRows));
+    pending.get("GET /api/users/alice/following")?.resolve(jsonResponse(followingRows));
     await first;
     expect(getStoreSnapshot().followListKind).toBe("followers");
     expect(getStoreSnapshot().followListItems.map((entry) => entry.handle)).toEqual(["dave"]);
@@ -63,11 +40,11 @@ describe("follow-list race", () => {
     const pending = installDeferredFetch();
     const first = loadFollowList("alice", "followers");
     const second = loadFollowList("alice", "following");
-    pending.get("/api/users/alice/following")?.resolve(jsonResponse(followingRows));
+    pending.get("GET /api/users/alice/following")?.resolve(jsonResponse(followingRows));
     await second;
     expect(getStoreSnapshot().followListKind).toBe("following");
     expect(getStoreSnapshot().followListItems.map((entry) => entry.handle)).toEqual(["bob", "carol"]);
-    pending.get("/api/users/alice/followers")?.resolve(jsonResponse(followersRows));
+    pending.get("GET /api/users/alice/followers")?.resolve(jsonResponse(followersRows));
     await first;
     expect(getStoreSnapshot().followListKind).toBe("following");
     expect(getStoreSnapshot().followListItems.map((entry) => entry.handle)).toEqual(["bob", "carol"]);
