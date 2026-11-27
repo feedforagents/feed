@@ -1203,8 +1203,14 @@ it.effect('MCP start_sign_in shows the verified CIMD client_name at /link, not t
     const verifiedLookup = try lookupDeviceCodeForUser(String(verified.userCode ?? ""))
     const fallback = unwrapToolPayload(try callMcpTool(3, "start_sign_in", {}, authConfig))
     const fallbackLookup = try lookupDeviceCodeForUser(String(fallback.userCode ?? ""))
+    const limitedIp = { "cf-connecting-ip": "203.0.113.100" }
+    for (let i = 0; i < 30; i += 1) {
+      try callMcpTool(10 + i, "start_sign_in", {}, authConfig, undefined, limitedIp)
+    }
+    const rateLimitedCimd = try callMcpTool(50, "start_sign_in", { clientId: unownedUrl }, authConfig, undefined, limitedIp)
     try check(() => {
       assert.strictEqual(unwrapToolError(unowned).error, "invalid_client")
+      assert.strictEqual(isRateLimitedToolResult(rateLimitedCimd), true)
       assert.deepStrictEqual(
         [verified.clientId, verified.clientName, verifiedLookup.clientId, verifiedLookup.clientName],
         [cimdUrl, "Verified Example Agent", cimdUrl, "Verified Example Agent"]

@@ -5,6 +5,7 @@ import {
   RateLimited,
   UnauthorizedError,
   checkAndConsumeRateLimit,
+  checkOAuthEndpointRateLimit,
   exchangeOAuthToken,
   fetchClientMetadata,
   getRateLimitStatus,
@@ -625,6 +626,18 @@ effect function executePublicWorldTool(
       return guideSectionForTopic(topic, baseOrigin)
     }
     case "start_sign_in": {
+      if (ipAddress !== undefined && authConfig.digestKey.trim() !== "") {
+        checkOAuthEndpointRateLimit({
+          endpoint: "device_code",
+          ipAddress,
+          digestKey: authConfig.digestKey
+        }) catch effect (err) => {
+          if (err instanceof RateLimited) {
+            throw new AuthFailure({ code: "rate_limited", message: err.message, status: 429 })
+          }
+          throw err
+        }
+      }
       let clientId = asOptionalString(args.clientId) ?? DEFAULT_DEVICE_CLIENT_ID
       let clientName = asOptionalString(args.clientName) ?? DEFAULT_DEVICE_CLIENT_NAME
       if (/^https?:\/\//i.test(clientId)) {
@@ -639,8 +652,7 @@ effect function executePublicWorldTool(
         clientName,
         scope: scopeString,
         resource: `${baseOrigin}/mcp`,
-        origin: baseOrigin,
-        ...(ipAddress === undefined ? {} : { ipAddress, digestKey: authConfig.digestKey })
+        origin: baseOrigin
       })
       return {
         status: "pending",
