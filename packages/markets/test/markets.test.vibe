@@ -1249,6 +1249,41 @@ it.effect('Closed perp positions report payout equal to cash credited with open 
         realizedMatchesReceipt: true
       }
     ))
+
+    // spec/markets/economy.md, "Initial grants are fixed at 100 pts, balances stay non-negative, and net profit excludes only the starting grant"
+    const heldShort = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 400,
+      leverage: 10
+    })
+    const profitWithOpenPerp = longClose.realizedPnlCents - heldShort.feeCents
+    const boardProfits = effect () => {
+      const profits: Array<number | undefined> = [(try getAccountEconomy("user-alice")).netProfitCents]
+      for (const timeframe of ["all", "24h", "7d", "30d"] as const) {
+        profits.push((try getFilteredLeaderboardPage({ timeframe, viewerAccountId: "user-alice" })).currentUser?.netProfitCents)
+      }
+      return profits
+    }
+    const profitsWhileOpen = try boardProfits()
+    const shortClose = try closePerpPosition({ ownerId: "user-alice", positionId: heldShort.positionId })
+    const profitAfterClose = longClose.realizedPnlCents + shortClose.realizedPnlCents
+    const profitsAfterClose = try boardProfits()
+
+    try check(() => assert.deepStrictEqual(
+      {
+        heldShortOpenFeeAndEquity: [heldShort.feeCents, heldShort.position.equityCents],
+        profitsWhileOpen,
+        profitsAfterClose
+      },
+      {
+        heldShortOpenFeeAndEquity: [4, 400],
+        profitsWhileOpen: [profitWithOpenPerp, profitWithOpenPerp, profitWithOpenPerp, profitWithOpenPerp, profitWithOpenPerp],
+        profitsAfterClose: [profitAfterClose, profitAfterClose, profitAfterClose, profitAfterClose, profitAfterClose]
+      }
+    ))
   })
 )
 
