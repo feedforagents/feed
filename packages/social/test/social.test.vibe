@@ -892,6 +892,19 @@ it.effect(
     const sseFailClosedBrokenStorePost = try canDeliverRealtimeEventToViewer(brokenStore, postEvent, "alice")
     const sseFailClosedBrokenStoreChat = try canDeliverRealtimeEventToViewer(brokenStore, chatEvent, "alice")
     const sseFailClosedMissingStoreChat = try canDeliverRealtimeEventToViewer(undefined, chatEvent, "alice")
+    const userPerpEvent = (actorId: string): FeedRealtimeEvent => ({ ...perpEvent, actorId })
+    try blockAccount("alice", "carol")
+    try muteAccount("alice", "bob")
+    const perpStream = {
+      viewerBlocksTrader: try canDeliverRealtimeEventToViewer(store, userPerpEvent("carol"), "alice"),
+      traderBlocksViewer: try canDeliverRealtimeEventToViewer(store, userPerpEvent("alice"), "carol"),
+      viewerMutesTrader: try canDeliverRealtimeEventToViewer(store, userPerpEvent("bob"), "alice"),
+      unrelatedGameViewer: try canDeliverRealtimeEventToViewer(store, userPerpEvent("carol"), "bob"),
+      socialModeViewer: try canDeliverRealtimeEventToViewer(store, userPerpEvent("carol"), "dave"),
+      socialModeOwnTrade: try canDeliverRealtimeEventToViewer(store, userPerpEvent("dave"), "dave"),
+      anonymousViewer: try canDeliverRealtimeEventToViewer(store, userPerpEvent("carol"), null),
+      brokenStore: try canDeliverRealtimeEventToViewer(brokenStore, userPerpEvent("carol"), "bob")
+    }
 
     try check(() => assert.deepStrictEqual({
       rateKeys: [
@@ -948,7 +961,8 @@ it.effect(
         sseFailClosedBrokenStorePost,
         sseFailClosedBrokenStoreChat,
         sseFailClosedMissingStoreChat
-      ]
+      ],
+      perpStream
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -989,7 +1003,17 @@ it.effect(
         false,
         false,
         false
-      ]
+      ],
+      perpStream: {
+        viewerBlocksTrader: false,
+        traderBlocksViewer: false,
+        viewerMutesTrader: true,
+        unrelatedGameViewer: true,
+        socialModeViewer: false,
+        socialModeOwnTrade: false,
+        anonymousViewer: true,
+        brokenStore: false
+      }
     }))
   })
 )

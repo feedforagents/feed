@@ -1056,11 +1056,14 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
 
     const anonJoined = anonFrames.join("\n")
     const aliceJoined = aliceFrames.join("\n")
+    const bobId = String(bob.account.accountId)
     try check(() => assert.deepStrictEqual(
       {
         anonHasNoPrivateChat: !anonJoined.includes("event: chat.message"),
         anonHasPerpOpen: anonJoined.includes("event: market.perp") && anonJoined.includes('"action":"open"'),
         aliceHasNoBlockedPost: !aliceJoined.includes("event: post.created"),
+        aliceHasNoBlockedPerp: !aliceFrames.some((f) => f.includes("event: market.perp") && f.includes(bobId)),
+        anonHasBobPerp: anonFrames.some((f) => f.includes("event: market.perp") && f.includes(bobId)),
         aliceHasPerpOpen: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"open"'),
         aliceHasPerpClose: aliceJoined.includes("event: market.perp") && aliceJoined.includes('"action":"close"') && aliceJoined.includes('"leverage":2')
       },
@@ -1068,6 +1071,8 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
         anonHasNoPrivateChat: true,
         anonHasPerpOpen: true,
         aliceHasNoBlockedPost: true,
+        aliceHasNoBlockedPerp: true,
+        anonHasBobPerp: true,
         aliceHasPerpOpen: true,
         aliceHasPerpClose: true
       }
