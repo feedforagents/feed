@@ -417,7 +417,6 @@ it.effect('Budget ledger enforces 80% and 90% D-25 throttles and carries uncerta
   })
 }))
 
-
 it.effect('Confirming spend above the reserved bound settles at the bound (spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation"; spec/engine/spendBudget.md, "Inductive safety invariants for spend, reservations, and monotonic throttling")', () => scoped(effect {
     const day1Ms = Date.UTC(2026, 10, 23, 12, 0, 0)
     try withSeededEngine(day1Ms, effect {
@@ -437,6 +436,7 @@ it.effect('Confirming spend above the reserved bound settles at the bound (spec/
       })
     })
   }))
+
 it.effect('NPC ticks drive spot markets and posts while markets emit idempotent clues and replace manual holds (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/npcLoop.md, "Each NPC tick starts with a budget-enforced step cap and loops ObserveFeed -> Decide -> Act"; spec/engine/npcLoop.md, "Only NPC actors execute spot trades (moving the index price) and alpha invites"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Clues require a matching active phase and a persisted unique clue key"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/narrativeArc.md, "Only admins may approve or resolve markets on manual hold"; spec/engine/narrativeArc.md, "Resolved slots are replaced independently with a fresh market epoch")', () => scoped(effect {
   const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
   try withSeededEngine(liveNow, effect {
