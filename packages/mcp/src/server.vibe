@@ -1161,7 +1161,7 @@ effect function executeProtectedAccountTool(
       }
     }
     case "preview_perp": {
-      const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
+      const { ticker, side, leverage, collateralCents, mode: perpMode } = try parsePerpOrderArgs(args)
       if (mode === "social") {
         return {
           previewOnly: true,
@@ -1177,7 +1177,8 @@ effect function executeProtectedAccountTool(
         ticker,
         side,
         collateralCents,
-        leverage
+        leverage,
+        ...(perpMode === undefined ? {} : { mode: perpMode })
       })
       return {
         previewOnly: true,
@@ -1393,15 +1394,17 @@ effect function parsePerpOrderArgs(args: Record<string, unknown>): {
   readonly side: "long" | "short"
   readonly leverage: number
   readonly collateralCents: number
+readonly mode: "flip" | undefined
 }!InvalidRpcParamsFailure {
   const ticker = (asOptionalString(args.ticker) ?? "").toUpperCase()
   const side = args.side === "short" ? "short" : "long"
   const leverage = asOptionalInt(args.leverage) ?? 1
+const mode = args.mode === "flip" ? "flip" : undefined
   const collateralCents = ptsToWholeCents(Number(args.collateralPts))
   if (collateralCents === undefined) {
     throw new InvalidRpcParamsFailure({ message: "collateralPts must equal at least 0.01 pt (1 cent)." })
   }
-  return { ticker, side, leverage, collateralCents }
+  return { ticker, side, leverage, collateralCents, mode }
 }
 
 function tradeBalanceFooter(
@@ -1555,7 +1558,7 @@ effect function executeProtectedTradeTool(
       return formatPredictionTradeReceipt(receipt, caller)
     }
     case "open_perp": {
-      const { ticker, side, leverage, collateralCents } = try parsePerpOrderArgs(args)
+      const { ticker, side, leverage, collateralCents, mode: perpMode } = try parsePerpOrderArgs(args)
       const receipt = try openPerpPosition({
         ownerId: caller.accountId,
         ownerKind: "user",
@@ -1563,6 +1566,7 @@ effect function executeProtectedTradeTool(
         side,
         collateralCents,
         leverage,
+        ...(perpMode === undefined ? {} : { mode: perpMode }),
         ...perpTradeMeta(args, caller.clientName)
       })
       try maybePublishFeedEvent({
@@ -1599,6 +1603,9 @@ effect function executeProtectedTradeTool(
       const positionId = asOptionalString(args.positionId) ?? ""
       const sizeCents = try resolveCloseSizeCents(args)
       const closePct = typeof args.closePct === "number" && Number.isFinite(args.closePct) ? args.closePct : undefined
+      if (sizeCents !== undefined && closePct !== undefined) {
+        throw new InvalidRpcParamsFailure({ message: "provide only one of sizeCents/sizePts/closePct" })
+      }
       const openPositions = try listPerpPositions(caller.accountId)
       const existingPosition = openPositions.find((pos) => pos.id === positionId)
       const receipt = try closePerpPosition({

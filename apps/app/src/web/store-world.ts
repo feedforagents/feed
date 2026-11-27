@@ -69,9 +69,20 @@ import {
 } from "./types.ts";
 
 const likeInFlight = new Set<string>();
+const likeServerCountLanded = new Set<string>();
 const repostInFlight = new Set<string>();
+const repostServerCountLanded = new Set<string>();
+
+export function markLikeServerCountLanded(postId: string): void {
+  if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
+}
+
+export function markRepostServerCountLanded(postId: string): void {
+  if (repostInFlight.has(postId)) repostServerCountLanded.add(postId);
+}
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
+let feedLoadedTab: UiFeedTab = "latest";
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
@@ -151,6 +162,8 @@ function preserveEngagementSince(
     if (!start || !current) return post;
     const now = engagementOf(current.card);
     if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
+      if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
+      if (repostInFlight.has(post.card.id)) markRepostServerCountLanded(post.card.id);
       return post;
     }
     return { ...post, card: { ...post.card, ...now } };
@@ -307,6 +320,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const latest = getStoreSnapshot();
   if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
+    feedLoadedTab = tab;
     setStoreState({
       feedPosts: preserveEngagementSince(res.data.items, engagementAtStart),
       feedNextCursor: res.data.nextCursor,
@@ -315,7 +329,16 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     });
     return;
   }
-  setStoreState({ feedLoading: false });
+  if (feedLoadedTab !== tab && (feedLoadedTab === "latest" || latest.viewer !== null)) {
+    const specTab = toSpecTab(feedLoadedTab);
+    sendNav({ type: "selectFeedTab", tab: specTab });
+    sendApp({ type: "selectTab", tab: specTab });
+    setStoreState({ feedTab: feedLoadedTab, feedLoading: false });
+  } else if (feedLoadedTab !== tab) {
+    setStoreState({ feedPosts: [], feedNextCursor: null, feedLoading: false });
+  } else {
+    setStoreState({ feedLoading: false });
+  }
   setErrorNotice(res.message);
 }
 
@@ -395,6 +418,7 @@ let threadRequestSeq = 0;
 
 export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
   const s = getStoreSnapshot();
+  const prevSort = s.threadSort;
   const sort = sortOverride ?? s.threadSort;
   const viewerId = s.viewer?.accountId ?? null;
   threadRequestSeq += 1;
@@ -425,7 +449,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
     });
     return;
   }
-  setStoreState({ threadLoading: false });
+  setStoreState({ threadLoading: false, threadSort: prevSort });
   setErrorNotice(res.ok ? "Post not found" : res.message);
 }
 
@@ -547,6 +571,7 @@ export async function toggleLike(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
   if (likeInFlight.has(postId)) return;
   likeInFlight.add(postId);
+  likeServerCountLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
   const optimisticLiked = !currentlyLiked;
   const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
@@ -561,10 +586,11 @@ export async function toggleLike(postId: string): Promise<void> {
       parse: passThrough,
     });
     if (!res.ok) {
+      const serverCountLanded = likeServerCountLanded.has(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         liked: currentlyLiked,
-        likeCount: prevCount,
+        ...(serverCountLanded ? {} : { likeCount: prevCount }),
       }));
       setErrorNotice(res.message);
       return;
@@ -579,6 +605,7 @@ export async function toggleLike(postId: string): Promise<void> {
     }));
   } finally {
     likeInFlight.delete(postId);
+    likeServerCountLanded.delete(postId);
   }
 }
 
@@ -588,6 +615,7 @@ export async function repostPost(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "repost", postId, label: currentlyReposted ? "remove repost" : "repost this post" })) return;
   if (repostInFlight.has(postId)) return;
   repostInFlight.add(postId);
+  repostServerCountLanded.delete(postId);
   const prevCount = existing?.card.repostCount ?? 0;
   const optimisticReposted = !currentlyReposted;
   const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
@@ -602,10 +630,11 @@ export async function repostPost(postId: string): Promise<void> {
       parse: passThrough,
     });
     if (!res.ok) {
+      const serverCountLanded = repostServerCountLanded.has(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         reposted: currentlyReposted,
-        repostCount: prevCount,
+        ...(serverCountLanded ? {} : { repostCount: prevCount }),
       }));
       setErrorNotice(res.message);
       return;
@@ -620,6 +649,7 @@ export async function repostPost(postId: string): Promise<void> {
     }));
   } finally {
     repostInFlight.delete(postId);
+    repostServerCountLanded.delete(postId);
   }
 }
 
@@ -1781,6 +1811,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   setStoreState({ profileRepliesLoading: false });
+  setErrorNotice(res.message);
 }
 
 function isProfileHandleCurrent(handle: string): boolean {
@@ -1821,6 +1852,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   setStoreState({ profileLikesLoading: false });
+  setErrorNotice(res.message);
 }
 
 let profileTradesLoadCount = 0;
@@ -1844,6 +1876,7 @@ export async function loadProfileTrades(handleOrSelf?: string | null): Promise<v
     return;
   }
   setStoreState({ profileTradesLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadMoreProfilePosts(): Promise<void> {
@@ -1922,6 +1955,10 @@ export async function loadModerationLists(): Promise<void> {
     blockedAccounts: blockedRes.ok ? blockedRes.data : cur.blockedAccounts,
     mutedAccounts: mutedRes.ok ? mutedRes.data : cur.mutedAccounts,
   });
+  const failed = !blockedRes.ok ? blockedRes : !mutedRes.ok ? mutedRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function updateOwnProfile(payload: {

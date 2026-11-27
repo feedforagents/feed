@@ -1004,6 +1004,21 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       [blocksListRes.status, blocksItems.length, mutesListRes.status, mutesItems.length],
       [200, 1, 200, 1]
     ))
+    const blockedSearchRes = try callApp("/api/users/search?q=parity_bob", { cookie: alice.cookie })
+    const blockedSearchItems = (try readJson(blockedSearchRes)).items as ReadonlyArray<Record<string, unknown>>
+    const anonSearchRes = try callApp("/api/users/search?q=parity_bob")
+    const anonSearchItems = (try readJson(anonSearchRes)).items as ReadonlyArray<Record<string, unknown>>
+    const mutedSearchRes = try callApp("/api/users/search?q=parity_charlie", { cookie: alice.cookie })
+    const mutedSearchItems = (try readJson(mutedSearchRes)).items as ReadonlyArray<Record<string, unknown>>
+    try check(() => assert.deepStrictEqual(
+      [
+        blockedSearchRes.status,
+        blockedSearchItems.some((item) => item.handle === "parity_bob"),
+        anonSearchItems.some((item) => item.handle === "parity_bob"),
+        mutedSearchItems.some((item) => item.handle === "parity_charlie")
+      ],
+      [200, false, true, false]
+    ))
 
     // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
     const heldOpenRes = try callApp("/api/markets/perp/NVDAI/open", {

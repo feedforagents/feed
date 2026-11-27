@@ -266,7 +266,7 @@ function QuoteEmbed({
         onQuoteClick(quote.id);
       }}
       onKeyDown={(e) => {
-        if (!onQuoteClick || disabled) return;
+        if (!onQuoteClick || disabled || e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           e.stopPropagation();

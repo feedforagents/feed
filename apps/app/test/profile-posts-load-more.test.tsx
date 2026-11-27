@@ -62,22 +62,6 @@ function respond(path: string, url: URL): unknown {
       nextCursor: "bob-cursor-1",
     };
   }
-  if (path === "/api/feed" || path === "/api/posts") return { items: [], nextCursor: null };
-  if (path === "/api/trending") return { trending: [] };
-  if (path === "/api/articles") return { articles: [] };
-  if (path === "/api/markets") return { predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } };
-  if (path === "/api/world/status") {
-    return {
-      currentDay: 3,
-      currentHour: 14,
-      phase: "active",
-      gameRunning: true,
-      lastTickAt: Date.now(),
-      activeMarketsCount: 0,
-      totalPostsCount: 0,
-      activeActorsCount: 5,
-    };
-  }
   return undefined;
 }
 
