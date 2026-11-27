@@ -510,7 +510,11 @@ export effect function listUserTrades(input: {
     let traderId: string | null = null
     let traderKind: "user" | "npc" | null = null
     const acctRows = try tx.query(
-      `SELECT account_id FROM feed_accounts WHERE account_id = $1 OR LOWER(handle) = $2 LIMIT 1`,
+      `SELECT fa.account_id
+       FROM feed_accounts fa
+       WHERE (fa.account_id = $1 OR LOWER(handle) = $2)
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = fa.account_id AND a.status <> 'active')
+       LIMIT 1`,
       [raw, lower]
     )
     if (acctRows.length > 0) {
