@@ -1134,10 +1134,22 @@ async function executeTradeRequest({
   readonly statusMessage: string;
   readonly formatReceiptMessage?: (data: unknown) => string;
 }): Promise<boolean> {
+  const scopeAtSubmit = getStoreSnapshot();
   setStoreState({ tradeLoading: true, tradeError: null });
   const res = await requestJson(endpoint, { method: "POST", body, headers, parse: passThrough });
   if (!res.ok) {
-    setStoreState({ tradeLoading: false, tradeError: res.message });
+    const latest = getStoreSnapshot();
+    const sameMarketScope =
+      latest.selectedMarketKind === scopeAtSubmit.selectedMarketKind &&
+      (scopeAtSubmit.selectedMarketKind === "perp"
+        ? latest.selectedMarketId?.toUpperCase() === scopeAtSubmit.selectedMarketId?.toUpperCase()
+        : latest.selectedMarketId === scopeAtSubmit.selectedMarketId) &&
+      latest.marketsViewMode === scopeAtSubmit.marketsViewMode &&
+      latest.walletView === scopeAtSubmit.walletView;
+    setStoreState({
+      tradeLoading: false,
+      ...(sameMarketScope ? { tradeError: res.message } : {}),
+    });
     setErrorNotice(res.message);
     return false;
   }
