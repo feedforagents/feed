@@ -1596,3 +1596,43 @@ it.effect('MCP open_perp with mode flip closes the long and opens a short (spec/
     assert.strictEqual(flipFeeCents, openFeeCents + freshShortFeeCents)
   })
 }))
+
+it.effect('MCP close_perp rejects sizeCents together with closePct (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")', () =>
+  withSeededWorld(effect (authConfig) => {
+    const alice = try onboardPhoneUser("+14155550221", "alice_close_conflict", "Alice Close Conflict", authConfig)
+    const aliceToken = (try connectOAuthGrant({
+      accountId: alice.account.accountId,
+      clientName: "Close Conflict Agent",
+      redirectUri: "http://127.0.0.1:4104/callback",
+      scope: "read social:write messages trade",
+      state: "state_close_conflict",
+      verifier: "pkce_verifier_close_conflict_0123456789abcdef0123456789",
+      authConfig
+    })).access_token
+    const marketsPayload = unwrapToolPayload(try callMcpTool(201, "list_markets", { kind: "perp", limit: 5 }, authConfig))
+    const firstPerp = ((marketsPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>)[0]
+    const ticker = firstPerp?.ticker ?? ""
+    const openedPerp = unwrapToolPayload(try callMcpTool(
+      202,
+      "open_perp",
+      { ticker, side: "long", collateralPts: 10, leverage: 3 },
+      authConfig,
+      aliceToken
+    ))
+    const positionId = String(openedPerp.positionId ?? "")
+    const conflictRes = try callMcpTool(
+      203,
+      "close_perp",
+      { positionId, sizeCents: 2000, closePct: 50 },
+      authConfig,
+      aliceToken
+    )
+    try check(() => {
+      assert.notStrictEqual(ticker, "")
+      assert.notStrictEqual(positionId, "")
+      assert.strictEqual(conflictRes.status, 400)
+      assert.strictEqual((conflictRes.body.error as { readonly code?: number } | undefined)?.code, -32602)
+      assert.strictEqual((conflictRes.body.error as { readonly message?: string } | undefined)?.message, "provide only one of sizeCents/sizePts/closePct")
+    })
+  })
+)
