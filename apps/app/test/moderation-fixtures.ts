@@ -1,6 +1,7 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { clearAuthorHides } from "../src/web/store-world.ts";
 import { decodePost, type AppPost } from "../src/web/types.ts";
 
 export const aliceViewer = {
@@ -86,6 +87,7 @@ export function decodedPost(raw: Record<string, unknown>): AppPost {
 }
 
 export function resetModerationStore(): void {
+  clearAuthorHides();
   setStoreState({
     viewer: null,
     route: "Home",

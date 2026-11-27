@@ -94,6 +94,22 @@ function wasAuthorHiddenSince(handle: string, hidesAtStart: number): boolean {
   return (authorHiddenAtSeq.get(handle.toLowerCase()) ?? 0) > hidesAtStart;
 }
 
+export function clearAuthorHides(): void {
+  authorHiddenAtSeq.clear();
+}
+
+function stripPostAttribution(p: AppPost, stripRepost: boolean, stripQuote: boolean): AppPost {
+  if (!stripRepost && !stripQuote) return p;
+  return {
+    ...p,
+    card: {
+      ...p.card,
+      ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
+      ...(stripQuote ? { quotePost: undefined } : {}),
+    },
+  };
+}
+
 function dropAuthorsHiddenSince(
   posts: ReadonlyArray<AppPost>,
   hidesAtStart: number,
@@ -103,15 +119,7 @@ function dropAuthorsHiddenSince(
     const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
     const stripRepost = reposter !== undefined && wasAuthorHiddenSince(reposter, hidesAtStart);
     const stripQuote = p.card.quotePost !== undefined && wasAuthorHiddenSince(p.card.quotePost.authorHandle, hidesAtStart);
-    if (!stripRepost && !stripQuote) return p;
-    return {
-      ...p,
-      card: {
-        ...p.card,
-        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
-        ...(stripQuote ? { quotePost: undefined } : {}),
-      },
-    };
+    return stripPostAttribution(p, stripRepost, stripQuote);
   };
   return posts.filter((p) => !wasAuthorHiddenSince(p.card.authorHandle, hidesAtStart)).map(cleanPost);
 }
@@ -293,19 +301,11 @@ function filterAuthorOutOfFeeds(handle: string): void {
     const reposter = reposterHandle(p);
     return reposter !== undefined && isBlockedHandle(reposter);
   };
-  const cleanPost = (p: AppPost): AppPost => {
-    const stripRepost = isBlockedReposter(p);
-    const stripQuote = p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle);
-    if (!stripRepost && !stripQuote) return p;
-    return {
-      ...p,
-      card: {
-        ...p.card,
-        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
-        ...(stripQuote ? { quotePost: undefined } : {}),
-      },
-    };
-  };
+  const cleanPost = (p: AppPost): AppPost => stripPostAttribution(
+    p,
+    isBlockedReposter(p),
+    p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle),
+  );
   const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
     list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);
   const cur = getStoreSnapshot();
@@ -2226,6 +2226,14 @@ async function toggleModeration(
     );
   } else if (cur.route === "Settings") {
     void loadModerationLists();
+  }
+  if (active) {
+    const after = getStoreSnapshot();
+    const stillHidden = after.mutedAccounts.some((a) => a.handle.toLowerCase() === lower)
+      || after.blockedAccounts.some((a) => a.handle.toLowerCase() === lower)
+      || (after.profileBundle?.summary.handle.toLowerCase() === lower
+        && (after.profileBundle.summary.isMuted || after.profileBundle.summary.isBlocked));
+    if (!stillHidden) authorHiddenAtSeq.delete(lower);
   }
   const verb = isBlock ? (active ? "Unblocked" : "Blocked") : (active ? "Unmuted" : "Muted");
   setStatusNotice(`${verb} @${handle}.`);

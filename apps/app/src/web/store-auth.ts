@@ -23,6 +23,7 @@ import {
   setStoreState,
 } from "./store-core.ts";
 import {
+  clearAuthorHides,
   createPost,
   loadArticle,
   loadChats,
@@ -156,6 +157,7 @@ export async function hydrateAuth(): Promise<void> {
       joinError: null,
     });
     if (prevViewerId !== viewer.accountId) {
+      clearAuthorHides();
       notifyAuthChanged();
     } else if (prevUiMode !== viewer.uiMode) {
       await loadNotifications();
@@ -182,6 +184,7 @@ export async function hydrateAuth(): Promise<void> {
     route: fallbackRoute,
   });
   if (prevViewerId !== null) {
+    clearAuthorHides();
     notifyAuthChanged();
   }
 }
@@ -840,6 +843,7 @@ async function performSignOut({
     return;
   }
   clearPersistedPendingAction();
+  clearAuthorHides();
   sendNav({ type: "signOutNav" });
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
