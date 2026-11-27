@@ -13,10 +13,10 @@ export function installDeferredFetch() {
   const pending = new Map<string, Deferred>();
   const fetchMock: typeof fetch = (input, init) => {
     const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, "https://feed.fun").pathname;
+    const url = new URL(raw, "https://feed.fun");
     const method = init?.method ?? "GET";
     return new Promise<Response>((resolve) => {
-      pending.set(`${method} ${path}`, { resolve });
+      pending.set(`${method} ${url.pathname}${url.search}`, { resolve });
     });
   };
   vi.stubGlobal("fetch", fetchMock);
