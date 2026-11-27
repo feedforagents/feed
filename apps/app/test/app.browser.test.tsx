@@ -1221,6 +1221,40 @@ it('Publishes a pasted post whose trimmed text fits the limit (spec/social/posts
   expect(submitted).toEqual([JSON.stringify({ content: text })]);
 });
 
+it('Post copy controls report the clipboard outcome (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const post = {
+    ...SAMPLE_POSTS[0],
+    content: "Public plant swap on Saturday.",
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+  };
+  const writeText = vi.spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValueOnce(new DOMException("Permission denied", "NotAllowedError"))
+    .mockResolvedValueOnce(undefined);
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/feed") return Promise.resolve(Response.json({ items: [post], nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+  const main = page.getByRole("main");
+  const copied = page.getByText("Link copied to clipboard.", { exact: true });
+  await act(() => userEvent.click(main.getByRole("button", { name: "Share post", exact: true })));
+  await expect.element(page.getByText("Could not copy the post link.", { exact: true })).toBeInTheDocument();
+  await expect.element(copied).not.toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "More post actions", exact: true })));
+  await act(() => userEvent.click(page.getByRole("menuitem", { name: "Copy link", exact: true })));
+  await expect.element(copied).toBeInTheDocument();
+  expect(writeText.mock.calls).toEqual([[`${window.location.origin}/post/${post.id}`], [`${window.location.origin}/post/${post.id}`]]);
+  writeText.mockRestore();
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 
