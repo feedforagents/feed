@@ -435,6 +435,10 @@ export function removePostAcrossStore(
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
   const isBlockedHandle = (value: string): boolean => value.toLowerCase() === normalized;
+  const isBlockedReposter = (p: AppPost): boolean => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    return reposter !== undefined && isBlockedHandle(reposter);
+  };
   const cleanPost = (p: AppPost): AppPost => stripHiddenAuthorRefs(p, isBlockedHandle);
   const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
     list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);

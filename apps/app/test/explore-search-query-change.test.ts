@@ -3,23 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { loadExplore } from "../src/web/store-world.ts";
 import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
+import { makeExploreSearchPayload } from "./moderation-fixtures.ts";
 
 function post(id: string) {
   return { id, authorId: "acct-alice", authorHandle: "alice", authorDisplayName: "Alice", content: `post ${id}`, createdAt: "2026-11-27T00:00:00.000Z" };
 }
 
 function explorePayload(postId: string, handle: string) {
-  return {
-    trending: [],
-    articles: [],
-    search: {
-      posts: [post(postId)],
-      accounts: [{ accountId: `acct-${handle}`, handle, displayName: handle, bio: "", avatarUrl: null, viewerFollows: false }],
-      actors: [],
-      organizations: [],
-      tags: [],
-    },
-  };
+  return makeExploreSearchPayload(post(postId), handle);
 }
 
 function errorResponse(): Response {

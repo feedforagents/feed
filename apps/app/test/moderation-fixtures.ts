@@ -176,3 +176,17 @@ export async function setupAuthStore(handler: (path: string) => Response, viewer
   core.setStoreState({ viewer: viewerState, route: "Settings", settingsTab: "account" });
   return { core, auth };
 }
+
+export function makeExploreSearchPayload(post: Record<string, unknown>, handle: string) {
+  return {
+    trending: [],
+    articles: [],
+    search: {
+      posts: [post],
+      accounts: [{ accountId: `acct-${handle}`, handle, displayName: handle, bio: "", avatarUrl: null, viewerFollows: false }],
+      actors: [],
+      organizations: [],
+      tags: [],
+    },
+  };
+}

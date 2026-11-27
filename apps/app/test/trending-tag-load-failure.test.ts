@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadTrendingTag } from "../src/web/store-world.ts";
-import { stubFetchUrl } from "./moderation-fixtures.ts";
+import { makeExploreSearchPayload, stubFetchUrl } from "./moderation-fixtures.ts";
 
 function post(id: string, content: string) {
   return { id, authorId: "acct-alice", authorHandle: "alice", authorDisplayName: "Alice", content, createdAt: "2026-11-28T00:00:00.000Z" };
@@ -13,17 +13,7 @@ function trendingResponse(tag: string, postId: string) {
 }
 
 function searchResponse(postId: string, handle: string) {
-  return Promise.resolve(Response.json({
-    trending: [],
-    articles: [],
-    search: {
-      posts: [post(postId, "Private gardens open Tuesday")],
-      accounts: [{ accountId: `acct-${handle}`, handle, displayName: handle, bio: "", avatarUrl: null, viewerFollows: false }],
-      actors: [],
-      organizations: [],
-      tags: [],
-    },
-  }));
+  return Promise.resolve(Response.json(makeExploreSearchPayload(post(postId, "Private gardens open Tuesday"), handle)));
 }
 
 function errorResponse(message: string) {

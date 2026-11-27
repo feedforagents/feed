@@ -183,6 +183,7 @@ export function installMockNetwork(respond: MockResponder): void {
   stubFetchByUrl((url, init) => {
     const path = url.pathname;
     const body = respond(path, url, init);
+    if (body instanceof Response) return Promise.resolve(body);
     if (body !== undefined) return json(body);
     return json(defaults[path]?.() ?? {});
   });
@@ -216,6 +217,21 @@ export async function flush(): Promise<void> {
       await Promise.resolve();
     });
   }
+}
+
+export function composerTextarea(): HTMLTextAreaElement {
+  const textarea = document.querySelector<HTMLTextAreaElement>('[role="dialog"] textarea[aria-label="Post text"]');
+  if (!textarea) throw new Error("composer textarea not found");
+  return textarea;
+}
+
+export async function openComposeDialogForTest(open: () => void): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    act(open);
+    await flush();
+    if (document.querySelector('[role="dialog"] textarea[aria-label="Post text"]')) return;
+  }
+  throw new Error("compose dialog did not open");
 }
 
 export async function mountApp(opened: Root[]): Promise<{ container: HTMLElement; root: Root }> {

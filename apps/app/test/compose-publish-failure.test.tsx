@@ -1,78 +1,35 @@
 // @vitest-environment happy-dom
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"
+import { expect, it } from "vitest";
 import { act } from "react";
 import type { Root } from "react-dom/client";
-import { expect, it } from "vitest";
 import { setStoreState } from "../src/web/store-core.ts";
 import { storeActions } from "../src/web/store.ts";
-import { flush, installAppTestLifecycle, installStubEventSource, makeRawPost, makeViewerSession, mountApp, stubFetchByUrl } from "./app-test-helpers.tsx";
+import { composerTextarea, flush, installAppTestLifecycle, installMockNetwork, makeAuthMeResponse, makeRawPost, makeViewerSession, mountApp, openComposeDialogForTest, setControlValue } from "./app-test-helpers.tsx";
 
-const opened: Root[] = [];
+const roots: Root[] = [];
 
-installAppTestLifecycle(opened, () => {
-  setStoreState({ viewer: null, route: "Home", composeOpen: false, quotePostTarget: null, toasts: [], errorMessage: null });
+installAppTestLifecycle(roots, () => {
+  setStoreState({ toasts: [], errorMessage: null, composeOpen: false, quotePostTarget: null, viewer: null, route: "Home" });
 });
 
 function installNetwork(postStatus: number): void {
-  installStubEventSource();
-  stubFetchByUrl((url, init) => {
-    const path = url.pathname;
+  installMockNetwork((path, _url, init) => {
     const method = init?.method ?? "GET";
     if (path === "/api/posts" && method === "POST") {
       if (postStatus === 200) {
-        return Promise.resolve(Response.json(makeRawPost(Date.now(), { id: "post-new", content: "Draft that must survive" })));
+        return makeRawPost(Date.now(), { id: "post-new", content: "Draft that must survive" });
       }
-      return Promise.resolve(
-        Response.json({ error: { code: "RateLimited", message: "Hourly action limit exceeded" } }, { status: postStatus }),
-      );
+      return Response.json({ error: { code: "RateLimited", message: "Hourly action limit exceeded" } }, { status: postStatus });
     }
-    if (path === "/api/auth/me") {
-      return Promise.resolve(
-        Response.json({
-          authenticated: true,
-          viewer: {
-            accountId: "acct-player-1",
-            handle: "alice",
-            displayName: "Alice Trader",
-            bio: "",
-            avatarUrl: null,
-            bannerUrl: null,
-            phoneLast2: "01",
-            uiMode: "game",
-            balanceCents: 10500,
-            startingGrantCents: 10000,
-            isAdmin: false,
-            isReviewer: true,
-            agentGrant: null,
-          },
-          acceptedCountries: ["+1", "+44"],
-          publicAppUrl: window.location.origin,
-          devSmsCodeEnabled: true,
-        }),
-      );
-    }
-    if (path === "/api/feed") return Promise.resolve(Response.json({ items: [], nextCursor: null }));
-    if (path === "/api/trending") return Promise.resolve(Response.json({ trending: [] }));
-    if (path === "/api/articles") return Promise.resolve(Response.json({ articles: [] }));
-    if (path === "/api/markets") {
-      return Promise.resolve(Response.json({ predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } }));
-    }
-    if (path === "/api/world/status") {
-      return Promise.resolve(
-        Response.json({ currentDay: 3, currentHour: 14, phase: "active", gameRunning: true, lastTickAt: Date.now(), activeMarketsCount: 0, totalPostsCount: 0, activeActorsCount: 5 }),
-      );
-    }
-    if (path === "/api/chats") return Promise.resolve(Response.json({ chats: [] }));
-    if (path === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
-    if (path === "/api/notifications") return Promise.resolve(Response.json({ items: [], unreadCount: 0 }));
-    if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return Promise.resolve(Response.json({ items: [] }));
-    return Promise.resolve(Response.json({}));
+    if (path === "/api/auth/me") return makeAuthMeResponse();
+    return undefined;
   });
 }
 
 async function mountSignedInApp(postStatus: number): Promise<void> {
   installNetwork(postStatus);
-  await mountApp(opened);
+  await mountApp(roots);
   await flush();
   setStoreState({ viewer: makeViewerSession({ accountId: "acct-player-1", displayName: "Alice Trader" }) });
   await flush();
@@ -84,28 +41,12 @@ function dialogElement(): HTMLElement {
   return dialog;
 }
 
-function composerTextarea(): HTMLTextAreaElement {
-  const textarea = document.querySelector<HTMLTextAreaElement>('[role="dialog"] textarea[aria-label="Post text"]');
-  if (!textarea) throw new Error("composer textarea not found");
-  return textarea;
-}
-
 async function openCompose(): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    act(() => { storeActions.openComposeDialog(null); });
-    await flush();
-    if (document.querySelector('[role="dialog"] textarea[aria-label="Post text"]')) return;
-  }
-  throw new Error("compose dialog did not open");
+  await openComposeDialogForTest(() => { storeActions.openComposeDialog(null); });
 }
 
 async function typeDraft(text: string): Promise<void> {
-  const textarea = composerTextarea();
-  act(() => {
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, text);
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-  await flush();
+  await setControlValue(composerTextarea(), text);
 }
 
 async function submitCompose(): Promise<void> {

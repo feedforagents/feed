@@ -85,11 +85,11 @@ it.effect(
 
       const livePending = try listPendingGroupInvites("alpha-acct-live", "npc_alpha")
       const inactivePending = try db.transaction(effect (tx: Tx) => {
-        const deletingRows = try tx.query<{ id: string }>(
+        const deletingRows = try tx.query(
           "SELECT id FROM feed_group_invites WHERE invited_account_id = $1 AND status = 'pending'",
           ["alpha-acct-deleting"],
         )
-        const erasedRows = try tx.query<{ id: string }>(
+        const erasedRows = try tx.query(
           "SELECT id FROM feed_group_invites WHERE invited_account_id = $1 AND status = 'pending'",
           ["alpha-acct-erased"],
         )

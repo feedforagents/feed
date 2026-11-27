@@ -1,11 +1,11 @@
 // @vitest-environment happy-dom
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+import { expect, it } from "vitest";
 import { act } from "react";
 import type { Root } from "react-dom/client";
-import { expect, it } from "vitest";
 import { setStoreState } from "../src/web/store-core.ts";
 import { storeActions } from "../src/web/store.ts";
-import { findButtonByText, flush, installAppTestLifecycle, installStubEventSource, makeAuthMeResponse, makeViewerSession, mountApp, stubFetchByUrl } from "./app-test-helpers.tsx";
+import { findButtonByText, flush, installAppTestLifecycle, installMockNetwork, makeAuthMeResponse, makeViewerSession, mountApp } from "./app-test-helpers.tsx";
 
 const opened: Root[] = [];
 
@@ -14,35 +14,14 @@ installAppTestLifecycle(opened, () => {
 });
 
 function installNetwork(reportStatus: number): void {
-  installStubEventSource();
-  stubFetchByUrl((url, init) => {
-    const path = url.pathname;
+  installMockNetwork((path, _url, init) => {
     const method = init?.method ?? "GET";
     if (path === "/api/reports" && method === "POST") {
-      if (reportStatus === 200) {
-        return Promise.resolve(Response.json({ id: "report-1", status: "open" }));
-      }
-      return Promise.resolve(
-        Response.json({ error: { code: "RateLimited", message: "Hourly action limit exceeded" } }, { status: reportStatus }),
-      );
+      if (reportStatus === 200) return { id: "report-1", status: "open" };
+      return Response.json({ error: { code: "RateLimited", message: "Hourly action limit exceeded" } }, { status: reportStatus });
     }
-    if (path === "/api/auth/me") return Promise.resolve(Response.json(makeAuthMeResponse()));
-    if (path === "/api/feed") return Promise.resolve(Response.json({ items: [], nextCursor: null }));
-    if (path === "/api/trending") return Promise.resolve(Response.json({ trending: [] }));
-    if (path === "/api/articles") return Promise.resolve(Response.json({ articles: [] }));
-    if (path === "/api/markets") {
-      return Promise.resolve(Response.json({ predictions: [], perps: [], positions: { predictionPositions: [], perpPositions: [] } }));
-    }
-    if (path === "/api/world/status") {
-      return Promise.resolve(
-        Response.json({ currentDay: 3, currentHour: 14, phase: "active", gameRunning: true, lastTickAt: Date.now(), activeMarketsCount: 0, totalPostsCount: 0, activeActorsCount: 5 }),
-      );
-    }
-    if (path === "/api/chats") return Promise.resolve(Response.json({ chats: [] }));
-    if (path === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
-    if (path === "/api/notifications") return Promise.resolve(Response.json({ items: [], unreadCount: 0 }));
-    if (path === "/api/moderation/blocks" || path === "/api/moderation/mutes") return Promise.resolve(Response.json({ items: [] }));
-    return Promise.resolve(Response.json({}));
+    if (path === "/api/auth/me") return makeAuthMeResponse();
+    return undefined;
   });
 }
 

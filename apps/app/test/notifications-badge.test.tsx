@@ -220,6 +220,21 @@ it('notification badge follows a mode change through a refetch and shows the ser
   expectBadge(61);
 });
 
+async function seedNotificationsRoute(raw: unknown): Promise<void> {
+  const seeded = decodeNotifications(raw);
+  await act(() =>
+    Promise.resolve(
+      setStoreState({
+        viewer: makeViewerSession(),
+        notifications: seeded.items,
+        unreadNotifications: seeded.unreadCount,
+        route: "Notifications",
+      }),
+    ),
+  );
+  await flush();
+}
+
 it('mark all read stays available while an unread notification sits past the loaded page (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
   mockState.notificationsOverride = {
     notifications: Array.from({ length: 50 }, (_, i) => ({
@@ -237,18 +252,7 @@ it('mark all read stays available while an unread notification sits past the loa
   const { container } = await mountApp(opened);
   await flush();
 
-  const seeded = decodeNotifications(mockState.notificationsOverride);
-  await act(() =>
-    Promise.resolve(
-      setStoreState({
-        viewer: makeViewerSession(),
-        notifications: seeded.items,
-        unreadNotifications: seeded.unreadCount,
-        route: "Notifications",
-      }),
-    ),
-  );
-  await flush();
+  await seedNotificationsRoute(mockState.notificationsOverride);
 
   expect(getStoreSnapshot().notifications).toHaveLength(50);
   expect(getStoreSnapshot().unreadNotifications).toBe(1);
@@ -272,7 +276,7 @@ it('opening a perp liquidation notification lands on its perp market (spec/socia
   const { container } = await mountApp(opened);
   await flush();
 
-  const seeded = decodeNotifications({
+  await seedNotificationsRoute({
     notifications: [
       {
         id: "notif-liq",
@@ -287,17 +291,6 @@ it('opening a perp liquidation notification lands on its perp market (spec/socia
     ],
     unreadCount: 1,
   });
-  await act(() =>
-    Promise.resolve(
-      setStoreState({
-        viewer: makeViewerSession(),
-        notifications: seeded.items,
-        unreadNotifications: seeded.unreadCount,
-        route: "Notifications",
-      }),
-    ),
-  );
-  await flush();
 
   expect(container.textContent).toContain("$BTC Long position liquidated");
 
