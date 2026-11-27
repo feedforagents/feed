@@ -2087,7 +2087,8 @@ export async function loadFollowList(handle: string, kind: "followers" | "follow
 }
 
 export function closeFollowList(): void {
-  setStoreState({ followListKind: null, followListHandle: null, followListItems: [] });
+  followListLoadCount += 1;
+  setStoreState({ followListKind: null, followListHandle: null, followListItems: [], followListLoading: false });
 }
 
 export async function loadModerationLists(): Promise<void> {
