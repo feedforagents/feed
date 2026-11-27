@@ -43,3 +43,14 @@ export function installDeferredFetchQueue() {
     },
   };
 }
+
+export function feedPost(id: string) {
+  return { id, authorId: "acct-bob", authorHandle: "bob", authorDisplayName: "Bob", content: `post ${id}`, createdAt: "2026-11-27T00:00:00.000Z" };
+}
+
+export function feedErrorResponse(): Response {
+  return new Response(JSON.stringify({ message: "Feed unavailable" }), {
+    status: 500,
+    headers: { "content-type": "application/json" },
+  });
+}

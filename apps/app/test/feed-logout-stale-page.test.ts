@@ -2,21 +2,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { logout } from "../src/web/store-auth.ts";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { loadMoreFeed } from "../src/web/store-world.ts";
+import { loadFeed, loadMoreFeed } from "../src/web/store-world.ts";
 import { decodePosts } from "../src/web/types.ts";
-import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
+import { feedErrorResponse as errorResponse, feedPost as post, installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
 import { aliceViewer } from "./moderation-fixtures.ts";
-
-function post(id: string) {
-  return { id, authorId: "acct-bob", authorHandle: "bob", authorDisplayName: "Bob", content: `post ${id}`, createdAt: "2026-11-27T00:00:00.000Z" };
-}
-
-function errorResponse(): Response {
-  return new Response(JSON.stringify({ message: "Feed unavailable" }), {
-    status: 500,
-    headers: { "content-type": "application/json" },
-  });
-}
 
 function seedFollowingPage() {
   setStoreState({
@@ -67,6 +56,29 @@ describe("sign out and the Latest feed load", () => {
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
     expect(s.feedNextCursor).toBe("1764201500000:latest-1");
+  });
+
+  it('signing out from Latest hides the account page while the signed-out load runs and after it fails (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+    const pending = installDeferredFetch();
+    setStoreState({ viewer: aliceViewer, feedTab: "latest", pendingNewPostCount: 3 });
+    const firstLoad = loadFeed("latest");
+    pending.get("GET /api/feed?tab=latest")?.resolve(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201600000:latest-1" }));
+    await firstLoad;
+    expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
+
+    const signingOut = logout();
+    pending.get("POST /api/auth/logout")?.resolve(jsonResponse({}));
+    await tick();
+    expect(getStoreSnapshot().feedPosts).toEqual([]);
+    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(errorResponse());
+    await signingOut;
+
+    const s = getStoreSnapshot();
+    expect(s.viewer).toBeNull();
+    expect(s.feedPosts).toEqual([]);
+    expect(s.feedNextCursor).toBeNull();
+    expect(s.pendingNewPostCount).toBe(0);
+    expect(s.feedLoadingMore).toBe(false);
   });
 
   it('Load more failure while signed in keeps the current list and cursor for retry (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
