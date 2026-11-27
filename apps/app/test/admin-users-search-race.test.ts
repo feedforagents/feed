@@ -2,26 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadAdminUsers } from "../src/web/store-auth.ts";
+import { adminViewer } from "./admin-fixtures.ts";
 import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
-
-const adminViewer = {
-  accountId: "admin-1",
-  handle: "admin",
-  displayName: "Admin",
-  bio: "",
-  avatarUrl: null,
-  bannerUrl: null,
-  phoneLast2: null,
-  phoneVerifiedAt: null,
-  emailMasked: null,
-  emailVerifiedAt: null,
-  uiMode: "game" as const,
-  balanceCents: 0,
-  startingGrantCents: 0,
-  isAdmin: true,
-  isReviewer: false,
-  agentGrant: null,
-};
 
 const aliceRows = [{ accountId: "alice-id", handle: "alice", displayName: "Alice Player" }];
 const bobRows = [{ accountId: "bob-id", handle: "bob", displayName: "Bob Trader" }];
