@@ -1384,6 +1384,35 @@ it.effect('Email magic link sign-in, onboarding 100 pts grant, and profile likes
         activeProfile: 200
       }
     ))
+
+    // spec/social/moderation.md, "Creating notifications skips blocked actors and increments unread count"; spec/markets/prediction.md, "Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently"
+    const watcherId = String(watcher.account.accountId ?? "")
+    const watcherBuyRes = try callApp("/api/markets/prediction/seed-market-1/buy", { cookie: watcher.cookie, json: { side: "yes", amountCents: 500 } })
+    disableRssFeeds()
+    const store = try Store
+    const settleStart = try Clock.currentTimeMillis
+    try store.transaction((tx: Tx) => tx.query("UPDATE feed_prediction_markets SET expires_at = $1 WHERE id = 'seed-market-1'", [settleStart + 30_000]))
+    try TestClock.adjust("1 minute")
+    try runScheduledTicks(Math.floor((settleStart + 60_000) / 60_000))
+    const settled = try store.transaction(effect (tx: Tx) => ({
+      market: try tx.query("SELECT status FROM feed_prediction_markets WHERE id = 'seed-market-1'"),
+      holders: try tx.query("SELECT holder_id FROM feed_prediction_positions WHERE market_id = 'seed-market-1' AND holder_kind = 'user' AND settled_at IS NOT NULL"),
+      notified: try tx.query("SELECT account_id FROM feed_notifications WHERE kind = 'market_resolved' AND market_id = 'seed-market-1'")
+    }))
+    try check(() => assert.deepStrictEqual(
+      {
+        watcherBuy: watcherBuyRes.status,
+        market: String(settled.market[0]?.status),
+        settledHolders: settled.holders.map((row) => String(row.holder_id)).sort(),
+        notified: settled.notified.map((row) => String(row.account_id))
+      },
+      {
+        watcherBuy: 200,
+        market: "resolved",
+        settledHolders: [deletedId, watcherId].sort(),
+        notified: [watcherId]
+      }
+    ))
   }
 }, 120_000)
 
