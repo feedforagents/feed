@@ -111,9 +111,9 @@ export function PostComposer({
   const text = value ?? internal;
   const blocked = disabled || loading;
   const trimmed = text.trim();
-  const remaining = maxLength - text.length;
-  const overLimit = remaining < 0;
-  const canSubmit = !blocked && trimmed.length > 0 && !overLimit;
+  const length = trimmed.length;
+  const overLimit = length > maxLength;
+  const canSubmit = !blocked && length > 0 && !overLimit;
 
   const updateText = (next: string) => {
     if (blocked) return;
@@ -187,7 +187,7 @@ export function PostComposer({
         <div className="flex items-center justify-between gap-3 border-t border-border pt-2.5">
           <div className="text-xs text-muted-foreground">{viaClientName ? `via ${viaClientName}` : null}</div>
           <div className="flex items-center gap-3">
-            {text.length > 0 ? <CharProgressRing length={text.length} maxLength={maxLength} /> : null}
+            {length > 0 ? <CharProgressRing length={length} maxLength={maxLength} /> : null}
             <Button type="submit" size="sm" shape="pill" loading={loading} disabled={!canSubmit} className="px-4 font-bold">
               {submitLabel}
             </Button>

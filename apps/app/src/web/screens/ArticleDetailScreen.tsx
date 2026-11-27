@@ -30,7 +30,7 @@ export function ArticleDetailScreen({ mode }: { readonly mode: UiMode }) {
   const blocks = rawBlocks.map((text) => {
     const count = blockCounts.get(text) ?? 0;
     blockCounts.set(text, count + 1);
-    return { key: `${text.slice(0, 32)}#${count}`, text };
+    return { key: `${text}#${count}`, text };
   });
 
   return (

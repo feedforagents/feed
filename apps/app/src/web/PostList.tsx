@@ -29,13 +29,16 @@ export function BackHeader({
   );
 }
 
-export function copyPostLink(postId: string): void {
+export async function copyPostLink(postId: string): Promise<void> {
   const origin = typeof window !== "undefined" ? window.location.origin : "https://feed.fun";
   const url = `${origin}/post/${encodeURIComponent(postId)}`;
-  if (typeof navigator !== "undefined" && navigator.clipboard) {
-    void navigator.clipboard.writeText(url).catch(() => undefined);
+  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+  const copied = clipboard ? await clipboard.writeText(url).then(() => true, () => false) : false;
+  if (copied) {
+    storeActions.pushToast("Link copied to clipboard.", "info");
+  } else {
+    storeActions.pushToast("Could not copy the post link.", "destructive");
   }
-  storeActions.pushToast("Link copied to clipboard.", "info");
 }
 
 export function FeedPostCard({
@@ -70,7 +73,7 @@ export function FeedPostCard({
       onReply={onReply ?? openPostDetail}
       onQuote={() => storeActions.openComposeDialog(post)}
       onQuoteClick={openPostDetail}
-      onShare={copyPostLink}
+      onShare={(id) => { void copyPostLink(id); }}
       onAuthorClick={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
       onMentionClick={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}
       onSelectHandle={(handle) => { void storeActions.navigate(`/u/${encodeURIComponent(handle)}`); }}

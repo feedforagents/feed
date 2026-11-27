@@ -69,13 +69,31 @@ import {
 } from "./types.ts";
 
 const likeInFlight = new Set<string>();
+const likeServerCountLanded = new Set<string>();
 const repostInFlight = new Set<string>();
+const repostServerCountLanded = new Set<string>();
+
+export function markLikeServerCountLanded(postId: string): void {
+  if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
+}
+
+export function markRepostServerCountLanded(postId: string): void {
+  if (repostInFlight.has(postId)) repostServerCountLanded.add(postId);
+}
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
+let feedLoadedTab: UiFeedTab = "latest";
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
+let leaderboardLoadedControls: {
+  readonly audience: LeaderboardAudienceFilter;
+  readonly timeframe: LeaderboardTimeframe;
+  readonly scope: LeaderboardScope;
+  readonly metric: LeaderboardMetric;
+  readonly page: number;
+} = { audience: "traders", timeframe: "ALL", scope: "players", metric: "net_profit", page: 1 };
 let pnlHistoryRequestSeq = 0;
 let closedPositionsLoadCount = 0;
 let economyLoadCount = 0;
@@ -144,6 +162,8 @@ function preserveEngagementSince(
     if (!start || !current) return post;
     const now = engagementOf(current.card);
     if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
+      if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
+      if (repostInFlight.has(post.card.id)) markRepostServerCountLanded(post.card.id);
       return post;
     }
     return { ...post, card: { ...post.card, ...now } };
@@ -300,6 +320,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const latest = getStoreSnapshot();
   if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
+    feedLoadedTab = tab;
     setStoreState({
       feedPosts: preserveEngagementSince(res.data.items, engagementAtStart),
       feedNextCursor: res.data.nextCursor,
@@ -308,7 +329,16 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     });
     return;
   }
-  setStoreState({ feedLoading: false });
+  if (feedLoadedTab !== tab && (feedLoadedTab === "latest" || latest.viewer !== null)) {
+    const specTab = toSpecTab(feedLoadedTab);
+    sendNav({ type: "selectFeedTab", tab: specTab });
+    sendApp({ type: "selectTab", tab: specTab });
+    setStoreState({ feedTab: feedLoadedTab, feedLoading: false });
+  } else if (feedLoadedTab !== tab) {
+    setStoreState({ feedPosts: [], feedNextCursor: null, feedLoading: false });
+  } else {
+    setStoreState({ feedLoading: false });
+  }
   setErrorNotice(res.message);
 }
 
@@ -392,6 +422,7 @@ let threadRequestSeq = 0;
 
 export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
   const s = getStoreSnapshot();
+  const prevSort = s.threadSort;
   const sort = sortOverride ?? s.threadSort;
   const viewerId = s.viewer?.accountId ?? null;
   threadRequestSeq += 1;
@@ -422,7 +453,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
     });
     return;
   }
-  setStoreState({ threadLoading: false });
+  setStoreState({ threadLoading: false, threadSort: prevSort });
   setErrorNotice(res.ok ? "Post not found" : res.message);
 }
 
@@ -544,6 +575,7 @@ export async function toggleLike(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
   if (likeInFlight.has(postId)) return;
   likeInFlight.add(postId);
+  likeServerCountLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
   const optimisticLiked = !currentlyLiked;
   const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
@@ -558,10 +590,11 @@ export async function toggleLike(postId: string): Promise<void> {
       parse: passThrough,
     });
     if (!res.ok) {
+      const serverCountLanded = likeServerCountLanded.has(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         liked: currentlyLiked,
-        likeCount: prevCount,
+        ...(serverCountLanded ? {} : { likeCount: prevCount }),
       }));
       setErrorNotice(res.message);
       return;
@@ -576,6 +609,7 @@ export async function toggleLike(postId: string): Promise<void> {
     }));
   } finally {
     likeInFlight.delete(postId);
+    likeServerCountLanded.delete(postId);
   }
 }
 
@@ -585,6 +619,7 @@ export async function repostPost(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "repost", postId, label: currentlyReposted ? "remove repost" : "repost this post" })) return;
   if (repostInFlight.has(postId)) return;
   repostInFlight.add(postId);
+  repostServerCountLanded.delete(postId);
   const prevCount = existing?.card.repostCount ?? 0;
   const optimisticReposted = !currentlyReposted;
   const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
@@ -599,10 +634,11 @@ export async function repostPost(postId: string): Promise<void> {
       parse: passThrough,
     });
     if (!res.ok) {
+      const serverCountLanded = repostServerCountLanded.has(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         reposted: currentlyReposted,
-        repostCount: prevCount,
+        ...(serverCountLanded ? {} : { repostCount: prevCount }),
       }));
       setErrorNotice(res.message);
       return;
@@ -617,6 +653,7 @@ export async function repostPost(postId: string): Promise<void> {
     }));
   } finally {
     repostInFlight.delete(postId);
+    repostServerCountLanded.delete(postId);
   }
 }
 
@@ -702,14 +739,17 @@ export async function loadTrendingTag(tag: string): Promise<void> {
 export async function searchAccounts(query: string): Promise<{
   readonly accounts: ReadonlyArray<ExploreAccountHit>;
   readonly actors: ReadonlyArray<ExploreActorHit>;
-}> {
+} | null> {
   const trimmed = query.trim().replace(/^@/, "");
   if (!trimmed) return { accounts: [], actors: [] };
   const reqSeq = ++userSearchRequestSeq;
   const res = await requestJson(`/api/users/search?q=${encodeURIComponent(trimmed)}&limit=12`, {
     parse: decodeUsersSearch,
   });
-  if (reqSeq !== userSearchRequestSeq || !res.ok) {
+  if (reqSeq !== userSearchRequestSeq) {
+    return null;
+  }
+  if (!res.ok) {
     return { accounts: [], actors: [] };
   }
   return res.data;
@@ -771,6 +811,13 @@ export async function loadLeaderboard(options?: {
   });
   if (reqSeq !== leaderboardRequestSeq) return;
   if (res.ok) {
+    leaderboardLoadedControls = {
+      audience,
+      timeframe,
+      scope: res.data.scope,
+      metric: res.data.metric,
+      page: res.data.page,
+    };
     setStoreState({
       leaderboard: res.data.entries,
       leaderboardAudience: audience,
@@ -785,7 +832,14 @@ export async function loadLeaderboard(options?: {
     });
     return;
   }
-  setStoreState({ leaderboardLoading: false });
+  setStoreState({
+    leaderboardLoading: false,
+    leaderboardAudience: leaderboardLoadedControls.audience,
+    leaderboardTimeframe: leaderboardLoadedControls.timeframe,
+    leaderboardScope: leaderboardLoadedControls.scope,
+    leaderboardMetric: leaderboardLoadedControls.metric,
+    leaderboardPage: leaderboardLoadedControls.page,
+  });
   setErrorNotice(res.message);
 }
 
@@ -1224,9 +1278,22 @@ export async function markChatRead(chatId: string): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
   const cur = getStoreSnapshot();
   const target = cur.chats.find((c) => c.id === chatId);
+  const unreadChatNotifications = cur.notifications.filter(
+    (n) => n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read,
+  );
   if (target && target.unreadCount > 0) {
     setStoreState({
       chats: cur.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: 0 } : c)),
+    });
+  }
+  if (unreadChatNotifications.length > 0) {
+    setStoreState({
+      notifications: cur.notifications.map((n) =>
+        n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read
+          ? { ...n, item: { ...n.item, read: true } }
+          : n,
+      ),
+      unreadNotifications: Math.max(0, cur.unreadNotifications - unreadChatNotifications.length),
     });
   }
   await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
@@ -1590,6 +1657,20 @@ export async function markNotificationRead(notificationId: string): Promise<void
     body: { notificationIds: [notificationId] },
     parse: passThrough,
   });
+  if (!res.ok) {
+    const latest = getStoreSnapshot();
+    const current = latest.notifications.find((n) => n.item.id === notificationId);
+    if (current?.item.read) {
+      setStoreState({
+        notifications: latest.notifications.map((n) =>
+          n.item.id === notificationId ? { ...n, item: { ...n.item, read: false } } : n,
+        ),
+        unreadNotifications: latest.unreadNotifications + 1,
+      });
+    }
+    setErrorNotice(res.message);
+    return;
+  }
   if (res.ok) {
     invalidateNotificationsLoads();
     const s = getStoreSnapshot();
@@ -1734,6 +1815,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   setStoreState({ profileRepliesLoading: false });
+  setErrorNotice(res.message);
 }
 
 function isProfileHandleCurrent(handle: string): boolean {
@@ -1774,6 +1856,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   setStoreState({ profileLikesLoading: false });
+  setErrorNotice(res.message);
 }
 
 let profileTradesLoadCount = 0;
@@ -1797,6 +1880,7 @@ export async function loadProfileTrades(handleOrSelf?: string | null): Promise<v
     return;
   }
   setStoreState({ profileTradesLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadMoreProfilePosts(): Promise<void> {
@@ -1875,6 +1959,10 @@ export async function loadModerationLists(): Promise<void> {
     blockedAccounts: blockedRes.ok ? blockedRes.data : cur.blockedAccounts,
     mutedAccounts: mutedRes.ok ? mutedRes.data : cur.mutedAccounts,
   });
+  const failed = !blockedRes.ok ? blockedRes : !mutedRes.ok ? mutedRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function updateOwnProfile(payload: {
@@ -1908,6 +1996,17 @@ export async function updateOwnProfile(payload: {
       bannerUrl: nextBanner,
     },
   });
+  const cur = getStoreSnapshot();
+  if (cur.profileBundle?.summary.isOwnProfile && cur.profileBundle.summary.handle.toLowerCase() === s.viewer.handle.toLowerCase()) {
+    const nextSummary = { ...cur.profileBundle.summary, displayName: nextDisplayName };
+    if (nextBio) nextSummary.bio = nextBio;
+    else delete nextSummary.bio;
+    if (nextAvatar) nextSummary.avatarUrl = nextAvatar;
+    else delete nextSummary.avatarUrl;
+    if (nextBanner) nextSummary.bannerUrl = nextBanner;
+    else delete nextSummary.bannerUrl;
+    setStoreState({ profileBundle: { ...cur.profileBundle, summary: nextSummary } });
+  }
   setStatusNotice("Profile updated.");
   if (s.route === "Profile" && s.profileBundle?.summary.isOwnProfile) {
     await loadProfile(s.viewer.handle);

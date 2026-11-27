@@ -1,0 +1,18 @@
+export const adminViewer = {
+  accountId: "admin-1",
+  handle: "admin",
+  displayName: "Admin",
+  bio: "",
+  avatarUrl: null,
+  bannerUrl: null,
+  phoneLast2: null,
+  phoneVerifiedAt: null,
+  emailMasked: null,
+  emailVerifiedAt: null,
+  uiMode: "game" as const,
+  balanceCents: 0,
+  startingGrantCents: 0,
+  isAdmin: true,
+  isReviewer: false,
+  agentGrant: null,
+};

@@ -203,4 +203,15 @@ describe("notifications mark-read race", () => {
   it('a refetch that starts after a mark-all-read reply still applies (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
     await expectRefetchAfterReplyApplies("all", newItemReadPayload, "notif-2:u,notif-1:r unread=1");
   });
+
+  it('a failed single mark-read keeps the item unread and the badge unchanged (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
+    const pending = seedUnreadNotifications();
+    const marking = markNotificationRead("notif-1");
+    pending.get("POST /api/notifications/read")?.resolve(
+      new Response(JSON.stringify({ message: "boom" }), { status: 500, headers: { "content-type": "application/json" } }),
+    );
+    await marking;
+    expect(notificationsSummary()).toBe("notif-1:u unread=1");
+    expect(getStoreSnapshot().errorMessage).toBe("boom");
+  });
 });
