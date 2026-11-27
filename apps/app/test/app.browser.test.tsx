@@ -1127,6 +1127,45 @@ it('A published article does not replace a trending tag list (spec/app/navigatio
   await expect.element(page.getByText(article.title, { exact: true })).toBeInTheDocument();
 });
 
+it('Keyboard activation follows the hashtag inside a quoted post (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const original = {
+    ...SAMPLE_POSTS[0],
+    id: "garden-original",
+    content: "The plant swap starts Saturday #gardens",
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+    hashtags: ["gardens"],
+  };
+  const quote = {
+    ...original,
+    id: "garden-quote",
+    content: "I'll bring some extra seeds.",
+    hashtags: [],
+    quotePostId: original.id,
+    quotePost: original,
+  };
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/feed") return Promise.resolve(Response.json({ items: [quote], nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+      if (path === "/api/trending/gardens") return Promise.resolve(Response.json({ tag: "gardens", posts: [original] }));
+      return undefined;
+    },
+  });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+  const tag = page.getByRole("main").getByRole("button", { name: "#gardens", exact: true });
+  await expect.element(tag).toBeInTheDocument();
+  const tagButton = tag.element();
+  if (tagButton instanceof HTMLElement) tagButton.focus();
+  await expect.element(tag).toHaveFocus();
+  await act(() => userEvent.keyboard("{Enter}"));
+  await expect.element(page.getByRole("button", { name: "Clear tag", exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/trending/gardens");
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 
