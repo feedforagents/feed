@@ -233,7 +233,9 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
       [input.attemptId.trim()],
     )
     const row = rows[0]
-    if (row === undefined) return
+    if (row === undefined) {
+      throw new EngineFailure({ code: "NOT_FOUND", message: `LLM spend attempt not found or already settled: ${input.attemptId.trim()}.` })
+    }
     const boundMicros = Math.max(0, toInt(row.reserved_micros))
     const settledMicros = Math.min(actualMicros, boundMicros)
     try tx.query(
