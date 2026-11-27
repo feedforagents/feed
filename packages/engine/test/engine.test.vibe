@@ -1,6 +1,6 @@
 // spec/engine/index.md, "Story: Run non-blocking minute ticks and D-25 bounded NPC loops"; spec/engine/worldClock.md, "Story: Advance the world clock without blocking on inference"; spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"
 import { assert, it } from "@effect/vitest"
-import { Store, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
+import { Store, StoreFailure, migrateFeedSchema, seedFeedWorld, toInt, toText, type Tx } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import { buyPredictionShares, openPerpPosition } from "@repo/markets"
 import { TestClock } from "effect/testing"
@@ -698,7 +698,23 @@ it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pause
     )
     const blockedByLeaseMinute = try runMinuteTick(startMs + 120_000)
     try queryRows("DELETE FROM feed_job_leases WHERE job_name = 'minute-tick'")
+    const store = try Store
+    let leaseWriteFails = true
+    const leaseWriteFailsOnce: Store.Shape = {
+      location: store.location,
+      transaction: (body) => {
+        if (!leaseWriteFails) return store.transaction(body)
+        leaseWriteFails = false
+        return Effect.fail(new StoreFailure({ operation: "query", cause: new Error("connection reset") }))
+      },
+    }
+    const leaseWriteFailure = try Effect.flip(effect {
+      provide Store = leaseWriteFailsOnce {
+        return try runMinuteTick(startMs + 180_000)
+      }
+    })
     const minuteAfterNextPeriod = try runMinuteTick(startMs + 9 * 3_600_000)
+    const minuteHealthAfterLeaseFailure = (try queryRows("SELECT last_status, last_error FROM feed_tick_health WHERE job_name = 'minute-tick'"))[0] ?? {}
 
     const staleRes = try reserveLlmBudget({
       attemptId: "stale-uncertain-1",
@@ -755,6 +771,10 @@ it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pause
       assert.strictEqual(minuteRes.fundingAccrued, false)
       assert.strictEqual(leasesAfterMinute.length, 0)
       assert.strictEqual(blockedByLeaseMinute.skipped, true)
+      assert.deepStrictEqual(
+        [failureCode(leaseWriteFailure), minuteAfterNextPeriod.skipped, toText(minuteHealthAfterLeaseFailure.last_status), minuteHealthAfterLeaseFailure.last_error],
+        ["StoreFailure", false, "ok", null],
+      )
       assert.strictEqual(minuteAfterNextPeriod.fundingAccrued, true)
       assert.strictEqual(utcMinuteCycle(startMs), Math.floor(startMs / 60_000))
       assert.isTrue(minuteRes.spotTradesSimulated >= 1)
