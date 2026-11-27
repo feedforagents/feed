@@ -4,8 +4,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import { loadChatMessages, selectChat, sendChatMessage } from "../src/web/store-world.ts";
-import type { AppChatSummary } from "../src/web/types.ts";
-import { decodeNotifications } from "../src/web/types.ts";
+import { decodeNotifications, type AppChatSummary } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
@@ -49,19 +48,19 @@ const bobMessage = {
 
 let readPosts: Array<string> = [];
 let roomMessages: Array<Record<string, unknown>> = [bobMessage];
+let readResponse: () => Response = () => Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 });
 
 beforeEach(() => {
   readPosts = [];
   roomMessages = [bobMessage];
+  readResponse = () => Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 });
   stubFetchByUrl((url, init) => {
     if (url.pathname === "/api/chats/chat-1/messages" && (init?.method ?? "GET") === "GET") {
       return Promise.resolve(Response.json({ messages: roomMessages }));
     }
     if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
       readPosts.push(url.pathname);
-      return Promise.resolve(
-        Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
-      );
+      return Promise.resolve(readResponse());
     }
     return Promise.resolve(Response.json({}, { status: 404 }));
   }, "http://localhost");
@@ -414,4 +413,40 @@ it("surfaces a failed thread refresh after a successful send instead of silently
   expect(s.chatMessages.map((m) => m.content)).toEqual(["hello"]);
   expect(s.toasts.map((t) => t.message)).toEqual(["Message sent, but the thread failed to refresh."]);
   expect(s.errorMessage).toBe("Message sent, but the thread failed to refresh.");
+});
+
+function seedChatNotifications() {
+  const seeded = decodeNotifications({
+    notifications: [
+      { id: "notif-chat-1", kind: "chat_message", chatId: "chat-1", actorHandle: "bob", actorName: "Bob", title: "Bob sent a message", read: false, createdAt: 2 },
+      { id: "notif-chat-2", kind: "chat_message", chatId: "chat-2", actorHandle: "carol", actorName: "Carol", title: "Carol sent a message", read: false, createdAt: 2 },
+      { id: "notif-follow", kind: "follow", actorHandle: "bob", actorName: "Bob", title: "Bob followed you", read: false, createdAt: 2 },
+    ],
+    unreadCount: 3,
+  });
+  setStoreState({ notifications: seeded.items, unreadNotifications: 3 });
+}
+
+it("clears the open room's chat-message notifications and badge when the room is read (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\"; spec/social/moderation.md, \"Story: In-app notifications and Social-mode presentation filtering\")", async () => {
+  setStoreState({ chats: [seedChat(1)] });
+  seedChatNotifications();
+  await loadChatMessages("chat-1");
+  const s = getStoreSnapshot();
+  expect(s.notifications.map((n) => `${n.item.id}:${n.item.read ? "r" : "u"}`)).toEqual([
+    "notif-chat-1:r",
+    "notif-chat-2:u",
+    "notif-follow:u",
+  ]);
+  expect(s.unreadNotifications).toBe(2);
+  expect(s.chats.find((c) => c.id === "chat-1")?.unreadCount).toBe(0);
+});
+
+it("keeps chat-message notifications unread when the room read request fails (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\"; spec/social/moderation.md, \"Story: In-app notifications and Social-mode presentation filtering\")", async () => {
+  readResponse = () => Response.json({ message: "boom" }, { status: 500 });
+  setStoreState({ chats: [seedChat(1)] });
+  seedChatNotifications();
+  await loadChatMessages("chat-1");
+  const s = getStoreSnapshot();
+  expect(s.notifications.every((n) => !n.item.read)).toBe(true);
+  expect(s.unreadNotifications).toBe(3);
 });

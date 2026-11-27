@@ -1522,35 +1522,52 @@ export async function rebalancePerpPosition(order: PerpRebalanceOrderInput): Pro
 }
 
 export async function markChatRead(chatId: string): Promise<void> {
-  if (!getStoreSnapshot().viewer) return;
+  const viewerId = getStoreSnapshot().viewer?.accountId;
+  if (!viewerId) return;
   const cur = getStoreSnapshot();
   const target = cur.chats.find((c) => c.id === chatId);
-  const unreadChatNotifications = cur.notifications.filter(
-    (n) => n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read,
-  );
   if (target && target.unreadCount > 0) {
     setStoreState({
       chats: cur.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: 0 } : c)),
     });
   }
-  if (unreadChatNotifications.length > 0) {
-    setStoreState({
-      notifications: cur.notifications.map((n) =>
-        n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read
-          ? { ...n, item: { ...n.item, read: true } }
-          : n,
-      ),
-      unreadNotifications: Math.max(0, cur.unreadNotifications - unreadChatNotifications.length),
-    });
+  const chatNotificationIds = new Set(
+    cur.notifications
+      .filter((n) => n.eventKind === "ChatMessage" && n.chatId === chatId && !n.item.read)
+      .map((n) => n.item.id),
+  );
+  if (chatNotificationIds.size > 0) {
+    captureNotificationIdsBeforeMutation();
   }
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
     method: "POST",
     body: {},
     parse: passThrough,
   });
-  const mode = currentUiMode(cur);
-  const loadedUnread = cur.notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length;
-  if (res.ok && cur.unreadNotifications > loadedUnread) await loadNotifications();
+  if (!res.ok) return;
+  const s = getStoreSnapshot();
+  if (s.viewer?.accountId !== viewerId) return;
+  const mode = currentUiMode(s);
+  const loadedUnread = s.notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length;
+  const needsServerSync = s.unreadNotifications > loadedUnread;
+  if (chatNotificationIds.size > 0) {
+    let cleared = 0;
+    const notifications = s.notifications.map((n) => {
+      if (chatNotificationIds.has(n.item.id) && !n.item.read) {
+        cleared += 1;
+        return { ...n, item: { ...n.item, read: true } };
+      }
+      return n;
+    });
+    if (cleared > 0) {
+      invalidateNotificationsLoads();
+      setStoreState({
+        notifications,
+        unreadNotifications: Math.max(0, s.unreadNotifications - cleared),
+      });
+    }
+  }
+  if (needsServerSync) await loadNotifications();
 }
 
 let chatsLoadCount = 0;
