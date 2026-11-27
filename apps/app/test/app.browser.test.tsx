@@ -1063,6 +1063,36 @@ it('Late likes never land on another profile (spec/app/navigation.md, "Story: Br
   expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["browser-post-1"]);
 });
 
+it('Back from a News article restores the full article list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const articles = Array.from({ length: 6 }, (_, index) => ({
+    id: `garden-news-${index + 1}`,
+    title: `Garden club bulletin ${index + 1}`,
+    body: "The community plant swap starts on Saturday.",
+    publishedAt: Date.now() - index * 60_000,
+  }));
+  const olderArticle = articles[5];
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/explore" || path === "/api/articles") return Promise.resolve(Response.json({ articles }));
+      if (path === `/api/articles/${olderArticle.id}`) return Promise.resolve(Response.json(olderArticle));
+      if (path === "/api/feed" || path === "/api/markets") return Promise.resolve(Response.json({ items: [], predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Explore", exact: true }).first()));
+  const main = page.getByRole("main");
+  const news = main.getByRole("tab", { name: "News", exact: true });
+  await act(() => userEvent.click(news));
+  const openArticle = main.getByRole("button", { name: `Read full article: ${olderArticle.title}` });
+  await act(() => userEvent.click(openArticle));
+  await expect.element(main.getByRole("heading", { name: olderArticle.title, exact: true })).toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(news).toHaveAttribute("aria-selected", "true");
+  await expect.element(openArticle).toBeInTheDocument();
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 
