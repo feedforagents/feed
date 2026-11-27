@@ -1,0 +1,262 @@
+// spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"
+import { handleMcpRequest } from "../src/index.vibe"
+import { blockAccount, unblockAccount } from "@repo/social"
+import {
+  buyPredictionShares,
+  listMarketTrades,
+  listPerpMarkets,
+  listPredictionMarkets,
+  openPerpPosition
+} from "@repo/markets"
+import {
+  DEFAULT_ALLOWED_COUNTRIES,
+  approveDeviceAuthorization,
+  exchangeOAuthToken,
+  startDeviceAuthorization,
+  type AuthRuntimeConfig
+} from "@repo/auth"
+import { localStoreLayer } from "@repo/db/node"
+import { Store, migrateFeedSchema, seedFeedWorld, type Tx } from "@repo/db"
+import { TestClock } from "effect/testing"
+import { assert, it } from "@effect/vitest"
+
+module http {
+  /** @throws {never} */
+  export function jsonPostRequest(url: string, payload: unknown, bearerToken?: string): Request {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream"
+    }
+    if (bearerToken !== undefined) {
+      headers.authorization = `Bearer ${bearerToken}`
+    }
+    return new Request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    })
+  }
+}
+import { jsonPostRequest } from http
+
+const ORIGIN = "https://feed.fun"
+
+const AUTH_CFG: AuthRuntimeConfig = {
+  digestKey: "mcp-market-trades-block-digest-key-32b",
+  oauthSigningSecret: "mcp-market-trades-oauth-secret-key-32b",
+  smsMode: "loopback",
+  allowedCountries: DEFAULT_ALLOWED_COUNTRIES,
+  publicAppUrl: ORIGIN
+}
+
+effect function assertSync(fn: () => void) {
+  try Effect.try(fn)
+}
+
+effect function seedActiveTrader(accountId: string, handle: string) {
+  const store = try Store
+  const now = try Clock.currentTimeMillis
+  const orgId = `org-mkt-${accountId}`
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      "INSERT INTO organizations (id, name, credit_balance, created_at) VALUES ($1, $2, 0, $3)",
+      [orgId, handle, now]
+    )
+    try tx.query(
+      "INSERT INTO accounts (key, state, revision, organization_id, status, created_at, updated_at) VALUES ($1, '{}'::jsonb, 1, $2, 'active', $3, $3)",
+      [accountId, orgId, now]
+    )
+    try tx.query(
+      `INSERT INTO feed_accounts (account_id, handle, display_name, bio, phone_verified_at, age_confirmed_at, ui_mode, balance_cents, starting_grant_cents, created_at, updated_at)
+       VALUES ($1, $2, $3, '', $4, $4, 'game', 100000, 10000, $4, $4)`,
+      [accountId, handle, handle, now]
+    )
+  })
+}
+
+effect function issueDeviceBearer(accountId: string, label: string) {
+  const clientId = `agent-${label}`
+  const device = try startDeviceAuthorization({
+    clientId,
+    clientName: `Agent ${label}`,
+    scope: "read social:write trade",
+    resource: `${ORIGIN}/mcp`,
+    origin: ORIGIN
+  })
+  try approveDeviceAuthorization({
+    accountId,
+    userCode: device.user_code,
+    scopes: ["read", "social:write", "trade"]
+  })
+  const exchanged = try exchangeOAuthToken({
+    grantType: "urn:ietf:params:oauth:grant-type:device_code",
+    deviceCode: device.device_code,
+    clientId,
+    resource: `${ORIGIN}/mcp`,
+    config: AUTH_CFG
+  })
+  if ("status" in exchanged) {
+    return try Effect.die(`Unexpected pending device exchange: ${exchanged.status}`)
+  }
+  return exchanged.access_token
+}
+
+effect function fetchMcpRecentTraderIds(args: Record<string, unknown>, bearerToken?: string) {
+  const req = jsonPostRequest(
+    `${ORIGIN}/mcp`,
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "get_market", arguments: args }
+    },
+    bearerToken
+  )
+  const res = try handleMcpRequest({ request: req, origin: ORIGIN, authConfig: AUTH_CFG })
+  const body = (try tryPromise(() => res.json() as Promise<unknown>)) as {
+    readonly result?: {
+      readonly isError?: boolean
+      readonly structuredContent?: {
+        readonly recentTrades?: ReadonlyArray<{ readonly traderId?: string }>
+      }
+    }
+  }
+  try assertSync(() => {
+    assert.strictEqual(res.status, 200)
+    assert.strictEqual(body.result?.isError === true, false)
+  })
+  return (body.result?.structuredContent?.recentTrades ?? []).map((t) => t.traderId ?? "")
+}
+
+it.effect(
+  'MCP get_market recentTrades and listMarketTrades omit blocked and blocking traders across prediction, perp, and fallback lookups (spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () =>
+    scoped(effect {
+      try TestClock.setTime(Date.now())
+      provide localStoreLayer({ kind: "pglite", file: undefined }) {
+        try migrateFeedSchema()
+        try seedFeedWorld()
+
+        try seedActiveTrader("acct-mkt-alice", "mkt_alice")
+        try seedActiveTrader("acct-mkt-bob", "mkt_bob")
+        try seedActiveTrader("acct-mkt-carol", "mkt_carol")
+
+        const aliceToken = try issueDeviceBearer("acct-mkt-alice", "alice")
+        const bobToken = try issueDeviceBearer("acct-mkt-bob", "bob")
+        const carolToken = try issueDeviceBearer("acct-mkt-carol", "carol")
+
+        const predMarkets = try listPredictionMarkets("open")
+        const predId = predMarkets[0]?.id ?? ""
+        const perpMarkets = try listPerpMarkets()
+        const perpTicker = perpMarkets[0]?.ticker ?? ""
+
+        const store = try Store
+        const npcRows = try store.transaction((tx: Tx) =>
+          tx.query("SELECT id, username FROM feed_actors WHERE id NOT LIKE 'test-%' ORDER BY id ASC LIMIT 1")
+        )
+        const npcId = String(npcRows[0]?.id ?? "")
+        const npcHandle = String(npcRows[0]?.username ?? npcId)
+
+        try buyPredictionShares({
+          actorId: "acct-mkt-bob",
+          actorKind: "user",
+          marketId: predId,
+          side: "yes",
+          amountCents: 400
+        })
+        try buyPredictionShares({
+          actorId: "acct-mkt-carol",
+          actorKind: "user",
+          marketId: predId,
+          side: "no",
+          amountCents: 300
+        })
+
+        try openPerpPosition({
+          ownerId: "acct-mkt-bob",
+          ownerKind: "user",
+          ticker: perpTicker,
+          side: "long",
+          collateralCents: 500,
+          leverage: 2
+        })
+        try openPerpPosition({
+          ownerId: "acct-mkt-carol",
+          ownerKind: "user",
+          ticker: perpTicker,
+          side: "short",
+          collateralCents: 500,
+          leverage: 2
+        })
+        const now = try Clock.currentTimeMillis
+        try store.transaction((tx: Tx) =>
+          tx.query(
+            `INSERT INTO feed_trades (id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, realized_pnl_cents, created_at)
+             VALUES ('npc-perp-trade-1', $1, 'npc', 'perp', $2, 'long', 1000, 1, 1000, 10000, NULL, $3)`,
+            [npcId, perpTicker, now + 5]
+          )
+        )
+
+        try blockAccount("acct-mkt-alice", "mkt_bob")
+        try blockAccount("acct-mkt-alice", npcHandle)
+
+        const alicePredWhenBlocking = try fetchMcpRecentTraderIds({ marketId: predId, kind: "prediction" }, aliceToken)
+        const alicePerpWhenBlocking = try fetchMcpRecentTraderIds({ marketId: perpTicker, kind: "perp" }, aliceToken)
+        const alicePerpFallbackWhenBlocking = try fetchMcpRecentTraderIds({ marketId: perpTicker }, aliceToken)
+
+        const bobPredWhenBlockedByAlice = try fetchMcpRecentTraderIds({ marketId: predId, kind: "prediction" }, bobToken)
+        const carolPerpUnblocked = try fetchMcpRecentTraderIds({ marketId: perpTicker, kind: "perp" }, carolToken)
+        const anonPerpPublic = try fetchMcpRecentTraderIds({ marketId: perpTicker, kind: "perp" })
+
+        const directFiltered = try listMarketTrades("perp", perpTicker, 50, "acct-mkt-alice")
+        const directUnfiltered = try listMarketTrades("perp", perpTicker, 50)
+
+        try unblockAccount("acct-mkt-alice", "mkt_bob")
+        try unblockAccount("acct-mkt-alice", npcHandle)
+        try blockAccount("acct-mkt-bob", "mkt_alice")
+
+        const alicePredWhenBlockedByBob = try fetchMcpRecentTraderIds({ marketId: predId, kind: "prediction" }, aliceToken)
+        const alicePerpWhenBlockedByBob = try fetchMcpRecentTraderIds({ marketId: perpTicker }, aliceToken)
+
+        try unblockAccount("acct-mkt-bob", "mkt_alice")
+        const alicePerpRestored = try fetchMcpRecentTraderIds({ marketId: perpTicker, kind: "perp" }, aliceToken)
+
+        try assertSync(() => {
+          assert.notStrictEqual(predId, "")
+          assert.notStrictEqual(perpTicker, "")
+          assert.notStrictEqual(npcId, "")
+
+          assert.strictEqual(alicePredWhenBlocking.includes("acct-mkt-bob"), false)
+          assert.strictEqual(alicePredWhenBlocking.includes("acct-mkt-carol"), true)
+
+          assert.strictEqual(alicePerpWhenBlocking.includes("acct-mkt-bob"), false)
+          assert.strictEqual(alicePerpWhenBlocking.includes(npcId), false)
+          assert.strictEqual(alicePerpWhenBlocking.includes("acct-mkt-carol"), true)
+
+          assert.strictEqual(alicePerpFallbackWhenBlocking.includes("acct-mkt-bob"), false)
+          assert.strictEqual(alicePerpFallbackWhenBlocking.includes(npcId), false)
+          assert.strictEqual(alicePerpFallbackWhenBlocking.includes("acct-mkt-carol"), true)
+
+          assert.strictEqual(bobPredWhenBlockedByAlice.includes("acct-mkt-bob"), true)
+
+          assert.strictEqual(carolPerpUnblocked.includes("acct-mkt-bob"), true)
+          assert.strictEqual(carolPerpUnblocked.includes(npcId), true)
+          assert.strictEqual(anonPerpPublic.includes("acct-mkt-bob"), true)
+          assert.strictEqual(anonPerpPublic.includes(npcId), true)
+
+          assert.strictEqual(directFiltered.some((t) => t.traderId === "acct-mkt-bob" || t.traderId === npcId), false)
+          assert.strictEqual(directUnfiltered.some((t) => t.traderId === "acct-mkt-bob"), true)
+          assert.strictEqual(directUnfiltered.some((t) => t.traderId === npcId), true)
+
+          assert.strictEqual(alicePredWhenBlockedByBob.includes("acct-mkt-bob"), false)
+          assert.strictEqual(alicePredWhenBlockedByBob.includes("acct-mkt-carol"), true)
+          assert.strictEqual(alicePerpWhenBlockedByBob.includes("acct-mkt-bob"), false)
+          assert.strictEqual(alicePerpWhenBlockedByBob.includes(npcId), true)
+
+          assert.strictEqual(alicePerpRestored.includes("acct-mkt-bob"), true)
+          assert.strictEqual(alicePerpRestored.includes(npcId), true)
+          assert.strictEqual(alicePerpRestored.includes("acct-mkt-carol"), true)
+        })
+      }
+    })
+)

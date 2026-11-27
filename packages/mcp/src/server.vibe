@@ -1,4 +1,4 @@
-// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"
+// spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules"; spec/mcp/tools.md, "All MCP tools enforce directory annotations, strict schemas, no secrets, and D-30"; spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { Store, StoreFailure, toText, type Tx } from "@repo/db"
 import {
   AuthFailure,
@@ -851,7 +851,7 @@ effect function executePublicMarketTool(
       if (kind === "perp") {
         const perp = try getPerpMarket(marketId.toUpperCase())
         const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perp.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
-        const recentTrades = try listMarketTrades("perp", perp.ticker, tradesLimit)
+        const recentTrades = try listMarketTrades("perp", perp.ticker, tradesLimit, viewer.viewerId)
         const priceHistory = try getMarketPriceHistory("perp", perp.ticker, historyLimit)
         return {
           kind: "perp",
@@ -868,7 +868,7 @@ effect function executePublicMarketTool(
       }
       if (maybePred !== undefined && kind !== "perp") {
         const relatedPosts = try listFeedPosts({ tab: "latest", marketId: maybePred.id, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
-        const recentTrades = try listMarketTrades("prediction", maybePred.id, tradesLimit)
+        const recentTrades = try listMarketTrades("prediction", maybePred.id, tradesLimit, viewer.viewerId)
         const priceHistory = try getMarketPriceHistory("prediction", maybePred.id, historyLimit)
         const resolutionArticle = maybePred.status === "resolved" && maybePred.resolutionArticleId !== null
           ? (getArticle(maybePred.resolutionArticleId, viewer.playMode) catch effect (err) => {
@@ -888,7 +888,7 @@ effect function executePublicMarketTool(
       }
       const perpFallback = try getPerpMarket(marketId.toUpperCase())
       const relatedPosts = try listFeedPosts({ tab: "latest", ticker: perpFallback.ticker, viewerId: viewer.viewerId, mode: viewer.playMode, limit: 20 })
-      const recentTrades = try listMarketTrades("perp", perpFallback.ticker, tradesLimit)
+      const recentTrades = try listMarketTrades("perp", perpFallback.ticker, tradesLimit, viewer.viewerId)
       const priceHistory = try getMarketPriceHistory("perp", perpFallback.ticker, historyLimit)
       return {
         kind: "perp",

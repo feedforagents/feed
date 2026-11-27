@@ -1,4 +1,4 @@
-// spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"
+// spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit"; spec/shared/money.md, "One point equals one hundred cents, and integer bounds clamp cleanly"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { Store, type StoreFailure, toInt, toText, type Row, type Tx } from "@repo/db"
 import { fundingPeriodFromSeconds } from "../gen/shared__time.effect.vibe"
 import type { PerpPosition } from "../gen/markets__spotPerp.effect.vibe"
@@ -316,18 +316,26 @@ export effect function getMarketPriceHistory(
 export effect function listMarketTrades(
   marketKind: MarketKind,
   marketRef: string,
-  limit = 50
+  limit = 50,
+  viewerId?: string
 ): ReadonlyArray<MarketTradeView>!StoreFailure!Store {
   const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)))
+  const normalizedViewer = viewerId?.trim()
+  const effectiveViewer = normalizedViewer === undefined || normalizedViewer === "" ? null : normalizedViewer
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const rows = try tx.query(
-      `SELECT id, trader_id, trader_kind, market_kind, market_ref, side, notional_cents, fee_cents, shares_or_size, price_cents, realized_pnl_cents, via_client_name, created_at
-       FROM feed_trades
-       WHERE market_kind = $1 AND market_ref = $2
-       ORDER BY created_at DESC, id DESC
+      `SELECT t.id, t.trader_id, t.trader_kind, t.market_kind, t.market_ref, t.side, t.notional_cents, t.fee_cents, t.shares_or_size, t.price_cents, t.realized_pnl_cents, t.via_client_name, t.created_at
+       FROM feed_trades t
+       WHERE t.market_kind = $1 AND t.market_ref = $2
+         AND ($4::text IS NULL OR NOT EXISTS (
+           SELECT 1 FROM feed_blocks b
+           WHERE (b.blocker_id = $4 AND b.blocked_id = t.trader_id)
+              OR (b.blocker_id = t.trader_id AND b.blocked_id = $4)
+         ))
+       ORDER BY t.created_at DESC, t.id DESC
        LIMIT $3`,
-      [marketKind, marketRef, safeLimit]
+      [marketKind, marketRef, safeLimit, effectiveViewer]
     )
     return rows.map((row) => ({
       id: requiredText(row.id),
