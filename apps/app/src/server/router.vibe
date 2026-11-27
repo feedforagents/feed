@@ -545,14 +545,28 @@ effect function appendRedirectParams(baseUri: string, params: Readonly<Record<st
   return url.toString()
 }
 
+effect function consumeOAuthIpBudget(
+  request: Request,
+  config: AppServerConfig,
+  endpoint: "device_code" | "register"
+): void!(AuthFailure | RateLimited | StoreFailure)!Store {
+  const ipAddress = clientIp(request)
+  if (ipAddress !== undefined && config.auth.digestKey !== "") {
+    try checkOAuthEndpointRateLimit({ endpoint, ipAddress, digestKey: config.auth.digestKey })
+  }
+}
+
 effect function resolveOAuthClientRow(
-  clientId: string
-): { readonly clientId: string; readonly clientName: string; readonly redirectUris: ReadonlyArray<string> }!(AuthFailure | StoreFailure)!Store {
+  clientId: string,
+  request: Request,
+  config: AppServerConfig
+): { readonly clientId: string; readonly clientName: string; readonly redirectUris: ReadonlyArray<string> }!(AuthFailure | RateLimited | StoreFailure)!Store {
   const trimmedId = clientId.trim()
   if (trimmedId === "") {
     throw new AuthFailure({ code: "invalid_client", message: "client_id is required.", status: 400 })
   }
   if (/^https?:\/\//i.test(trimmedId)) {
+    try consumeOAuthIpBudget(request, config, "register")
     const cimd = try fetchClientMetadata(trimmedId)
     return { clientId: cimd.clientId, clientName: cimd.clientName, redirectUris: cimd.redirectUris }
   }
@@ -578,7 +592,7 @@ effect function inspectOAuthConsent(
   request: Request,
   origin: string,
   config: AppServerConfig
-): Response!(AuthFailure | StoreFailure)!Store {
+): Response!(AuthFailure | RateLimited | StoreFailure)!Store {
   const clientId = params.get("client_id")?.trim() ?? ""
   const redirectUri = params.get("redirect_uri")?.trim() ?? ""
   const responseType = params.get("response_type")?.trim() || "code"
@@ -588,7 +602,7 @@ effect function inspectOAuthConsent(
   const resource = params.get("resource")?.trim() || `${origin}/mcp`
   const scopeRaw = params.get("scope")?.trim() || "read social:write messages trade"
   const scopes = scopeRaw.split(/\s+/).filter((token) => token !== "")
-  const client = try resolveOAuthClientRow(clientId)
+  const client = try resolveOAuthClientRow(clientId, request, config)
   if (!redirectUriMatchesRegistered(client.redirectUris, redirectUri)) {
     throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
   }
@@ -616,7 +630,7 @@ effect function submitOAuthDecision(
   request: Request,
   origin: string,
   config: AppServerConfig
-): Response!(AuthFailure | StoreFailure | HttpRequestError)!Store {
+): Response!(AuthFailure | RateLimited | StoreFailure | HttpRequestError)!Store {
   const session = try requireSession(request, config)
   const parsed = try readParsedBody(request)
   const body = parsed.data
@@ -630,7 +644,7 @@ effect function submitOAuthDecision(
   const hasExplicitScopes = Object.prototype.hasOwnProperty.call(body, "scopes") || Object.prototype.hasOwnProperty.call(body, "scope")
   const scopesList = strArrayField(body, "scopes", "scope")
   const deny = body.approved === false || body.approved === "false" || body.deny === true || body.deny === "true" || body.decision === "deny"
-  const client = try resolveOAuthClientRow(clientId)
+  const client = try resolveOAuthClientRow(clientId, request, config)
   if (!redirectUriMatchesRegistered(client.redirectUris, redirectUri)) {
     throw new AuthFailure({ code: "invalid_redirect_uri", message: "redirect_uri is not registered for this client.", status: 400 })
   }
@@ -677,14 +691,7 @@ effect function handleOAuthRoute(
     return jsonResponse(oauthProtectedResourceMetadata(origin), 200, PUBLIC_CORS_HEADERS)
   }
   if (method === "POST" && path === "/oauth/register") {
-    const ipAddress = clientIp(request)
-    if (ipAddress !== undefined && config.auth.digestKey !== "") {
-      try checkOAuthEndpointRateLimit({
-        endpoint: "register",
-        ipAddress,
-        digestKey: config.auth.digestKey
-      })
-    }
+    try consumeOAuthIpBudget(request, config, "register")
     const { data } = try readParsedBody(request)
     const clientName = try reqStr(data, "client_name", "client_name", "clientName")
     const redirectUris = strArrayField(data, "redirect_uris", "redirectUris") ?? []
@@ -732,14 +739,7 @@ effect function handleOAuthRoute(
     return jsonResponse(try revokeOAuthToken({ token, config: config.auth }), 200, PUBLIC_CORS_HEADERS)
   }
   if (method === "POST" && (path === "/oauth/device" || path === "/oauth/device/code")) {
-    const ipAddress = clientIp(request)
-    if (ipAddress !== undefined && config.auth.digestKey !== "") {
-      try checkOAuthEndpointRateLimit({
-        endpoint: "device_code",
-        ipAddress,
-        digestKey: config.auth.digestKey
-      })
-    }
+    try consumeOAuthIpBudget(request, config, "device_code")
     const { data } = try readParsedBody(request)
     const rawClientId = try reqStr(data, "client_id", "client_id", "clientId")
     let clientId = rawClientId
