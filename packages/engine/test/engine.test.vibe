@@ -437,6 +437,30 @@ it.effect('Confirming spend above the reserved bound settles at the bound (spec/
     })
   }))
 
+it.effect('Confirming an unknown LLM spend attempt fails instead of silently succeeding (spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation")', () => scoped(effect {
+  const day1Ms = Date.UTC(2026, 10, 23, 12, 0, 0)
+  try withSeededEngine(day1Ms, effect {
+    const unknownError = try Effect.flip(
+      confirmLlmSpend({ attemptId: "budget-no-such-attempt", actualMicros: 1_000, nowMs: day1Ms }),
+    )
+    const reservation = try reserveLlmBudget({
+      attemptId: "budget-settle-twice",
+      estimatedMicros: 10_000_000,
+      provider: "openai",
+      model: "gpt-4o-mini",
+      nowMs: day1Ms,
+    })
+    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 5_000_000, nowMs: day1Ms + 1_000 })
+    const settledError = try Effect.flip(
+      confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 1_000, nowMs: day1Ms + 2_000 }),
+    )
+    try check(() => {
+      assert.strictEqual(failureCode(unknownError), "NOT_FOUND")
+      assert.strictEqual(failureCode(settledError), "NOT_FOUND")
+    })
+  })
+}))
+
 it.effect('NPC ticks drive spot markets and posts while markets emit idempotent clues and replace manual holds (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/npcLoop.md, "Each NPC tick starts with a budget-enforced step cap and loops ObserveFeed -> Decide -> Act"; spec/engine/npcLoop.md, "Only NPC actors execute spot trades (moving the index price) and alpha invites"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Clues require a matching active phase and a persisted unique clue key"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/narrativeArc.md, "Only admins may approve or resolve markets on manual hold"; spec/engine/narrativeArc.md, "Resolved slots are replaced independently with a fresh market epoch")', () => scoped(effect {
   const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
   try withSeededEngine(liveNow, effect {
