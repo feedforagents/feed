@@ -19,6 +19,7 @@ import {
   type PostComposerContext,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "./store.ts";
+import { getStoreSnapshot } from "./store-core.ts";
 
 const REPORT_CATEGORIES = [
   "Spam",
@@ -83,6 +84,7 @@ export function GlobalDialogs() {
   const s = useAppStore();
   const [composeText, setComposeText] = useState("");
   const [composeBusy, setComposeBusy] = useState(false);
+  const [composeError, setComposeError] = useState<string | null>(null);
   const [reportCategory, setReportCategory] = useState<(typeof REPORT_CATEGORIES)[number]>("Spam");
   const [reportDetails, setReportDetails] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
@@ -93,6 +95,7 @@ export function GlobalDialogs() {
 
   const handleComposeSubmit = async (text: string) => {
     setComposeBusy(true);
+    setComposeError(null);
     const ok = await storeActions.createPost(
       text,
       s.quotePostTarget ? { quotePostId: s.quotePostTarget.card.id } : undefined,
@@ -101,6 +104,8 @@ export function GlobalDialogs() {
     if (ok) {
       setComposeText("");
       storeActions.closeComposeDialog();
+    } else {
+      setComposeError(getStoreSnapshot().errorMessage);
     }
   };
 
@@ -124,6 +129,7 @@ export function GlobalDialogs() {
         open={s.composeOpen}
         onOpenChange={(open) => {
           if (!open) {
+            setComposeError(null);
             storeActions.closeComposeDialog();
           }
         }}
@@ -135,7 +141,11 @@ export function GlobalDialogs() {
           </div>
           <PostComposer
             value={composeText}
-            onValueChange={setComposeText}
+            onValueChange={(next) => {
+              setComposeText(next);
+              setComposeError(null);
+            }}
+            error={composeError ?? undefined}
             onSubmit={(text) => { void handleComposeSubmit(text); }}
             authorName={s.viewer?.displayName ?? "You"}
             authorAvatarUrl={s.viewer?.avatarUrl ?? undefined}
