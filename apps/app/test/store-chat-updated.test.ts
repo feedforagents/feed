@@ -59,6 +59,7 @@ function seedSecondChat(): AppChatSummary {
 }
 
 let removedFromOpenChat = false;
+let listsBothChats = false;
 
 class StubEventSource extends EventTarget {
   static latest: StubEventSource | null = null;
@@ -71,13 +72,20 @@ class StubEventSource extends EventTarget {
 
 beforeEach(() => {
   removedFromOpenChat = false;
+  listsBothChats = false;
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL): Promise<Response> => {
       const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const url = new URL(raw, "http://localhost");
       if (url.pathname === "/api/chats")
-        return Promise.resolve(Response.json({ chats: removedFromOpenChat ? [serverSecondChat] : [serverChatAfterLeave] }));
+        return Promise.resolve(Response.json({
+            chats: removedFromOpenChat
+              ? [serverSecondChat]
+              : listsBothChats
+                ? [serverChatAfterLeave, serverSecondChat]
+                : [serverChatAfterLeave],
+          }),);
       if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
       if (url.pathname === "/api/chats/chat-1/messages")
         return Promise.resolve(
@@ -165,4 +173,21 @@ it("still reloads chats on a chat.message event (spec/social/messaging.md, \"Sto
   );
   await waitForMemberCount(2);
   expect(getStoreSnapshot().chats.find((c) => c.id === "chat-1")?.memberCount).toBe(2);
+});
+
+it("keeps the open group selected when another group is renamed (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  listsBothChats = true;
+  StubEventSource.latest?.dispatchEvent(
+    new MessageEvent("chat.updated", {
+      data: JSON.stringify({ type: "chat.updated", chatId: "chat-2", action: "renamed", actorId: "bob" }),
+    }),
+  );
+  for (let round = 0; round < 200 && getStoreSnapshot().chats.length < 2; round += 1) await Promise.resolve();
+  for (let round = 0; round < 20; round += 1) await Promise.resolve();
+  const s = getStoreSnapshot();
+  expect({ selected: s.selectedChatId, chats: s.chats.map((c) => c.id), thread: s.chatMessages }).toEqual({
+    selected: "chat-1",
+    chats: ["chat-1", "chat-2"],
+    thread: [],
+  });
 });
