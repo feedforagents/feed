@@ -19,6 +19,7 @@ import {
   type PostComposerContext,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "./store.ts";
+import { getStoreSnapshot } from "./store-core.ts";
 
 const REPORT_CATEGORIES = [
   "Spam",
@@ -82,10 +83,22 @@ function ConfirmAlertDialog({
 export function GlobalDialogs() {
   const s = useAppStore();
   const [composeText, setComposeText] = useState("");
+  const [composeDraftTargetId, setComposeDraftTargetId] = useState<string | null>(null);
+  const [composeWasOpen, setComposeWasOpen] = useState(false);
   const [composeBusy, setComposeBusy] = useState(false);
   const [reportCategory, setReportCategory] = useState<(typeof REPORT_CATEGORIES)[number]>("Spam");
   const [reportDetails, setReportDetails] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+
+  const quoteTargetId = s.quotePostTarget?.card.id ?? null;
+  if (s.composeOpen !== composeWasOpen) {
+    setComposeWasOpen(s.composeOpen);
+    if (s.composeOpen && composeDraftTargetId !== quoteTargetId) {
+      setComposeText("");
+      setComposeDraftTargetId(quoteTargetId);
+    }
+  }
 
   const quoteContext: PostComposerContext | undefined = s.quotePostTarget
     ? { authorHandle: s.quotePostTarget.card.authorHandle, excerpt: s.quotePostTarget.card.content }
@@ -100,6 +113,7 @@ export function GlobalDialogs() {
     setComposeBusy(false);
     if (ok) {
       setComposeText("");
+      setComposeDraftTargetId(null);
       storeActions.closeComposeDialog();
     }
   };
@@ -107,6 +121,7 @@ export function GlobalDialogs() {
   const closeReport = () => {
     setReportCategory("Spam");
     setReportDetails("");
+    setReportError(null);
     storeActions.closeReportDialog();
   };
 
@@ -115,9 +130,14 @@ export function GlobalDialogs() {
     if (!s.reportTarget) return;
     const reason = reportDetails.trim() ? `${reportCategory}: ${reportDetails.trim()}` : reportCategory;
     setReportBusy(true);
+    setReportError(null);
     const ok = await storeActions.submitReport(s.reportTarget.kind, s.reportTarget.id, reason);
     setReportBusy(false);
-    if (ok) closeReport();
+    if (ok) {
+      closeReport();
+    } else {
+      setReportError(getStoreSnapshot().errorMessage ?? "Report could not be submitted. Please try again.");
+    }
   };
 
   return (
@@ -142,7 +162,10 @@ export function GlobalDialogs() {
             authorName={s.viewer?.displayName ?? "You"}
             authorAvatarUrl={s.viewer?.avatarUrl ?? undefined}
             quotePost={quoteContext}
-            onCancelContext={() => storeActions.openComposeDialog(null)}
+            onCancelContext={() => {
+              setComposeDraftTargetId(null);
+              storeActions.openComposeDialog(null);
+            }}
             placeholder={s.quotePostTarget ? "Add a comment..." : "What's happening?"}
             submitLabel="Post"
             loading={composeBusy}
@@ -168,7 +191,10 @@ export function GlobalDialogs() {
                   type="button"
                   size="sm"
                   variant={reportCategory === category ? "primary" : "outline"}
-                  onClick={() => setReportCategory(category)}
+                  onClick={() => {
+                    setReportCategory(category);
+                    setReportError(null);
+                  }}
                 >
                   {category}
                 </Button>
@@ -178,8 +204,12 @@ export function GlobalDialogs() {
               aria-label="Additional details"
               placeholder="Optional details..."
               value={reportDetails}
-              onChange={(e) => setReportDetails(e.target.value)}
+              onChange={(e) => {
+                setReportDetails(e.target.value);
+                setReportError(null);
+              }}
             />
+            {reportError ? <p role="alert" className="text-xs text-destructive">{reportError}</p> : null}
             <div className="flex justify-end gap-2">
               <Button
                 type="button"

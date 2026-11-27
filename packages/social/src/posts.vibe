@@ -580,12 +580,13 @@ effect function hydratePostRowsTx(
   const quoteIds = [...new Set(rows.map((r) => toText(r.quote_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
   let quoteRows: ReadonlyArray<Row> = []
   if (quoteIds.length > 0) {
+    const quoteWhere = `p.id = ANY($1) AND p.deleted_at IS NULL${mode === "social" ? ` AND ${socialModeMarketExclusionSql("p")}` : ""}`
     quoteRows = viewerId !== undefined && viewerId !== ""
       ? try tx.query(
-          `SELECT p.* FROM feed_posts p WHERE p.id = ANY($1) AND p.deleted_at IS NULL AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`,
+          `SELECT p.* FROM feed_posts p WHERE ${quoteWhere} AND ${viewerAuthorVisibilitySql("$2", "p.author_id")}`,
           [quoteIds, viewerId]
         )
-      : try tx.query("SELECT * FROM feed_posts WHERE id = ANY($1) AND deleted_at IS NULL", [quoteIds])
+      : try tx.query(`SELECT p.* FROM feed_posts p WHERE ${quoteWhere}`, [quoteIds])
   }
   const replyParentIds = [...new Set(rows.map((r) => toText(r.reply_to_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
   const parentAuthorByPostId = new Map<string, { readonly authorId: string; readonly authorKind: PostAuthorKind }>()
@@ -1047,7 +1048,11 @@ export effect function getPostThread(
   const viewer = normalizeOptionalText(viewerId) ?? undefined
   return try store.transaction(effect (tx: Tx) => {
     const effectiveMode = mode ?? (try readViewerUiModeTx(tx, viewer))
-    const rootRows = try tx.query("SELECT * FROM feed_posts WHERE id = $1 AND deleted_at IS NULL LIMIT 1", [postId])
+    const socialExclusion = effectiveMode === "social" ? ` AND ${socialModeMarketExclusionSql("p")}` : ""
+    const rootRows = try tx.query(
+      `SELECT p.* FROM feed_posts p WHERE p.id = $1 AND p.deleted_at IS NULL${socialExclusion} LIMIT 1`,
+      [postId]
+    )
     const rootRow = rootRows[0]
     if (rootRow === undefined) {
       throw new SocialFailure({ code: "NotFound", message: "Post not found" })
@@ -1064,7 +1069,7 @@ export effect function getPostThread(
         : "p.created_at ASC, p.id ASC"
     const replyParams: unknown[] = viewer === undefined ? [postId] : [postId, viewer]
     const replyRows = try tx.query(
-      `SELECT p.* FROM feed_posts p WHERE p.reply_to_post_id = $1 AND p.deleted_at IS NULL${visibilitySuffix} ORDER BY ${replyOrderBy}`,
+      `SELECT p.* FROM feed_posts p WHERE p.reply_to_post_id = $1 AND p.deleted_at IS NULL${socialExclusion}${visibilitySuffix} ORDER BY ${replyOrderBy}`,
       replyParams
     )
     const parentId = toText(rootRow.reply_to_post_id) ?? null
@@ -1087,7 +1092,7 @@ export effect function getPostThread(
            SELECT p.*
            FROM chain c
            INNER JOIN feed_posts p ON p.id = c.id
-           WHERE p.deleted_at IS NULL${ancestorVisibility}
+           WHERE p.deleted_at IS NULL${socialExclusion}${ancestorVisibility}
            ORDER BY c.depth DESC`,
           viewer === undefined
             ? [postId, parentId, MAX_REPLY_ANCESTOR_DEPTH]
@@ -1606,7 +1611,7 @@ export effect function searchWorld(input: SearchWorldInput): SearchResult!(Socia
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     const mode = input.mode ?? (try readViewerUiModeTx(tx, viewerId))
-    const accountWhere = "is_reviewer = false AND (lower(handle) LIKE $1 ESCAPE '\\' OR lower(display_name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(display_name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\')"
+    const accountWhere = "is_reviewer = false AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = feed_accounts.account_id AND a.status <> 'active') AND (lower(handle) LIKE $1 ESCAPE '\\' OR lower(display_name) LIKE $1 ESCAPE '\\' OR replace(replace(lower(display_name), ' ', ''), '-', '') LIKE $2 ESCAPE '\\')"
     const accountOrder = "CASE WHEN lower(handle) = $3 OR lower(display_name) = $3 THEN 0 WHEN lower(handle) LIKE $4 ESCAPE '\\' OR lower(display_name) LIKE $4 ESCAPE '\\' THEN 1 ELSE 2 END ASC, created_at DESC"
     const accountRows = viewerId === undefined
       ? try tx.query(

@@ -18,6 +18,7 @@ import {
   getFilteredLeaderboardPage,
   getLeaderboard,
   getMarketPriceHistory,
+  getPerpPriceHistory,
   getPerpMarket,
   getPointLedger,
   getPredictionMarket,
@@ -426,6 +427,37 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
     const perpMarkets = try listPerpMarkets()
     const hundMarket = perpMarkets.find((m) => m.ticker === "HUND")
 
+    // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
+    const heldLong = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 10
+    })
+    try TestClock.adjust(Duration.seconds(3_600))
+    const quietSpotBuy = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "HUND",
+      side: "buy",
+      quoteCents: 200
+    })
+    try TestClock.adjust(Duration.seconds(3_600))
+    const balancingShort = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 1_000,
+      leverage: 10
+    })
+    try TestClock.adjust(Duration.seconds(23 * 3_600 + 1_800))
+    const hundAfterPremiumClosed = (try listPerpMarkets()).find((m) => m.ticker === "HUND")
+    const hundDetailAfterPremiumClosed = try getPerpMarket("HUND")
+    try TestClock.adjust(Duration.seconds(3_600))
+    const hundFlatForADay = try getPerpMarket("HUND")
+
     try check(() => assert.deepStrictEqual(
       {
         nonNpcCode,
@@ -452,7 +484,16 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
           shortClose.realizedPnlCents === bobEconAfter.balanceCents - INITIAL_GRANT_CENTS
         ],
         historyRecorded: perpHistory.length >= 6,
-        hundVolumeRecorded: (hundMarket?.volumeCents ?? 0) === 40_000
+        hundVolumeRecorded: (hundMarket?.volumeCents ?? 0) === 40_000,
+        markDayAgoAndNow: [
+          heldLong.position.markPriceCents,
+          quietSpotBuy.indexPriceCents,
+          quietSpotBuy.markPriceCents,
+          balancingShort.position.markPriceCents,
+          hundAfterPremiumClosed?.markPriceCents
+        ],
+        change24hAfterPremiumClosed: [hundAfterPremiumClosed?.change24hPct, hundDetailAfterPremiumClosed.change24hPct],
+        change24hOnceFlatForADay: [hundFlatForADay.markPriceCents, hundFlatForADay.change24hPct]
       },
       {
         nonNpcCode: "FORBIDDEN_NON_NPC",
@@ -463,7 +504,10 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
         longFillsPostImpactAndLosesOnRoundTrip: [true, true, true, true],
         shortFillsPostImpactAndLosesOnRoundTrip: [true, true, true, true],
         historyRecorded: true,
-        hundVolumeRecorded: true
+        hundVolumeRecorded: true,
+        markDayAgoAndNow: [10_505, 10_006, 10_506, 10_006, 10_006],
+        change24hAfterPremiumClosed: [-4.76, -4.76],
+        change24hOnceFlatForADay: [10_006, 0]
       }
     ))
   })
@@ -1211,6 +1255,25 @@ it.effect('Open positions stop marking expired prediction markets to market (spe
   })
 )
 
+it.effect('The perp price chart counts each NPC spot trade once, matching its traded volume (spec/markets/spotPerp.md, "Story: NPC spot trades drive the index price")', () =>
+  runWithSeededMarketDay(effect (now) => {
+    try seedHundredCorpMarket(now)
+    const buy = try executeNpcSpotTrade({ actorId: "ailon-musk", ticker: "HUND", side: "buy", quoteCents: 2_500 })
+    try TestClock.adjust("1 minute")
+    const sell = try executeNpcSpotTrade({ actorId: "ailon-musk", ticker: "HUND", side: "sell", quoteCents: 1_000 })
+    const traded = (range: "1D" | "ALL") => effect {
+      const history = try getPerpPriceHistory({ ticker: "HUND", range })
+      return history.points.filter((p) => p.volumeCents > 0).map((p) => [p.volumeCents, p.indexPriceCents])
+    }
+    const day = try traded("1D")
+    const all = try traded("ALL")
+    try check(() => assert.deepStrictEqual(
+      { day, all },
+      { day: [[2_500, buy.indexPriceCents], [1_000, sell.indexPriceCents]], all: [[2_500, buy.indexPriceCents], [1_000, sell.indexPriceCents]] }
+    ))
+  })
+)
+
 it.effect('Closed perp positions report payout equal to cash credited with open fees in cost basis (spec/shared/money.md, "Every trade pays a 0.1% fee rounded up to whole cents on the settled amount"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () =>
   runWithSeededMarketDay(effect (now) => {
     try seedAliceHundredDay(now)
@@ -1247,6 +1310,41 @@ it.effect('Closed perp positions report payout equal to cash credited with open 
         payoutEqualsLedgerCloseCredit: true,
         payoutMinusCostEqualsRealizedPnl: true,
         realizedMatchesReceipt: true
+      }
+    ))
+
+    // spec/markets/economy.md, "Initial grants are fixed at 100 pts, balances stay non-negative, and net profit excludes only the starting grant"
+    const heldShort = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 400,
+      leverage: 10
+    })
+    const profitWithOpenPerp = longClose.realizedPnlCents - heldShort.feeCents
+    const boardProfits = effect () => {
+      const profits: Array<number | undefined> = [(try getAccountEconomy("user-alice")).netProfitCents]
+      for (const timeframe of ["all", "24h", "7d", "30d"] as const) {
+        profits.push((try getFilteredLeaderboardPage({ timeframe, viewerAccountId: "user-alice" })).currentUser?.netProfitCents)
+      }
+      return profits
+    }
+    const profitsWhileOpen = try boardProfits()
+    const shortClose = try closePerpPosition({ ownerId: "user-alice", positionId: heldShort.positionId })
+    const profitAfterClose = longClose.realizedPnlCents + shortClose.realizedPnlCents
+    const profitsAfterClose = try boardProfits()
+
+    try check(() => assert.deepStrictEqual(
+      {
+        heldShortOpenFeeAndEquity: [heldShort.feeCents, heldShort.position.equityCents],
+        profitsWhileOpen,
+        profitsAfterClose
+      },
+      {
+        heldShortOpenFeeAndEquity: [4, 400],
+        profitsWhileOpen: [profitWithOpenPerp, profitWithOpenPerp, profitWithOpenPerp, profitWithOpenPerp, profitWithOpenPerp],
+        profitsAfterClose: [profitAfterClose, profitAfterClose, profitAfterClose, profitAfterClose, profitAfterClose]
       }
     ))
   })
@@ -1476,6 +1574,29 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
       side: "sell",
       quoteCents: 100
     }))
+    // spec/markets/economy.md, "Initial grants are fixed at 100 pts, balances stay non-negative, and net profit excludes only the starting grant"
+    const npcBoardRow = effect () => {
+      const board = try getLeaderboard({ scope: "characters", metric: "net_profit", page: 1, pageSize: 200 })
+      const row = board.entries.find((entry) => entry.accountId === "ailon-musk")!
+      return [row.startingGrantCents, row.netProfitCents]
+    }
+    const boardBeforeTslaDrain = try npcBoardRow()
+    const tslaDrain = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "TSLAI",
+      side: "sell",
+      quoteCents: 1_719_026
+    })
+    const holdingsAfterTslaDrain = try holdingsFor("ailon-musk", "TSLAI")
+    const boardAfterTslaDrain = try npcBoardRow()
+    try seedFeedWorld()
+    const holdingsAfterReseed = try holdingsFor("ailon-musk", "TSLAI")
+    const resellAfterReseedCode = try marketErrorCode(executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "TSLAI",
+      side: "sell",
+      quoteCents: 100
+    }))
     try check(() => assert.deepStrictEqual(
       {
         seededTslaHoldings: seededTslaHoldings.map((row) => toInt(row.base_units)),
@@ -1491,7 +1612,13 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
         exactLimitSell: [exactLimitSell.baseDelta, exactLimitSell.baseReserve, exactLimitSell.quoteReserveCents, exactLimitSell.indexPriceCents, exactLimitSell.markPriceCents, exactLimitSell.balanceAfterCents],
         holdingsAfterExactSell: holdingsAfterExactSell.map((row) => toInt(row.base_units)),
         secondNpcSellCode,
-        secondTickerSellCode
+        secondTickerSellCode,
+        tslaDrainBaseDelta: tslaDrain.baseDelta,
+        holdingsAfterTslaDrain: holdingsAfterTslaDrain.map((row) => toInt(row.base_units)),
+        boardBeforeTslaDrain,
+        boardAfterTslaDrain,
+        holdingsAfterReseed: holdingsAfterReseed.map((row) => toInt(row.base_units)),
+        resellAfterReseedCode
       },
       {
         seededTslaHoldings: [8_164],
@@ -1505,9 +1632,15 @@ it.effect('NPC spot sells use seeded holdings: a fresh sell settles on a seeded 
         holdingsAfterSell: [38_460],
         sellBeyondHoldingsCode: "INSUFFICIENT_SPOT_INVENTORY",
         exactLimitSell: [38_460, 50_000, 600_080, 1_200, 1_200, 25_000_020],
-        holdingsAfterExactSell: [],
+        holdingsAfterExactSell: [0],
         secondNpcSellCode: "INSUFFICIENT_SPOT_INVENTORY",
-        secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY"
+        secondTickerSellCode: "INSUFFICIENT_SPOT_INVENTORY",
+        tslaDrainBaseDelta: 8_163,
+        holdingsAfterTslaDrain: [0],
+        boardBeforeTslaDrain: [36_501_164, -307],
+        boardAfterTslaDrain: [36_501_164, -281_134],
+        holdingsAfterReseed: [0],
+        resellAfterReseedCode: "INSUFFICIENT_SPOT_INVENTORY"
       }
     ))
   })

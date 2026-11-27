@@ -39,6 +39,7 @@ import {
   loadTrending,
   openThread,
   repostPost,
+  resetAccountLoads,
   selectFeedTab,
   startDirectChat,
   submitPerpOrder,
@@ -56,6 +57,7 @@ import {
   decodeDeviceLookup,
   decodeOAuthConsent,
   decodeSkillHosts,
+  decodeViewer,
   isRecord,
   optStr,
   str,
@@ -128,6 +130,10 @@ export async function hydrateAuth(): Promise<void> {
     devEmailLinkEnabled,
   } = res.data;
   if (authenticated && viewer) {
+    const switchedAccount = prevViewerId !== null && prevViewerId !== viewer.accountId;
+    if (switchedAccount) {
+      clearAccountStateKeepingRoute();
+    }
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
     sendApp({ type: "verifyPhoneSms", codeValid: true, isNewAccount: false });
@@ -159,10 +165,16 @@ export async function hydrateAuth(): Promise<void> {
     if (prevViewerId !== viewer.accountId) {
       clearAuthorHides();
       notifyAuthChanged();
+      if (switchedAccount) {
+        await refreshViewerSurfaces();
+      }
     } else if (prevUiMode !== viewer.uiMode) {
       await loadNotifications();
     }
     return;
+  }
+  if (prevViewerId !== null) {
+    clearAccountStateKeepingRoute();
   }
   const snap = getStoreSnapshot();
   const currentRoute = snap.route;
@@ -186,6 +198,7 @@ export async function hydrateAuth(): Promise<void> {
   if (prevViewerId !== null) {
     clearAuthorHides();
     notifyAuthChanged();
+    await refreshViewerSurfaces();
   }
 }
 
@@ -372,10 +385,21 @@ export async function verifyEmailMagicLink(token: string | null): Promise<void> 
   const redirectTo = optStr(rec.redirectTo);
 
   if (status === "email_linked") {
+    const linked = decodeViewer(isRecord(res.data) ? res.data.account : null);
+    const viewer = getStoreSnapshot().viewer;
     setStoreState({
       emailVerifyStatus: "linked",
       emailVerifyError: null,
       devEmailMagicLinkUrl: null,
+      ...(linked && viewer && linked.accountId === viewer.accountId
+        ? {
+            viewer: {
+              ...viewer,
+              emailMasked: linked.emailMasked ?? viewer.emailMasked,
+              emailVerifiedAt: linked.emailVerifiedAt ?? viewer.emailVerifiedAt,
+            },
+          }
+        : {}),
     });
     await hydrateAuth();
     setStatusNotice("Email address linked.");
@@ -680,10 +704,10 @@ export async function refreshViewerSurfaces(): Promise<void> {
   await Promise.all(tasks);
 }
 
-export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
+export async function setPlayMode(nextMode: "game" | "social"): Promise<boolean> {
   const s = getStoreSnapshot();
   const prevMode = s.viewer ? s.viewer.uiMode : s.localUiMode;
-  if (prevMode === nextMode) return;
+  if (prevMode === nextMode) return true;
   const leavingGameRoute = nextMode === "social" && (s.route === "Markets" || s.route === "Leaderboard" || s.walletView);
   if (!s.viewer) {
     syncMachineUiMode(nextMode);
@@ -697,7 +721,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
       walletView: leavingGameRoute ? false : s.walletView,
     });
     await refreshViewerSurfaces();
-    return;
+    return true;
   }
   const res = await requestJson("/api/auth/mode", {
     method: "POST",
@@ -706,7 +730,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   });
   if (!res.ok) {
     setErrorNotice(res.message);
-    return;
+    return false;
   }
   syncMachineUiMode(nextMode);
   if (leavingGameRoute) {
@@ -720,6 +744,7 @@ export async function setPlayMode(nextMode: "game" | "social"): Promise<void> {
   });
   setStatusNotice(nextMode === "social" ? "Social mode enabled." : "Game mode enabled.");
   await refreshViewerSurfaces();
+  return true;
 }
 
 export function toggleUiModeFromControl(next: UiMode): void {
@@ -823,6 +848,17 @@ export async function confirmPhoneChange(newPhoneE164: string, code: string): Pr
     setErrorNotice(res.message);
     return false;
   }
+  const confirmed = decodeViewer(isRecord(res.data) ? res.data.account : null);
+  const viewer = getStoreSnapshot().viewer;
+  if (confirmed && viewer && confirmed.accountId === viewer.accountId) {
+    setStoreState({
+      viewer: {
+        ...viewer,
+        phoneLast2: confirmed.phoneLast2 ?? viewer.phoneLast2,
+        phoneVerifiedAt: confirmed.phoneVerifiedAt ?? viewer.phoneVerifiedAt,
+      },
+    });
+  }
   setStatusNotice("Phone number updated.");
   await hydrateAuth();
   return true;
@@ -842,16 +878,29 @@ async function performSignOut({
     setErrorNotice(res.message);
     return;
   }
+  pushBrowserRoute("Home");
+  setStoreState({ route: "Home", walletView: false });
+  clearAccountState();
+  setStatusNotice(statusMessage);
+  notifyAuthChanged();
+  await loadFeed("latest");
+}
+
+function clearAccountStateKeepingRoute(): void {
+  const { activePostId, profileHandle } = getStoreSnapshot();
+  clearAccountState();
+  setStoreState({ activePostId, profileHandle });
+}
+
+function clearAccountState(): void {
   clearPersistedPendingAction();
   clearAuthorHides();
   sendNav({ type: "signOutNav" });
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
-  pushBrowserRoute("Home");
+  resetAccountLoads();
   setStoreState({
     viewer: null,
-    route: "Home",
-    walletView: false,
     feedTab: "latest",
     chats: [],
     selectedChatId: null,
@@ -863,6 +912,9 @@ async function performSignOut({
     closedPositions: [],
     economy: null,
     ledger: [],
+    pnlTimeRange: "ALL",
+    pnlHistory: [],
+    pnlHistoryLoading: false,
     perpPreview: null,
     leaderboardCurrentUser: null,
     blockedAccounts: [],
@@ -892,9 +944,6 @@ async function performSignOut({
     devEmailMagicLinkUrl: null,
     pendingAction: null,
   });
-  setStatusNotice(statusMessage);
-  notifyAuthChanged();
-  await loadFeed("latest");
 }
 
 export async function logout(): Promise<void> {

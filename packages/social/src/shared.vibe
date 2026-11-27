@@ -64,6 +64,8 @@ export interface NotificationSeed {
 }
 
 const HOUR_MS = 3_600_000
+const REPEAT_NOTIFICATION_WINDOW_MS = 300_000
+const REPEATABLE_NOTIFICATION_KINDS: ReadonlySet<string> = new Set(["like", "repost", "follow"])
 
 module web {
   /** @throws {never} */
@@ -242,7 +244,7 @@ function subjectFromOrgRow(row: Row): ResolvedSubject {
 
 effect function findAccountByHandleOrIdTx(tx: Tx, cleaned: string): (ResolvedSubject | undefined)!StoreFailure {
   const accountRows = try tx.query(
-    "SELECT account_id, handle, display_name, avatar_url, banner_url, ui_mode FROM feed_accounts WHERE account_id = $1 OR lower(handle) = lower($1) LIMIT 1",
+    "SELECT account_id, handle, display_name, avatar_url, banner_url, ui_mode FROM feed_accounts WHERE (account_id = $1 OR lower(handle) = lower($1)) AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = feed_accounts.account_id AND a.status <> 'active') LIMIT 1",
     [cleaned]
   )
   const accountRow = accountRows[0]
@@ -400,10 +402,21 @@ export effect function insertNotificationTx(
     return undefined
   }
   const id = freshId()
-  try tx.query(
-    "INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, chat_id, invite_id, title, body, is_game_only, read_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12)",
-    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.chatId ?? null, seed.inviteId ?? null, seed.title, seed.body, seed.isGameOnly, seed.createdAt]
+  const inserted = try tx.query(
+    `INSERT INTO feed_notifications (id, account_id, kind, actor_id, post_id, market_id, chat_id, invite_id, title, body, is_game_only, read_at, created_at)
+     SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::text, $9::text, $10::text, $11::boolean, NULL, $12::bigint
+     WHERE NOT ($13::boolean AND EXISTS (
+       SELECT 1 FROM feed_notifications earlier
+       WHERE earlier.account_id = $2::text
+         AND earlier.kind = $3::text
+         AND earlier.actor_id = $4::text
+         AND earlier.post_id IS NOT DISTINCT FROM $5::text
+         AND earlier.created_at > $12::bigint - $14::bigint
+     ))
+     RETURNING id`,
+    [id, seed.accountId, seed.kind, seed.actorId, seed.postId, seed.marketId, seed.chatId ?? null, seed.inviteId ?? null, seed.title, seed.body, seed.isGameOnly, seed.createdAt, REPEATABLE_NOTIFICATION_KINDS.has(seed.kind), REPEAT_NOTIFICATION_WINDOW_MS]
   )
+  if (inserted.length === 0) return undefined
   return {
     type: "notification.created",
     notificationId: id,

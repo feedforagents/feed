@@ -11,6 +11,7 @@ import { passThrough, requestJson } from "./api.ts";
 import {
   appendAnonymousModeParam,
   clearNotices,
+  clearReplyFailureNotice,
   currentUiMode,
   getStoreSnapshot,
   incrementSpaNavDepth,
@@ -20,6 +21,7 @@ import {
   sendApp,
   sendNav,
   setErrorNotice,
+  setReplyErrorNotice,
   setStatusNotice,
   setStoreState,
   toSpecTab,
@@ -70,11 +72,17 @@ import {
 
 const likeInFlight = new Set<string>();
 const likeServerCountLanded = new Set<string>();
+const likeOwnEngagementLanded = new Set<string>();
+const likeInFlightKind = new Map<string, "like" | "unlike">();
 const repostInFlight = new Set<string>();
 const repostServerCountLanded = new Set<string>();
 
 export function markLikeServerCountLanded(postId: string): void {
   if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
+}
+
+export function markLikeOwnEngagementLanded(postId: string, kind: string): void {
+  if (likeInFlightKind.get(postId) === kind) likeOwnEngagementLanded.add(postId);
 }
 
 export function markRepostServerCountLanded(postId: string): void {
@@ -123,6 +131,7 @@ function dropAuthorsHiddenSince(
   };
   return posts.filter((p) => !wasAuthorHiddenSince(p.card.authorHandle, hidesAtStart)).map(cleanPost);
 }
+let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null; viewerId: string | null } | null = null;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
@@ -135,6 +144,7 @@ let leaderboardLoadedControls: {
   readonly page: number;
 } = { audience: "traders", timeframe: "ALL", scope: "players", metric: "net_profit", page: 1 };
 let pnlHistoryRequestSeq = 0;
+let pnlHistoryLoadedRange: MarketTimeRange = "ALL";
 let closedPositionsLoadCount = 0;
 let economyLoadCount = 0;
 
@@ -210,6 +220,56 @@ function preserveEngagementSince(
   });
 }
 
+let postDeletionSeq = 0;
+const postDeletedAtSeq = new Map<string, number>();
+
+function capturePostDeletions(): number {
+  return postDeletionSeq;
+}
+
+function wasPostDeletedSince(postId: string, deletionsAtStart: number): boolean {
+  return (postDeletedAtSeq.get(postId) ?? 0) > deletionsAtStart;
+}
+
+function dropPostsDeletedSince(
+  posts: ReadonlyArray<AppPost>,
+  deletionsAtStart: number,
+): ReadonlyArray<AppPost> {
+  const droppedRepliesByParent = new Map<string, number>();
+  for (const post of posts) {
+    if (wasPostDeletedSince(post.card.id, deletionsAtStart) && post.replyToPostId) {
+      droppedRepliesByParent.set(post.replyToPostId, (droppedRepliesByParent.get(post.replyToPostId) ?? 0) + 1);
+    }
+  }
+  return posts
+    .filter((post) => !wasPostDeletedSince(post.card.id, deletionsAtStart))
+    .map((post) => {
+      const droppedReplies = droppedRepliesByParent.get(post.card.id) ?? 0;
+      const quote = post.card.quotePost;
+      const tombstoneQuote = quote && !quote.deleted && wasPostDeletedSince(quote.id, deletionsAtStart);
+      if (droppedReplies === 0 && !tombstoneQuote) return post;
+      return {
+        ...post,
+        card: {
+          ...post.card,
+          ...(droppedReplies > 0 ? { replyCount: Math.max(0, post.card.replyCount - droppedReplies) } : {}),
+          ...(tombstoneQuote && quote
+            ? {
+                quotePost: {
+                  id: quote.id,
+                  authorDisplayName: "",
+                  authorHandle: "",
+                  isNpcParody: false,
+                  content: "",
+                  deleted: true,
+                },
+              }
+            : {}),
+        },
+      };
+    });
+}
+
 export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost["card"]) => AppPost["card"]): void {
   const patchPost = (post: AppPost): AppPost =>
     post.card.id === postId ? { ...post, card: updater(post.card) } : post;
@@ -254,6 +314,8 @@ export function removePostAcrossStore(
   postId: string,
   parentInfo?: { readonly replyToPostId?: string | null; readonly parentReplyCount?: number | null },
 ): void {
+  postDeletionSeq += 1;
+  postDeletedAtSeq.set(postId, postDeletionSeq);
   const cur = getStoreSnapshot();
   const existing = findPostInState(postId);
   const parentId = parentInfo?.replyToPostId ?? existing?.replyToPostId ?? null;
@@ -265,7 +327,25 @@ export function removePostAcrossStore(
       : Math.max(0, post.card.replyCount - 1);
     return { ...post, card: { ...post.card, replyCount: nextCount } };
   };
-  const cleanList = (list: ReadonlyArray<AppPost>) => list.filter((p) => p.card.id !== postId).map(adjustParent);
+  const tombstoneQuote = (post: AppPost): AppPost =>
+    post.card.quotePost?.id === postId
+      ? {
+          ...post,
+          card: {
+            ...post.card,
+            quotePost: {
+              id: postId,
+              authorDisplayName: "",
+              authorHandle: "",
+              isNpcParody: false,
+              content: "",
+              deleted: true,
+            },
+          },
+        }
+      : post;
+  const cleanList = (list: ReadonlyArray<AppPost>) =>
+    list.filter((p) => p.card.id !== postId).map((p) => adjustParent(tombstoneQuote(p)));
   const bundle = cur.profileBundle;
   const removedFromProfile = bundle !== null
     && existing !== undefined
@@ -284,8 +364,8 @@ export function removePostAcrossStore(
       ? thread.post.card.id === postId
         ? null
         : {
-            post: adjustParent(thread.post),
-            parentPost: thread.parentPost ? adjustParent(thread.parentPost) : null,
+            post: adjustParent(tombstoneQuote(thread.post)),
+            parentPost: thread.parentPost ? adjustParent(tombstoneQuote(thread.parentPost)) : null,
             ancestors: cleanList(thread.ancestors),
             replies: cleanList(thread.replies),
           }
@@ -317,6 +397,12 @@ function filterAuthorOutOfFeeds(handle: string): void {
   const thread = cur.activeThread;
   setStoreState({
     ...cleanedPostLists(cur, cleanList, cleanProfileList),
+    explore: {
+      ...cur.explore,
+      posts: cleanList(cur.explore.posts),
+      accounts: cur.explore.accounts.filter((a) => !isBlockedHandle(a.handle)),
+      actors: cur.explore.actors.filter((a) => !isBlockedHandle(a.username)),
+    },
     activeThread: thread
       ? isBlockedHandle(thread.post.card.authorHandle)
         ? null
@@ -345,6 +431,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const reqSeq = ++feedRequestSeq;
   const engagementAtStart = captureEngagement();
   const hidesAtStart = captureAuthorHides();
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({ feedLoading: true });
   const url = appendAnonymousModeParam(`/api/feed?tab=${encodeURIComponent(tab)}`, s);
   const res = await requestJson(url, {
@@ -354,8 +441,9 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
     feedLoadedTab = tab;
+    feedTabSwitchSnapshot = null;
     setStoreState({
-      feedPosts: dropAuthorsHiddenSince(preserveEngagementSince(res.data.items, engagementAtStart), hidesAtStart),
+      feedPosts: dropPostsDeletedSince(dropAuthorsHiddenSince(preserveEngagementSince(res.data.items, engagementAtStart), hidesAtStart), deletionsAtStart),
       feedNextCursor: res.data.nextCursor,
       feedLoading: false,
       pendingNewPostCount: 0,
@@ -366,11 +454,27 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     const specTab = toSpecTab(feedLoadedTab);
     sendNav({ type: "selectFeedTab", tab: specTab });
     sendApp({ type: "selectTab", tab: specTab });
-    setStoreState({ feedTab: feedLoadedTab, feedLoading: false });
+    const snapshot = feedTabSwitchSnapshot;
+    feedTabSwitchSnapshot = null;
+    setStoreState({
+      feedTab: feedLoadedTab,
+      feedLoading: false,
+      ...(snapshot && snapshot.tab === feedLoadedTab && snapshot.viewerId === (latest.viewer?.accountId ?? null)
+        ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor }
+        : {}),
+    });
   } else if (feedLoadedTab !== tab) {
+    feedTabSwitchSnapshot = null;
     setStoreState({ feedPosts: [], feedNextCursor: null, feedLoading: false });
   } else {
-    setStoreState({ feedLoading: false });
+    const snapshot = feedTabSwitchSnapshot;
+    feedTabSwitchSnapshot = null;
+    setStoreState({
+      feedLoading: false,
+      ...(snapshot && snapshot.tab === tab && snapshot.viewerId === (latest.viewer?.accountId ?? null)
+        ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor }
+        : {}),
+    });
   }
   setErrorNotice(res.message);
 }
@@ -390,6 +494,7 @@ export async function loadMoreFeed(): Promise<void> {
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = feedRequestSeq;
   const hidesAtStart = captureAuthorHides();
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({ feedLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/feed?tab=${encodeURIComponent(tab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
@@ -403,7 +508,7 @@ export async function loadMoreFeed(): Promise<void> {
   }
   if (res.ok) {
     setStoreState({
-      feedPosts: appendUniquePosts(latest.feedPosts, dropAuthorsHiddenSince(res.data.items, hidesAtStart)),
+      feedPosts: appendUniquePosts(latest.feedPosts, dropPostsDeletedSince(dropAuthorsHiddenSince(res.data.items, hidesAtStart), deletionsAtStart)),
       feedNextCursor: res.data.nextCursor,
       feedLoadingMore: false,
     });
@@ -444,7 +549,14 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   const specTab = toSpecTab(tab);
   sendNav({ type: "selectFeedTab", tab: specTab });
   sendApp({ type: "selectTab", tab: specTab });
-  setStoreState({ feedTab: tab });
+  if (tab !== s.feedTab) {
+    if (s.feedTab === feedLoadedTab) {
+      feedTabSwitchSnapshot = { tab: s.feedTab, posts: s.feedPosts, cursor: s.feedNextCursor, viewerId: s.viewer?.accountId ?? null };
+    }
+    setStoreState({ feedTab: tab, feedPosts: [], feedNextCursor: null, feedLoadingMore: false, pendingNewPostCount: 0 });
+  } else {
+    setStoreState({ feedTab: tab });
+  }
   await loadFeed(tab);
 }
 
@@ -458,6 +570,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   threadRequestSeq += 1;
   const requestSeq = threadRequestSeq;
   const engagementAtStart = captureEngagement();
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({
     threadLoading: true,
     activePostId: postId,
@@ -472,12 +585,26 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   if (requestSeq !== threadRequestSeq) return;
   if (res.ok && res.data) {
     const thread = res.data;
+    if (wasPostDeletedSince(thread.post.card.id, deletionsAtStart)) {
+      setStoreState({ threadLoading: false, threadSort: prevSort });
+      setErrorNotice("Post not found");
+      return;
+    }
+    const parentPost = thread.parentPost && !wasPostDeletedSince(thread.parentPost.card.id, deletionsAtStart)
+      ? dropPostsDeletedSince(preserveEngagementSince([thread.parentPost], engagementAtStart), deletionsAtStart)[0] ?? null
+      : null;
+    const droppedRootReplies = thread.replies.filter(
+      (reply) => reply.replyToPostId === thread.post.card.id && wasPostDeletedSince(reply.card.id, deletionsAtStart),
+    ).length;
+    const rootPost = dropPostsDeletedSince(preserveEngagementSince([thread.post], engagementAtStart), deletionsAtStart)[0] ?? thread.post;
     setStoreState({
       activeThread: {
-        post: preserveEngagementSince([thread.post], engagementAtStart)[0] ?? thread.post,
-        parentPost: thread.parentPost ? preserveEngagementSince([thread.parentPost], engagementAtStart)[0] ?? thread.parentPost : null,
-        ancestors: preserveEngagementSince(thread.ancestors, engagementAtStart),
-        replies: preserveEngagementSince(thread.replies, engagementAtStart),
+        post: droppedRootReplies > 0
+          ? { ...rootPost, card: { ...rootPost.card, replyCount: Math.max(0, rootPost.card.replyCount - droppedRootReplies) } }
+          : rootPost,
+        parentPost,
+        ancestors: dropPostsDeletedSince(preserveEngagementSince(thread.ancestors, engagementAtStart), deletionsAtStart),
+        replies: dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart),
       },
       threadLoading: false,
     });
@@ -538,8 +665,15 @@ export async function createPost(
     parse: (raw) => decodePost(raw, viewerId),
   });
   if (!res.ok) {
-    setErrorNotice(res.message);
+    if (options?.replyToPostId) {
+      setReplyErrorNotice(options.replyToPostId, res.message);
+    } else {
+      setErrorNotice(res.message);
+    }
     return false;
+  }
+  if (options?.replyToPostId) {
+    clearReplyFailureNotice(options.replyToPostId);
   }
   setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
   const cur = getStoreSnapshot();
@@ -605,7 +739,9 @@ export async function toggleLike(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
   if (likeInFlight.has(postId)) return;
   likeInFlight.add(postId);
+  likeInFlightKind.set(postId, currentlyLiked ? "unlike" : "like");
   likeServerCountLanded.delete(postId);
+  likeOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
   const optimisticLiked = !currentlyLiked;
   const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
@@ -632,14 +768,17 @@ export async function toggleLike(postId: string): Promise<void> {
     const rec = isRecord(res.data) ? res.data : {};
     const serverLiked = typeof rec.liked === "boolean" ? rec.liked : optimisticLiked;
     const serverCount = typeof rec.likeCount === "number" ? rec.likeCount : optimisticCount;
+    const ownEngagementLanded = likeOwnEngagementLanded.has(postId);
     patchPostCardAcrossStore(postId, (card) => ({
       ...card,
       liked: serverLiked,
-      likeCount: Math.max(0, card.likeCount + (serverCount - optimisticCount)),
+      ...(ownEngagementLanded ? {} : { likeCount: Math.max(0, serverCount) }),
     }));
   } finally {
     likeInFlight.delete(postId);
+    likeInFlightKind.delete(postId);
     likeServerCountLanded.delete(postId);
+    likeOwnEngagementLanded.delete(postId);
   }
 }
 
@@ -693,6 +832,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({ exploreLoading: true, exploreQuery: q });
   const url = appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(q.trim())}`, s);
   const needMarkets = s.perps.length === 0;
@@ -721,7 +861,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     const cur = getStoreSnapshot();
     const isBrowse = q.trim() === "";
     setStoreState({
-      explore: { ...res.data, posts: preserveEngagementSince(res.data.posts, engagementAtStart) },
+      explore: { ...res.data, posts: dropPostsDeletedSince(preserveEngagementSince(res.data.posts, engagementAtStart), deletionsAtStart) },
       ...(isBrowse && res.data.trending.length > 0 ? { rightRailTrending: res.data.trending } : {}),
       ...(isBrowse && res.data.articles.length > 0 ? { rightRailArticles: res.data.articles } : {}),
       exploreLoading: false,
@@ -741,6 +881,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag, exploreLoading: true });
   const url = appendAnonymousModeParam(`/api/trending/${encodeURIComponent(cleanTag)}`, s);
   const res = await requestJson(url, {
@@ -752,7 +893,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
     setStoreState({
       explore: {
         ...cur.explore,
-        posts: preserveEngagementSince(res.data.items, engagementAtStart),
+        posts: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
         accounts: [],
         actors: [],
         organizations: [],
@@ -927,6 +1068,11 @@ export async function loadWorldStatus(): Promise<void> {
   }
 }
 
+export function resetAccountLoads(): void {
+  pnlHistoryRequestSeq += 1;
+  feedLoadedTab = "latest";
+}
+
 export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer) return;
@@ -938,10 +1084,14 @@ export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<v
   });
   if (reqSeq !== pnlHistoryRequestSeq) return;
   if (res.ok) {
+    pnlHistoryLoadedRange = range;
     setStoreState({ pnlHistory: res.data, pnlHistoryLoading: false });
     return;
   }
-  setStoreState({ pnlHistoryLoading: false });
+  setStoreState({ pnlHistoryLoading: false, pnlTimeRange: pnlHistoryLoadedRange });
+  if (range !== pnlHistoryLoadedRange) {
+    setErrorNotice(res.message);
+  }
 }
 
 export async function loadClosedPositions(): Promise<void> {
@@ -968,6 +1118,7 @@ export async function loadMarketDetails(
   const viewerId = s.viewer?.accountId ?? null;
   const range = rangeOverride ?? s.marketTimeRange;
   const reqSeq = ++marketDetailsRequestSeq;
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
   const basePath = kind === "perp"
     ? `/api/markets/perp/${encodeURIComponent(id)}`
@@ -991,7 +1142,7 @@ export async function loadMarketDetails(
     marketHistoryLoading: false,
     marketTrades: tradesRes.ok ? tradesRes.data : [],
     marketTradesLoading: false,
-    marketSocialPosts: socialRes.ok ? socialRes.data.items : [],
+    marketSocialPosts: socialRes.ok ? dropPostsDeletedSince(socialRes.data.items, deletionsAtStart) : [],
   });
 }
 
@@ -1168,10 +1319,22 @@ async function executeTradeRequest({
   readonly statusMessage: string;
   readonly formatReceiptMessage?: (data: unknown) => string;
 }): Promise<boolean> {
+  const scopeAtSubmit = getStoreSnapshot();
   setStoreState({ tradeLoading: true, tradeError: null });
   const res = await requestJson(endpoint, { method: "POST", body, headers, parse: passThrough });
   if (!res.ok) {
-    setStoreState({ tradeLoading: false, tradeError: res.message });
+    const latest = getStoreSnapshot();
+    const sameMarketScope =
+      latest.selectedMarketKind === scopeAtSubmit.selectedMarketKind &&
+      (scopeAtSubmit.selectedMarketKind === "perp"
+        ? latest.selectedMarketId?.toUpperCase() === scopeAtSubmit.selectedMarketId?.toUpperCase()
+        : latest.selectedMarketId === scopeAtSubmit.selectedMarketId) &&
+      latest.marketsViewMode === scopeAtSubmit.marketsViewMode &&
+      latest.walletView === scopeAtSubmit.walletView;
+    setStoreState({
+      tradeLoading: false,
+      ...(sameMarketScope ? { tradeError: res.message } : {}),
+    });
     setErrorNotice(res.message);
     return false;
   }
@@ -1326,11 +1489,14 @@ export async function markChatRead(chatId: string): Promise<void> {
       unreadNotifications: Math.max(0, cur.unreadNotifications - unreadChatNotifications.length),
     });
   }
-  await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
     method: "POST",
     body: {},
     parse: passThrough,
   });
+  const mode = currentUiMode(cur);
+  const loadedUnread = cur.notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length;
+  if (res.ok && cur.unreadNotifications > loadedUnread) await loadNotifications();
 }
 
 let chatsLoadCount = 0;
@@ -1365,20 +1531,22 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
 
 let chatMessagesLoadCount = 0;
 
-export async function loadChatMessages(chatId: string): Promise<void> {
+export async function loadChatMessages(chatId: string): Promise<boolean> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
-  if (!viewerId) return;
+  if (!viewerId) return false;
   const loadId = ++chatMessagesLoadCount;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
     parse: (raw) => decodeChatMessages(raw, viewerId),
   });
-  if (loadId !== chatMessagesLoadCount) return;
-  if (res.ok && getStoreSnapshot().selectedChatId === chatId) {
+  if (loadId !== chatMessagesLoadCount) return true;
+  if (!res.ok) return false;
+  if (getStoreSnapshot().selectedChatId === chatId) {
     setStoreState({ chatMessages: res.data });
     if (res.data.length > 0) {
       await markChatRead(chatId);
     }
   }
+  return true;
 }
 
 export async function selectChat(chatId: string): Promise<void> {
@@ -1566,7 +1734,10 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
     return false;
   }
   const stillOpen = getStoreSnapshot().selectedChatId === chatId;
-  await Promise.all([stillOpen ? loadChatMessages(chatId) : undefined, loadChats(false)]);
+  const [reloaded] = await Promise.all([stillOpen ? loadChatMessages(chatId) : true, loadChats(false)]);
+  if (!reloaded) {
+    setErrorNotice("Message sent, but the thread failed to refresh.");
+  }
   return true;
 }
 
@@ -1588,25 +1759,34 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
   await loadChatMessages(s.selectedChatId);
 }
 
+const respondingInviteIds = new Set<string>();
+
 export async function respondGroupInvite(inviteId: string, accept: boolean): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
-  const res = await requestJson(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
-    method: "POST",
-    body: { accept },
-    parse: passThrough,
-  });
-  if (!res.ok) {
-    setErrorNotice(res.message);
-    return;
+  if (respondingInviteIds.has(inviteId)) return;
+  respondingInviteIds.add(inviteId);
+  try {
+    const res = await requestJson(`/api/chats/invites/${encodeURIComponent(inviteId)}/respond`, {
+      method: "POST",
+      body: { accept },
+      parse: passThrough,
+    });
+    if (!res.ok) {
+      setErrorNotice(res.message);
+      return;
+    }
+    setStatusNotice(accept ? "Joined group." : "Invite declined.");
+    const cur = getStoreSnapshot();
+    setStoreState({
+      alphaInvites: cur.alphaInvites.filter((inv) => inv.id !== inviteId),
+      notifications: cur.notifications.map((n) =>
+        n.inviteId === inviteId ? { ...n, item: { ...n.item, read: true, invitePending: false } } : n,
+      ),
+    });
+    await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
+  } finally {
+    respondingInviteIds.delete(inviteId);
   }
-  setStatusNotice(accept ? "Joined group." : "Invite declined.");
-  const cur = getStoreSnapshot();
-  setStoreState({
-    notifications: cur.notifications.map((n) =>
-      n.inviteId === inviteId ? { ...n, item: { ...n.item, read: true, invitePending: false } } : n,
-    ),
-  });
-  await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
 }
 
 let notificationsLoadCount = 0;
@@ -1784,6 +1964,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   }
   const loadId = ++profileLoadCount;
   const engagementAtStart = captureEngagement();
+  const deletionsAtStart = capturePostDeletions();
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -1802,8 +1983,17 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   });
   if (loadId !== profileLoadCount || getStoreSnapshot().profileHandle?.toLowerCase() !== handle.toLowerCase()) return;
   if (res.ok && res.data) {
+    const bundle = res.data;
+    const droppedOwnPosts = bundle.posts.filter(
+      (post) => wasPostDeletedSince(post.card.id, deletionsAtStart)
+        && post.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase(),
+    ).length;
     setStoreState({
-      profileBundle: { ...res.data, posts: preserveEngagementSince(res.data.posts, engagementAtStart) },
+      profileBundle: {
+        ...bundle,
+        posts: dropPostsDeletedSince(preserveEngagementSince(bundle.posts, engagementAtStart), deletionsAtStart),
+        postsCount: Math.max(0, bundle.postsCount - droppedOwnPosts),
+      },
       profileLoading: false,
     });
     return;
@@ -1826,6 +2016,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   if (!handle) return;
   const loadId = ++profileRepliesLoadCount;
   const engagementAtStart = captureEngagement();
+  const deletionsAtStart = capturePostDeletions();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -1841,7 +2032,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   if (res.ok) {
-    setStoreState({ profileReplies: preserveEngagementSince(res.data.items, engagementAtStart), profileRepliesLoading: false });
+    setStoreState({ profileReplies: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), profileRepliesLoading: false });
     return;
   }
   setStoreState({ profileRepliesLoading: false });
@@ -1870,6 +2061,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
   if (!handle) return;
   const loadId = ++profileLikesLoadCount;
   const engagementAtStart = captureEngagement();
+  const deletionsAtStart = capturePostDeletions();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileLikesLoading: true });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
@@ -1882,7 +2074,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   if (res.ok) {
-    setStoreState({ profileLikes: preserveEngagementSince(res.data.items, engagementAtStart), profileLikesLoading: false });
+    setStoreState({ profileLikes: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), profileLikesLoading: false });
     return;
   }
   setStoreState({ profileLikesLoading: false });
@@ -1918,6 +2110,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const bundle = s.profileBundle;
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
   const loadId = profileLoadCount;
+  const deletionsAtStart = capturePostDeletions();
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
@@ -1936,7 +2129,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
       setStoreState({
         profileBundle: {
           ...latest,
-          posts: appendUniquePosts(latest.posts, res.data.posts),
+          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(res.data.posts, deletionsAtStart)),
           postsNextCursor: res.data.postsNextCursor,
         },
         profileLoadingMore: false,
@@ -1973,7 +2166,8 @@ export async function loadFollowList(handle: string, kind: "followers" | "follow
 }
 
 export function closeFollowList(): void {
-  setStoreState({ followListKind: null, followListHandle: null, followListItems: [] });
+  followListLoadCount += 1;
+  setStoreState({ followListKind: null, followListHandle: null, followListItems: [], followListLoading: false });
 }
 
 export async function loadModerationLists(): Promise<void> {
@@ -2008,18 +2202,20 @@ export async function updateOwnProfile(payload: {
     body: payload,
     parse: passThrough,
   });
+  const currentViewer = getStoreSnapshot().viewer;
+  if (!currentViewer || currentViewer.accountId !== s.viewer.accountId) return false;
   if (!res.ok) {
     setErrorNotice(res.message);
     return false;
   }
   const rec = isRecord(res.data) ? res.data : {};
-  const nextDisplayName = str(rec.displayName, payload.displayName ?? s.viewer.displayName);
-  const nextBio = str(rec.bio, payload.bio ?? s.viewer.bio);
-  const nextAvatar = optStr(rec.avatarUrl) ?? (payload.avatarUrl !== undefined ? payload.avatarUrl : s.viewer.avatarUrl);
-  const nextBanner = optStr(rec.bannerUrl) ?? (payload.bannerUrl !== undefined ? payload.bannerUrl : s.viewer.bannerUrl);
+  const nextDisplayName = str(rec.displayName, payload.displayName ?? currentViewer.displayName);
+  const nextBio = str(rec.bio, payload.bio ?? currentViewer.bio);
+  const nextAvatar = optStr(rec.avatarUrl) ?? (payload.avatarUrl !== undefined ? payload.avatarUrl : currentViewer.avatarUrl);
+  const nextBanner = optStr(rec.bannerUrl) ?? (payload.bannerUrl !== undefined ? payload.bannerUrl : currentViewer.bannerUrl);
   setStoreState({
     viewer: {
-      ...s.viewer,
+      ...currentViewer,
       displayName: nextDisplayName,
       bio: nextBio,
       avatarUrl: nextAvatar,
@@ -2038,10 +2234,10 @@ export async function updateOwnProfile(payload: {
     setStoreState({ profileBundle: { ...cur.profileBundle, summary: nextSummary } });
   }
   setStatusNotice("Profile updated.");
-  if (s.route === "Profile" && s.profileBundle?.summary.isOwnProfile) {
-    await loadProfile(s.viewer.handle);
+  if (cur.route === "Profile" && cur.profileBundle?.summary.isOwnProfile) {
+    await loadProfile(currentViewer.handle);
     if (getStoreSnapshot().profileReplies.length > 0) {
-      await loadProfileReplies(s.viewer.handle);
+      await loadProfileReplies(currentViewer.handle);
     }
   }
   return true;
@@ -2196,6 +2392,7 @@ async function toggleModeration(
       void loadFeed();
     }
   }
+  void loadNotifications();
   const cur = getStoreSnapshot();
   if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {
     setStoreState({
@@ -2261,7 +2458,10 @@ export function toggleMute(handle: string, currentMuted?: boolean): Promise<void
 }
 
 export async function submitReport(targetKind: "account" | "post", targetId: string, reason: string): Promise<boolean> {
-  if (!getStoreSnapshot().viewer) return false;
+  if (!getStoreSnapshot().viewer) {
+    setErrorNotice("You must be signed in to submit a report.");
+    return false;
+  }
   const res = await requestJson("/api/reports", {
     method: "POST",
     body: { targetKind, targetId, reason },

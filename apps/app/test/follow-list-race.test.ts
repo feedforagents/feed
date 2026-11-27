@@ -1,7 +1,9 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getStoreSnapshot } from "../src/web/store-core.ts";
-import { loadFollowList } from "../src/web/store-world.ts";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { closeFollowList, loadFollowList } from "../src/web/store-world.ts";
+import { navigate } from "../src/web/store.ts";
+import { aliceViewer } from "./moderation-fixtures.ts";
 import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
 
 const followingRows = {
@@ -19,6 +21,14 @@ const followersRows = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  setStoreState({
+    followListKind: null,
+    followListHandle: null,
+    followListItems: [],
+    followListLoading: false,
+    errorMessage: null,
+    toasts: [],
+  });
 });
 
 describe("follow-list race", () => {
@@ -48,5 +58,73 @@ describe("follow-list race", () => {
     await first;
     expect(getStoreSnapshot().followListKind).toBe("following");
     expect(getStoreSnapshot().followListItems.map((entry) => entry.handle)).toEqual(["bob", "carol"]);
+  });
+
+  it('a follow list load that fails after the dialog closes stays silent (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+    const pending = installDeferredFetch();
+    const load = loadFollowList("alice", "followers");
+    closeFollowList();
+    pending.get("GET /api/users/alice/followers")?.resolve(
+      Response.json({ message: "Follow list unavailable due to a block" }, { status: 403 }),
+    );
+    await load;
+    const after = getStoreSnapshot();
+    expect(after.followListKind).toBeNull();
+    expect(after.followListLoading).toBe(false);
+    expect(after.followListItems).toEqual([]);
+    expect(after.errorMessage).toBeNull();
+    expect(after.toasts.some((t) => t.tone === "destructive")).toBe(false);
+  });
+
+  it('a follow list load that succeeds after the dialog closes does not repopulate it (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+    const pending = installDeferredFetch();
+    const load = loadFollowList("alice", "followers");
+    closeFollowList();
+    pending.get("GET /api/users/alice/followers")?.resolve(jsonResponse(followersRows));
+    await load;
+    const after = getStoreSnapshot();
+    expect(after.followListKind).toBeNull();
+    expect(after.followListHandle).toBeNull();
+    expect(after.followListLoading).toBe(false);
+    expect(after.followListItems).toEqual([]);
+  });
+
+  it('navigating to another profile closes the previous profile follow list (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+    const pending = installDeferredFetch();
+    setStoreState({
+      viewer: aliceViewer,
+      route: "Profile",
+      profileHandle: "bob",
+      followListKind: "followers",
+      followListHandle: "bob",
+      followListItems: [
+        { id: "dave", kind: "user", handle: "dave", displayName: "Dave Viewer", bio: "", avatarUrl: null, viewerFollows: false, isParody: false },
+      ],
+      followListLoading: false,
+    });
+    const nav = navigate("/u/carol");
+    pending.get("GET /api/users/carol")?.resolve(jsonResponse({
+      profile: {
+        id: "carol",
+        handle: "carol",
+        displayName: "Carol Analyst",
+        kind: "user",
+        followersCount: 1,
+        followingCount: 1,
+        postsCount: 0,
+        viewerFollows: false,
+        viewerFollowedBy: false,
+        viewerBlocks: false,
+        viewerMutes: false,
+      },
+      posts: [],
+      positions: [],
+    }));
+    await nav;
+    const after = getStoreSnapshot();
+    expect(after.profileHandle).toBe("carol");
+    expect(after.followListKind).toBeNull();
+    expect(after.followListHandle).toBeNull();
+    expect(after.followListItems).toEqual([]);
   });
 });

@@ -424,10 +424,10 @@ effect function loadPerp24hStatsTx(
     if (t !== "") volumeByTicker.set(t, toInt(row.volume_24h_cents))
   }
   const priorRows = try tx.query(
-    `SELECT DISTINCT ON (market_ref) market_ref AS ticker, price_cents
-     FROM feed_trades
-     WHERE market_kind IN ('perp', 'spot') AND market_ref = ANY($1) AND created_at < $2 AND price_cents > 0
-     ORDER BY market_ref, created_at DESC, id DESC`,
+    `SELECT DISTINCT ON (market_ref) market_ref AS ticker, mark_price_cents AS price_cents
+     FROM feed_market_price_history
+     WHERE market_kind = 'perp' AND market_ref = ANY($1) AND recorded_at < $2 AND mark_price_cents > 0
+     ORDER BY market_ref, recorded_at DESC, id DESC`,
     [tickers, cutoffMs]
   )
   const refPriceByTicker = new Map<string, number>()
@@ -437,10 +437,10 @@ effect function loadPerp24hStatsTx(
     if (t !== "" && price > 0) refPriceByTicker.set(t, price)
   }
   const windowFirstRows = try tx.query(
-    `SELECT DISTINCT ON (market_ref) market_ref AS ticker, price_cents
-     FROM feed_trades
-     WHERE market_kind IN ('perp', 'spot') AND market_ref = ANY($1) AND created_at >= $2 AND price_cents > 0
-     ORDER BY market_ref, created_at ASC, id ASC`,
+    `SELECT DISTINCT ON (market_ref) market_ref AS ticker, mark_price_cents AS price_cents
+     FROM feed_market_price_history
+     WHERE market_kind = 'perp' AND market_ref = ANY($1) AND recorded_at >= $2 AND mark_price_cents > 0
+     ORDER BY market_ref, recorded_at ASC, id ASC`,
     [tickers, cutoffMs]
   )
   for (const row of windowFirstRows) {
@@ -586,12 +586,6 @@ export effect function executeNpcSpotTrade(input: NpcSpotTradeInput): SpotTradeR
         "UPDATE feed_npc_spot_holdings SET base_units = base_units - $3, updated_at = $4 WHERE actor_id = $1 AND ticker = $2",
         [input.actorId, input.ticker, baseDelta, now]
       )
-      if (heldBase === baseDelta) {
-        try tx.query(
-          "DELETE FROM feed_npc_spot_holdings WHERE actor_id = $1 AND ticker = $2",
-          [input.actorId, input.ticker]
-        )
-      }
       cashDelta = input.quoteCents
     }
     const nextIndexPriceCents = safeIndexPriceCents(nextQuote, nextBase)

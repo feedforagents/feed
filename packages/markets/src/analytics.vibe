@@ -239,14 +239,14 @@ export effect function getPerpPriceHistory(
       ? try tx.query(
           `SELECT price_cents, mark_price_cents, volume_cents, recorded_at
            FROM feed_market_price_history
-           WHERE market_kind IN ('perp', 'spot') AND market_ref = $1
+           WHERE market_kind = 'perp' AND market_ref = $1
            ORDER BY recorded_at ASC, id ASC`,
           [input.ticker]
         )
       : try tx.query(
           `SELECT price_cents, mark_price_cents, volume_cents, recorded_at
            FROM feed_market_price_history
-           WHERE market_kind IN ('perp', 'spot') AND market_ref = $1 AND recorded_at >= $2
+           WHERE market_kind = 'perp' AND market_ref = $1 AND recorded_at >= $2
            ORDER BY recorded_at ASC, id ASC`,
           [input.ticker, cutoffMs]
         )
@@ -254,7 +254,7 @@ export effect function getPerpPriceHistory(
       const priorRows = try tx.query(
         `SELECT price_cents, mark_price_cents, volume_cents, recorded_at
          FROM feed_market_price_history
-         WHERE market_kind IN ('perp', 'spot') AND market_ref = $1 AND recorded_at < $2
+         WHERE market_kind = 'perp' AND market_ref = $1 AND recorded_at < $2
          ORDER BY recorded_at DESC, id DESC
          LIMIT 1`,
         [input.ticker, cutoffMs]
@@ -510,7 +510,11 @@ export effect function listUserTrades(input: {
     let traderId: string | null = null
     let traderKind: "user" | "npc" | null = null
     const acctRows = try tx.query(
-      `SELECT account_id FROM feed_accounts WHERE account_id = $1 OR LOWER(handle) = $2 LIMIT 1`,
+      `SELECT fa.account_id
+       FROM feed_accounts fa
+       WHERE (fa.account_id = $1 OR LOWER(handle) = $2)
+         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = fa.account_id AND a.status <> 'active')
+       LIMIT 1`,
       [raw, lower]
     )
     if (acctRows.length > 0) {

@@ -53,10 +53,11 @@ module fetchHarness {
   }
 
   /** @throws {never} */
-  export function buildReq(url: string, method: string, body?: unknown, cookie?: string): Request {
+  export function buildReq(url: string, method: string, body?: unknown, cookie?: string, clientIp?: string): Request {
     const headers = new Headers()
     if (body !== undefined) headers.set("content-type", "application/json")
     if (cookie !== undefined) headers.set("cookie", cookie)
+    if (clientIp !== undefined) headers.set("cf-connecting-ip", clientIp)
     return new Request(url, {
       method,
       headers,
@@ -223,6 +224,37 @@ it.effect('Device authorization enforces CIMD metadata verification on URL clien
       }),
       SERVER_CFG,
     )
+    const hitsAfterDeviceFlow = fetchHits.length
+
+    const consentQuery = (clientId: string) =>
+      `client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent("https://verified-agent.example/callback")}&response_type=code&code_challenge=cimd-challenge&code_challenge_method=S256&state=cimd-state`
+    const consentFrom = (ip: string, path: string, clientId: string) =>
+      handleFeedRequest(buildReq(`${ORIGIN}${path}?${consentQuery(clientId)}`, "GET", undefined, undefined, ip), SERVER_CFG)
+    const consentStatuses: number[] = []
+    for (let i = 0; i < 20; i += 1) {
+      const res = try consentFrom(
+        "203.0.113.41",
+        i % 2 === 0 ? "/api/oauth/consent" : "/oauth/authorize",
+        `https://unowned-agent.example/oauth/client-${i}.json`,
+      )
+      consentStatuses.push(res.status)
+    }
+    const hitsAtRegisterBudget = fetchHits.length
+    const overBudgetConsentRes = try consentFrom("203.0.113.41", "/api/oauth/consent", verifiedCimdUrl)
+    const overBudgetConsentBody = try decodeBody(overBudgetConsentRes)
+    const overBudgetRegisterRes = try handleFeedRequest(
+      buildReq(
+        `${ORIGIN}/oauth/register`,
+        "POST",
+        { client_name: "Budgeted CLI", redirect_uris: ["http://127.0.0.1:8765/callback"] },
+        undefined,
+        "203.0.113.41",
+      ),
+      SERVER_CFG,
+    )
+    const hitsOverBudget = fetchHits.length
+    const otherIpConsentRes = try consentFrom("198.51.100.7", "/api/oauth/consent", verifiedCimdUrl)
+    const otherIpConsentBody = try decodeBody(otherIpConsentRes)
 
     try Effect.try(() => {
       assert.deepStrictEqual([unownedSpoofRes.status, unownedSpoofBody.code], [400, "invalid_client"])
@@ -232,7 +264,6 @@ it.effect('Device authorization enforces CIMD metadata verification on URL clien
       assert.deepStrictEqual([mismatchRes.status, mismatchBody.code], [400, "invalid_client_metadata"])
       assert.strictEqual(hitsAfterPreChecks, 2)
       assert.strictEqual(uppercaseVerifiedRes.status, 200)
-      assert.strictEqual(fetchHits.length, 3)
       assert.deepStrictEqual(
         [lookupRes.status, lookupBody.clientId, lookupBody.clientName],
         [200, verifiedCimdUrl, "Verified Example Agent"],
@@ -244,7 +275,25 @@ it.effect('Device authorization enforces CIMD metadata verification on URL clien
       assert.strictEqual(tokenRes.status, 200)
       assert.isString(tokenBody.access_token)
       assert.strictEqual(cliDeviceRes.status, 200)
-      assert.strictEqual(fetchHits.length, 3)
+      assert.strictEqual(hitsAfterDeviceFlow, 3)
+      assert.deepStrictEqual(
+        {
+          consentStatuses,
+          fetchesWithinRegisterBudget: hitsAtRegisterBudget - hitsAfterDeviceFlow,
+          overBudgetConsent: [overBudgetConsentRes.status, overBudgetConsentBody.code],
+          overBudgetRegister: overBudgetRegisterRes.status,
+          fetchesOverBudget: hitsOverBudget - hitsAtRegisterBudget,
+          otherIpConsent: [otherIpConsentRes.status, otherIpConsentBody.clientName],
+        },
+        {
+          consentStatuses: Array.from({ length: 20 }, () => 400),
+          fetchesWithinRegisterBudget: 20,
+          overBudgetConsent: [429, "rate_limited"],
+          overBudgetRegister: 429,
+          fetchesOverBudget: 0,
+          otherIpConsent: [200, "Verified Example Agent"],
+        },
+      )
     })
   }
 }), 120_000)

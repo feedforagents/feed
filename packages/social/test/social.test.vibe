@@ -193,6 +193,14 @@ it.effect(
     const reposted = try repostPost("bob", root.id)
     const unreposted = try unrepostPost("bob", root.id)
     const rereposted = try repostPost("bob", root.id)
+    try followAccount("bob", "alice")
+    try unfollowAccount("bob", "alice")
+    try followAccount("bob", "alice")
+    const bobToggleKinds = effect () => (try listNotifications("alice", 50, "game"))
+      .filter((n) => n.actorId === "bob" && (n.kind === "like" || n.kind === "repost" || n.kind === "follow"))
+      .map((n) => n.kind)
+      .sort()
+    const toggleNotifs = try bobToggleKinds()
 
     const gameFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
     const socialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
@@ -241,8 +249,14 @@ it.effect(
     const releasedGame = try getArticle("proof-article-1", "game")
     const releasedSocial = try getArticle("proof-article-1", "social")
 
+    try TestClock.adjust(Duration.minutes(5))
+    try unlikePost("bob", root.id)
+    try likePost("bob", root.id)
+    const toggleNotifsLater = try bobToggleKinds()
+
     try check(() => assert.deepStrictEqual({
       rejections: [emptyCode, overLimitCode, spoofedGrantCode, nonAuthorDeleteCode, deletedLookupCode, unreleasedGetCode],
+      toggleNotifs: [toggleNotifs, toggleNotifsLater],
       rootLength: root.content.length,
       threadCounts: [threadBeforeDelete.post.replyCount, threadBeforeDelete.replies.map((r) => r.id), replyThread.parentPost?.id, threadAfterDelete.post.replyCount, threadAfterDelete.replies.length],
       engagement: [liked.likeCount, unliked.likeCount, reliked.liked, reposted.repostCount, unreposted.repostCount, rereposted.reposted],
@@ -307,6 +321,7 @@ it.effect(
       ]
     }, {
       rejections: ["InvalidInput", "InvalidInput", "Forbidden", "Forbidden", "NotFound", "NotFound"],
+      toggleNotifs: [["follow", "like", "repost"], ["follow", "like", "like", "repost"]],
       rootLength: 280,
       threadCounts: [2, [reply.id, carolReply.id], root.id, 1, 1],
       engagement: [1, 0, true, 1, 0, true],
@@ -1008,6 +1023,26 @@ it.effect(
       otherEventKept: try realtimeEventForViewer(store, inviteEvent, "alice"),
       otherEventDropped: try realtimeEventForViewer(store, inviteEvent, "bob")
     }
+    const npcSpotEvent: FeedRealtimeEvent = {
+      type: "market.spot",
+      actorId: "ailon-musk",
+      ticker: "NVDAI",
+      side: "buy",
+      quoteCents: 2500
+    }
+    const spotUnrelatedGameViewer = try realtimeEventForViewer(store, npcSpotEvent, "bob")
+    try blockAccount("alice", "ailon-musk")
+    try blockAccount("ailon-musk", "carol")
+    try muteAccount("bob", "ailon-musk")
+    const spotStream = {
+      viewerBlocksNpc: try realtimeEventForViewer(store, npcSpotEvent, "alice"),
+      npcBlocksViewer: try realtimeEventForViewer(store, npcSpotEvent, "carol"),
+      viewerMutesNpc: try realtimeEventForViewer(store, npcSpotEvent, "bob"),
+      unrelatedGameViewer: spotUnrelatedGameViewer,
+      socialModeViewer: try realtimeEventForViewer(store, npcSpotEvent, "dave"),
+      anonymousViewer: try realtimeEventForViewer(store, npcSpotEvent, null),
+      brokenStore: try realtimeEventForViewer(brokenStore, npcSpotEvent, "bob")
+    }
 
     try check(() => assert.deepStrictEqual({
       rateKeys: [
@@ -1067,7 +1102,8 @@ it.effect(
         sseFailClosedMissingStoreChat
       ],
       perpStream,
-      perpFrames
+      perpFrames,
+      spotStream
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -1131,6 +1167,15 @@ it.effect(
         brokenStore: undefined,
         otherEventKept: inviteEvent,
         otherEventDropped: undefined
+      },
+      spotStream: {
+        viewerBlocksNpc: aggregateFrame,
+        npcBlocksViewer: aggregateFrame,
+        viewerMutesNpc: npcSpotEvent,
+        unrelatedGameViewer: npcSpotEvent,
+        socialModeViewer: undefined,
+        anonymousViewer: npcSpotEvent,
+        brokenStore: undefined
       }
     }))
   })
@@ -1693,11 +1738,21 @@ it.effect(
       marketId: "seed-market-6"
     })
 
+    try TestClock.adjust(Duration.seconds(1))
+    const marketQuote = try createPost({ authorId: "bob", authorKind: "user", content: "Quoting the market desk", quotePostId: newMarketSystemPost.id })
+    try TestClock.adjust(Duration.seconds(1))
+    const plainQuote = try createPost({ authorId: "bob", authorKind: "user", content: "Quoting a plain post", quotePostId: "seed-post-1" })
+
     const openagiFeed = try listFeedPosts({ tab: "latest", authorId: "openagi", mode: "game", limit: 20 })
     const topLevelFeed = try listFeedPosts({ tab: "latest", mode: "game", limit: 50 })
     const feedWithReplies = try listFeedPosts({ tab: "latest", mode: "game", limit: 50, includeReplies: true })
     const socialFeed = try listFeedPosts({ tab: "latest", mode: "social", limit: 50 })
 
+    const aliceSocialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
+    const quoteEmbed = (feed: typeof topLevelFeed, postId: string) => {
+      const quoted = feed.items.find((p) => p.id === postId)?.quotePost
+      return quoted === undefined || quoted === null ? null : [quoted.id, quoted.content, quoted.deleted === true]
+    }
     const nestedThread = try getPostThread(reply2.id, "alice", "game")
     const seededPostGame = topLevelFeed.items.find((p) => p.id === "seed-post-1")
     const seededPostSocial = socialFeed.items.find((p) => p.id === "seed-post-1")
@@ -1790,6 +1845,11 @@ it.effect(
         powellClueGame?.ticker,
         powellClueGame?.marketBadge?.kind === "prediction" ? powellClueGame.marketBadge.ticker : null
       ],
+      socialModeQuoteEmbeds: {
+        gameMarketQuote: quoteEmbed(topLevelFeed, marketQuote.id),
+        socialMarketQuote: [quoteEmbed(socialFeed, marketQuote.id), quoteEmbed(aliceSocialFeed, marketQuote.id)],
+        socialPlainQuote: [quoteEmbed(socialFeed, plainQuote.id)?.[0], quoteEmbed(aliceSocialFeed, plainQuote.id)?.[0]]
+      },
       profileAndModeration: [
         updatedAlice?.avatarUrl,
         updatedAlice?.bannerUrl,
@@ -1856,6 +1916,11 @@ it.effect(
         null,
         "PRED"
       ],
+      socialModeQuoteEmbeds: {
+        gameMarketQuote: [newMarketSystemPost.id, "NEW MARKET (15m): Will OpenAGI ship GPT-Next today?", false],
+        socialMarketQuote: [[newMarketSystemPost.id, "", true], [newMarketSystemPost.id, "", true]],
+        socialPlainQuote: ["seed-post-1", "seed-post-1"]
+      },
       profileAndModeration: [
         "/assets/user-pfps/pfp-007.jpg",
         "/assets/user-banners/banner-7.jpg",

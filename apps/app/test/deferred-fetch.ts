@@ -2,9 +2,9 @@ import { vi } from "vitest";
 
 export type Deferred = { resolve: (value: Response) => void };
 
-export function jsonResponse(body: unknown): Response {
+export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { "content-type": "application/json" },
   });
 }
@@ -42,4 +42,15 @@ export function installDeferredFetchQueue() {
       queues.get(key)?.pop()?.resolve(res);
     },
   };
+}
+
+export function feedPost(id: string) {
+  return { id, authorId: "acct-bob", authorHandle: "bob", authorDisplayName: "Bob", content: `post ${id}`, createdAt: "2026-11-27T00:00:00.000Z" };
+}
+
+export function feedErrorResponse(): Response {
+  return new Response(JSON.stringify({ message: "Feed unavailable" }), {
+    status: 500,
+    headers: { "content-type": "application/json" },
+  });
 }

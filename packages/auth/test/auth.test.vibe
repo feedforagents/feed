@@ -1188,6 +1188,16 @@ it.effect('Email magic link signup, superseding, expiry, replay refusal, onboard
       config: emailConfig
     })
     const verifiedEmailAgent = try verifyBearer(emailAgentToken.access_token)
+    const deniedDevice = try startDeviceAuthorization({ clientId: agentClient.client_id, scope: "read", origin: "https://feed.fun" })
+    try approveDeviceAuthorization({ accountId: onboarded.account.accountId, userCode: deniedDevice.user_code, deny: true })
+    try startDeviceAuthorization({ clientId: agentClient.client_id, scope: "read", origin: "https://feed.fun" })
+    const deniedExchange = try refusedCode(exchangeOAuthToken({
+      grantType: "urn:ietf:params:oauth:grant-type:device_code",
+      deviceCode: deniedDevice.device_code,
+      clientId: agentClient.client_id,
+      config: emailConfig
+    }))
+    try check(() => assert.strictEqual(deniedExchange, "access_denied"))
 
     try startPhoneLink({
       accountId: onboarded.account.accountId,

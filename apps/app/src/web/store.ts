@@ -54,6 +54,7 @@ import {
   applyDocumentTheme,
   canEnterRoute,
   clearNotices,
+  clearReplyFailureNotice,
   closeBlockDialog,
   closeComposeDialog,
   closeDeletePostDialog,
@@ -126,6 +127,7 @@ import {
   loadTrendingTag,
   loadWorldStatus,
   markAllNotificationsRead,
+  markLikeOwnEngagementLanded,
   markLikeServerCountLanded,
   markRepostServerCountLanded,
   markChatRead,
@@ -259,10 +261,34 @@ async function loadDataForRoute(route: AppRoute, search = ""): Promise<void> {
 }
 
 function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
+  const prevPostId = getStoreSnapshot().activePostId;
+  if (prevPostId !== null && parsed.postId !== prevPostId) {
+    clearReplyFailureNotice(prevPostId);
+  }
   if (getStoreSnapshot().route === "PostDetail" && parsed.route !== "PostDetail") {
     closeThread();
   }
+  const followList = getStoreSnapshot();
+  if (
+    followList.followListKind !== null
+    && (parsed.route !== "Profile"
+      || (parsed.profileHandle ?? "").toLowerCase() !== (followList.followListHandle ?? "").toLowerCase())
+  ) {
+    closeFollowList();
+  }
   const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
+  const currentSelection = getStoreSnapshot();
+  const nextMarketKind = parsed.marketKind ?? (parsed.queryTicker ? ("perp" as const) : null);
+  const nextMarketId = parsed.marketId ?? parsed.queryTicker;
+  const sameMarketSelection =
+    nextMarketKind !== null &&
+    nextMarketId !== null &&
+    currentSelection.selectedMarketKind === nextMarketKind &&
+    (nextMarketKind === "perp"
+      ? currentSelection.selectedMarketId?.toUpperCase() === nextMarketId.toUpperCase()
+      : currentSelection.selectedMarketId === nextMarketId);
+  const clearsTradeError =
+    parsed.route === "Markets" && (!enteringTerminal || !sameMarketSelection);
   setStoreState({
     route: parsed.route,
     profileHandle: parsed.profileHandle,
@@ -278,6 +304,7 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
       ? {
           marketsViewMode: enteringTerminal ? ("terminal" as const) : ("dashboard" as const),
           perpPreview: null,
+          ...(clearsTradeError ? { tradeError: null } : {}),
         }
       : {}),
     ...(parsed.marketKind && parsed.marketId
@@ -319,6 +346,10 @@ function guardRouteAccess(parsed: ReturnType<typeof parseLocation>, rawPath: str
 }
 
 async function redirectToHome(options?: { readonly replace?: boolean }): Promise<void> {
+  const prevPostId = getStoreSnapshot().activePostId;
+  if (prevPostId !== null) {
+    clearReplyFailureNotice(prevPostId);
+  }
   if (options?.replace) {
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", "/");
@@ -455,6 +486,10 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
       const repostCount = typeof data.repostCount === "number" ? data.repostCount : undefined;
       if (likeCount !== undefined) markLikeServerCountLanded(postId);
       if (repostCount !== undefined) markRepostServerCountLanded(postId);
+      const engagementKind = optStr(data.kind);
+      if (engagementKind && optStr(data.accountId) === s.viewer?.accountId) {
+        markLikeOwnEngagementLanded(postId, engagementKind);
+      }
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         ...(likeCount !== undefined ? { likeCount } : {}),

@@ -1226,7 +1226,7 @@ export effect function startDeviceAuthorization(input: {
   const expiresAt = now + deviceCodeLifetimeMs
   return try store.transaction(effect (tx: Tx) => {
     try tx.query(
-      "DELETE FROM feed_device_codes WHERE expires_at <= $1 OR status IN ('consumed', 'denied')",
+      "DELETE FROM feed_device_codes WHERE expires_at <= $1",
       [now]
     )
     const clientRows = try tx.query(

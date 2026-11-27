@@ -313,6 +313,7 @@ function installMockNetwork(
   let viewerPhoneLast2: string | null = "01";
   let viewerBalanceCents = 10500;
   let viewerIsReviewer = true;
+  let feedFails = false;
   const json = (body: unknown) => Promise.resolve(Response.json(body));
   const fetchMock: typeof fetch = (input, init) => {
     const url = requestUrl(input);
@@ -427,6 +428,8 @@ function installMockNetwork(
         heldReplies.set(handle, pending);
       });
     }
+    if (path === "/api/feed" && feedFails) return Promise.resolve(Response.json({ message: "Feed is unavailable." }, { status: 503 }));
+    if (path === "/api/feed" && url.searchParams.get("tab") === "following") return json({ items: [{ ...SAMPLE_POSTS[0], id: "following-post-a" }], nextCursor: null });
     if (path === "/api/feed" || path === "/api/posts") return json({ items: SAMPLE_POSTS, nextCursor: null });
     if (path === "/api/posts/browser-post-1") return json({ post: SAMPLE_POSTS[0], ancestors: [], replies: [] });
     if (path === "/api/trending") return json({ trending: [] });
@@ -708,6 +711,17 @@ function installMockNetwork(
     leaderboardRequested: (scope: string) => requestedLeaderboardScopes.has(scope),
     releaseLeaderboard: (scope: string) => {
       for (const release of heldLeaderboard.get(scope)?.splice(0) ?? []) release();
+    },
+    setFeedFails: (fails: boolean) => {
+      feedFails = fails;
+    },
+    expireSession: () => {
+      signedIn = false;
+    },
+    switchAccount: () => {
+      viewerIsReviewer = false;
+      viewerHandle = "erin_trader";
+      viewerDisplayName = "Erin Trader";
     },
     pnlRequested: (range: string) => requestedPnlRanges.has(range),
     releasePnl: (range: string) => {
@@ -1380,6 +1394,58 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
   expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
   expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
+
+  act(() => {
+    void storeActions.loadPnlHistory("1D");
+  });
+  await act(() => Promise.resolve());
+  await act(() => storeActions.logout());
+  network.releasePnl("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  const { pnlTimeRange, pnlHistory, pnlHistoryLoading } = getStoreSnapshot();
+  expect({ pnlTimeRange, pnlHistory, pnlHistoryLoading }).toEqual({ pnlTimeRange: "ALL", pnlHistory: [], pnlHistoryLoading: false });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await signInAsReviewer();
+  await act(() => storeActions.selectFeedTab("following"));
+  network.setFeedFails(true);
+  await act(() => storeActions.logout());
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await signInAsReviewer();
+  expect(getStoreSnapshot().viewer?.accountId).toBe("acct-player-1");
+  expect(getStoreSnapshot().feedTab).toBe("latest");
+
+  network.setFeedFails(false);
+  await act(() => storeActions.selectFeedTab("following"));
+  await act(() => storeActions.loadPnlHistory("1W"));
+  await act(() => storeActions.navigate("/u/alice"));
+  const feedLoadsBeforeExpiry = fetchPaths.filter((path) => path === "/api/feed").length;
+  network.expireSession();
+  await act(() => hydrateAuth());
+  const expired = getStoreSnapshot();
+  expect({ viewer: expired.viewer, feedTab: expired.feedTab, pnlTimeRange: expired.pnlTimeRange, pnlHistory: expired.pnlHistory }).toEqual({ viewer: null, feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [] });
+  expect({ route: expired.route, profileHandle: expired.profileBundle?.summary.handle }).toEqual({ route: "Profile", profileHandle: "alice" });
+  expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedLoadsBeforeExpiry + 1);
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
+  await signInAsReviewer();
+  await act(() => storeActions.selectFeedTab("following"));
+  await act(() => storeActions.loadPnlHistory("1W"));
+  const accountState = () => {
+    const s = getStoreSnapshot();
+    return { accountId: s.viewer?.accountId, feedTab: s.feedTab, pnlTimeRange: s.pnlTimeRange, pnlHistory: s.pnlHistory, followingPostShown: s.feedPosts.some((post) => post.card.id === "following-post-a") };
+  };
+  const accountA = accountState();
+  expect(accountA).toMatchObject({ accountId: "acct-player-1", feedTab: "following", pnlTimeRange: "1W", followingPostShown: true });
+  await act(() => hydrateAuth());
+  expect(accountState()).toEqual(accountA);
+
+  await act(() => storeActions.navigate("/post/browser-post-1"));
+  network.switchAccount();
+  await act(() => hydrateAuth());
+  expect(accountState()).toEqual({ accountId: "acct-email-1", feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [], followingPostShown: false });
+  expect({ route: getStoreSnapshot().route, threadPostId: getStoreSnapshot().activeThread?.post.card.id }).toEqual({ route: "PostDetail", threadPostId: "browser-post-1" });
 });
 
 it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {

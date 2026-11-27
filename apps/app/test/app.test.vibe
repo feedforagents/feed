@@ -1172,6 +1172,39 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
       [logoutRes.status, reusedCookieEconomyRes.status, reusedCookieMeBody.authenticated, repeatLogoutRes.status, secondCookieMeAfterLogout.authenticated, logoutClearsCookie],
       [200, 401, false, 200, true, true]
     ))
+
+    // spec/auth/phone.md, "Story: Onboard once, change phone, sign out everywhere, or delete after cooldown"
+    const explorePeople = effect (query: string) => {
+      const body = try readJson(try callApp(`/api/explore?q=${query}`))
+      return (body.search as { readonly accounts: ReadonlyArray<Record<string, unknown>> }).accounts.map((account) => account.handle)
+    }
+    const peopleBeforeDelete = try explorePeople("parity_alice")
+    const deleteAccountRes = try callApp("/api/auth/account/delete", { method: "POST", cookie: secondCookie })
+    const mcpSearchAfterDelete = try readJson(try callApp("/mcp", {
+      json: { jsonrpc: "2.0", id: 90, method: "tools/call", params: { name: "search", arguments: { query: "deleted", kind: "users" } } }
+    }))
+    const mcpPeopleAfterDelete = ((mcpSearchAfterDelete.result as Record<string, unknown>).structuredContent as { readonly accounts: ReadonlyArray<Record<string, unknown>> }).accounts
+    const mentionSearchAfterDelete = (try readJson(try callApp("/api/users/search?q=deleted"))).items
+    const explorePeopleAfterDelete = try explorePeople("deleted")
+    const activePeopleAfterDelete = try explorePeople("parity_bob")
+    try check(() => assert.deepStrictEqual(
+      {
+        peopleBeforeDelete,
+        deleteStatus: deleteAccountRes.status,
+        explorePeopleAfterDelete,
+        activePeopleAfterDelete,
+        mcpPeopleAfterDelete: mcpPeopleAfterDelete.map((account) => account.handle),
+        mentionSearchAfterDelete
+      },
+      {
+        peopleBeforeDelete: ["parity_alice"],
+        deleteStatus: 200,
+        explorePeopleAfterDelete: [],
+        activePeopleAfterDelete: ["parity_bob"],
+        mcpPeopleAfterDelete: [],
+        mentionSearchAfterDelete: []
+      }
+    ))
   }
 }, 180_000)
 
@@ -1298,6 +1331,59 @@ it.effect('Email magic link sign-in, onboarding 100 pts grant, and profile likes
         [200, 200, true]
       ))
     }
+
+    // spec/auth/email.md, "Sign out everywhere bumps `sessionsEpoch`, and self-serve deletion holds the email hash for 30 days"; spec/social/moderation.md, "Following is refused when blocked"; spec/social/messaging.md, "Sending a DM reuses any existing thread or auto-creates one for a non-blocked pair"
+    const deletedId = String(viewer.accountId ?? "")
+    const deletedHandle = `deleted_${deletedId}`
+    const watcher = try onboardPhonePlayer("+14155550121", "magic_watcher")
+    const buyRes = try callApp("/api/markets/prediction/seed-market-1/buy", { cookie: onboardCookie, json: { side: "yes", amountCents: 500 } })
+    const groupBody = try readJson(try callApp("/api/chats/group", { cookie: watcher.cookie, json: { title: "watchers", memberHandles: [] } }))
+    const groupId = String((groupBody.chat as Record<string, unknown>).id ?? "")
+    const profileBeforeDelete = try callApp(`/api/users/${deletedId}`, { cookie: watcher.cookie })
+    const tradesBeforeDelete = try readJson(try callApp(`/api/users/${deletedId}/trades`, { cookie: watcher.cookie }))
+    const deleteRes = try callApp("/api/auth/account/delete", { method: "POST", cookie: onboardCookie })
+    const profileById = try callApp(`/api/users/${deletedId}`, { cookie: watcher.cookie })
+    const profileByHandle = try callApp(`/api/users/${deletedHandle}`)
+    const tradesById = try callApp(`/api/users/${deletedId}/trades`)
+    const mcpProfile = try readText(try callApp("/mcp", {
+      json: { jsonrpc: "2.0", id: 91, method: "tools/call", params: { name: "get_profile", arguments: { handleOrId: deletedId } } }
+    }))
+    const followRes = try callApp(`/api/users/${deletedHandle}/follow`, { method: "POST", cookie: watcher.cookie })
+    const dmRes = try callApp("/api/chats/direct", { cookie: watcher.cookie, json: { targetHandleOrId: deletedId } })
+    const inviteRes = try callApp(`/api/chats/${encodeURIComponent(groupId)}/invite`, { cookie: watcher.cookie, json: { targetHandleOrId: deletedId } })
+    const watcherFollowing = try readText(try callApp("/api/users/magic_watcher/following", { cookie: watcher.cookie }))
+    const watcherChats = try readText(try callApp("/api/chats", { cookie: watcher.cookie }))
+    const activeProfile = try callApp("/api/users/magic_watcher")
+    try check(() => assert.deepStrictEqual(
+      {
+        buyStatus: buyRes.status,
+        profileBeforeDelete: profileBeforeDelete.status,
+        tradesBeforeDelete: (tradesBeforeDelete.trades as ReadonlyArray<unknown>).length,
+        deleteStatus: deleteRes.status,
+        profileById: profileById.status,
+        profileByHandle: profileByHandle.status,
+        tradesById: tradesById.status,
+        mcpProfileFound: mcpProfile.includes(deletedHandle),
+        writes: [followRes.status, dmRes.status, inviteRes.status],
+        followingShowsDeleted: watcherFollowing.includes(deletedId),
+        chatsShowDeleted: watcherChats.includes(deletedId),
+        activeProfile: activeProfile.status
+      },
+      {
+        buyStatus: 200,
+        profileBeforeDelete: 200,
+        tradesBeforeDelete: 1,
+        deleteStatus: 200,
+        profileById: 404,
+        profileByHandle: 404,
+        tradesById: 404,
+        mcpProfileFound: false,
+        writes: [404, 404, 404],
+        followingShowsDeleted: false,
+        chatsShowDeleted: false,
+        activeProfile: 200
+      }
+    ))
   }
 }, 120_000)
 

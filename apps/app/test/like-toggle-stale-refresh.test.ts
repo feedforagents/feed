@@ -42,15 +42,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function dispatchEngagement(accountId: string, kind: string, likeCount: number): void {
+  eventSources.at(-1)?.dispatchEvent(
+    new MessageEvent("post.engagement", {
+      data: JSON.stringify({ type: "post.engagement", postId: "post-1", kind, accountId, likeCount, repostCount: 0 }),
+    }),
+  );
+}
+
 function startGatedLikeWithLiveEvent(likeCount: number): Promise<void> {
   gateLike = true;
   reconnectRealtime();
   const toggle = toggleLike("post-1");
-  eventSources.at(-1)?.dispatchEvent(
-    new MessageEvent("post.engagement", {
-      data: JSON.stringify({ type: "post.engagement", postId: "post-1", kind: "like", likeCount, repostCount: 0 }),
-    }),
-  );
+  dispatchEngagement("bob", "like", likeCount);
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(likeCount);
   return toggle;
 }
@@ -95,11 +99,53 @@ it("keeps a completed like when an earlier thread refresh resolves with a pre-li
 });
 
 it("keeps a live engagement count that landed while the like request was in flight (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
-  const toggle = startGatedLikeWithLiveEvent(7);
+  gateLike = true;
+  reconnectRealtime();
+  const toggle = toggleLike("post-1");
+  dispatchEngagement("alice", "like", 6);
+  dispatchEngagement("bob", "like", 7);
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(7);
   releaseLike?.(jsonPayload({ postId: "post-1", liked: true, likeCount: 6 }));
   await toggle;
   expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(7);
+});
+
+async function expectServerCountAfterLiveLikes(ownEventCount: number | null): Promise<void> {
+  const toggle = startGatedLikeWithLiveEvent(7);
+  if (ownEventCount !== null) dispatchEngagement("alice", "like", ownEventCount);
+  releaseLike?.(jsonPayload({ postId: "post-1", liked: true, likeCount: 8 }));
+  await toggle;
+  expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(8);
+}
+
+it("shows the server count when live likes land before the like commits (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  await expectServerCountAfterLiveLikes(null);
+});
+
+it("shows the server count when live likes land before the like commits and the own event follows (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  await expectServerCountAfterLiveLikes(8);
+});
+
+it("shows the server count in post detail when a live like lands before the unlike commits (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const likedPost = decodedPost(postRaw({ id: "post-1", likeCount: 5, likedByViewer: true }));
+  resetWorldFeedStore({ feedPosts: [likedPost] });
+  setStoreState({
+    route: "PostDetail",
+    activePostId: "post-1",
+    activeThread: { post: likedPost, parentPost: null, ancestors: [], replies: [] },
+  });
+  gateLike = true;
+  reconnectRealtime();
+  const toggle = toggleLike("post-1");
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(4);
+  dispatchEngagement("bob", "like", 6);
+  releaseLike?.(jsonPayload({ postId: "post-1", liked: false, likeCount: 5 }));
+  await toggle;
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(5);
 });
 
 it("keeps a live engagement count that landed while the like request was in flight when the like then fails (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {

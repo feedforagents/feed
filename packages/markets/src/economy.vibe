@@ -17,6 +17,7 @@ import {
   type PlayerLedger
 } from "../gen/markets__economy.effect.vibe"
 import { positionEquityAtMark } from "../gen/markets__spotPerp.effect.vibe"
+import { canonicalTradingFee } from "../gen/shared__money.effect.vibe"
 import { markToMarketPredictionCents } from "./prediction.vibe"
 import {
   type MarketFailure,
@@ -350,7 +351,7 @@ effect function loadTradingAggregatesTx(
     const specPos = toSpecPerpPosition(row)
     const mark = toInt(row.mark_price_cents)
     const equity = Math.max(0, positionEquityAtMark(specPos, mark))
-    const clampedUnrealized = equity - specPos.marginCents
+    const clampedUnrealized = equity - specPos.marginCents - canonicalTradingFee(specPos.sizeCents)
     perpValueMap.set(holderId, (perpValueMap.get(holderId) ?? 0) + equity)
     openUnrealizedMap.set(holderId, (openUnrealizedMap.get(holderId) ?? 0) + clampedUnrealized)
   }
