@@ -154,6 +154,7 @@ export interface AppPosition {
   readonly costBasisCents: number;
   readonly marginCents: number;
   readonly sizeCents: number;
+  readonly grossSizeCents: number;
   readonly leverage: number;
   readonly entryPriceCents: number;
   readonly markPriceCents: number;
@@ -1144,6 +1145,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
       const rawSide = str(entry.side, "yes").toLowerCase() === "no" ? "no" : "yes";
       const costCents = num(entry.costBasisCents ?? entry.cost_basis_cents, 0);
       const estCents = num(entry.estimatedValueCents, costCents);
+      const grossCents = num(entry.grossEstimatedValueCents, estCents > 0 ? estCents + Math.ceil(estCents / 999) : estCents);
       const sidePriceBps = rawSide === "yes" ? num(entry.yesPriceBps, 5000) : num(entry.noPriceBps, 5000);
       const wholeShares = shares / 100;
       const unrealizedPnlCents = estCents - costCents;
@@ -1158,6 +1160,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
         costBasisCents: costCents,
         marginCents: costCents,
         sizeCents: estCents,
+        grossSizeCents: grossCents,
         leverage: 1,
         entryPriceCents: Math.round(avgPricePct),
         markPriceCents: Math.round(currentPricePct),
@@ -1207,6 +1210,7 @@ export function decodePositions(raw: unknown): ReadonlyArray<AppPosition> {
         costBasisCents: marginCents,
         marginCents,
         sizeCents,
+        grossSizeCents: sizeCents,
         leverage,
         entryPriceCents: entryCents,
         markPriceCents: markCents,
