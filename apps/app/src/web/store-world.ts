@@ -348,7 +348,12 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     feedTabSwitchSnapshot = null;
     setStoreState({ feedPosts: [], feedNextCursor: null, feedLoading: false });
   } else {
-    setStoreState({ feedLoading: false });
+    const snapshot = feedTabSwitchSnapshot;
+    feedTabSwitchSnapshot = null;
+    setStoreState({
+      feedLoading: false,
+      ...(snapshot && snapshot.tab === tab ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor } : {}),
+    });
   }
   setErrorNotice(res.message);
 }

@@ -16,6 +16,13 @@ function seedLatestPage() {
   });
 }
 
+function expectLatestPageIntact() {
+  const s = getStoreSnapshot();
+  expect(s.feedTab).toBe("latest");
+  expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
+  expect(s.feedNextCursor).toBe("1764201600000:latest-1");
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -28,10 +35,7 @@ describe("home feed tab switch and Load more", () => {
     expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual([]);
     pending.get("GET /api/feed?tab=top&mode=game")?.resolve(errorResponse());
     await switching;
-    const s = getStoreSnapshot();
-    expect(s.feedTab).toBe("latest");
-    expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
-    expect(s.feedNextCursor).toBe("1764201600000:latest-1");
+    expectLatestPageIntact();
     const loading = loadMoreFeed();
     pending.get("GET /api/feed?tab=latest&cursor=1764201600000%3Alatest-1&mode=game")?.resolve(errorResponse());
     await loading;
@@ -48,6 +52,22 @@ describe("home feed tab switch and Load more", () => {
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["top-1"]);
     expect(s.feedNextCursor).toBe("9:1764201600000:1764201600000:top-1");
+  });
+
+  it('switching back to the loaded tab before the new tab loads keeps its page when the reload fails (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+    const pending = installDeferredFetch();
+    seedLatestPage();
+    const loaded = selectFeedTab("latest");
+    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201600000:latest-1" }));
+    await loaded;
+    const toTop = selectFeedTab("top");
+    const backToLatest = selectFeedTab("latest");
+    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(errorResponse());
+    await backToLatest;
+    pending.get("GET /api/feed?tab=top&mode=game")?.resolve(errorResponse());
+    await toTop;
+    expectLatestPageIntact();
+    expect(getStoreSnapshot().feedLoading).toBe(false);
   });
 
   it('Load more failure keeps the current list and cursor for retry (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
