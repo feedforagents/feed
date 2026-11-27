@@ -1523,3 +1523,76 @@ it.effect('MCP perp idempotencyKey replay/conflict for open_perp and close_perp 
     assert.strictEqual(closeConflictErr.code, "IDEMPOTENCY_CONFLICT")
   })
 }))
+
+it.effect('MCP open_perp with mode flip closes the long and opens a short (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")', () => withSeededWorld(effect (authConfig) => {
+  const alice = try onboardPhoneUser("+14155550212", "alice_perp_flip", "Alice Perp Flip", authConfig)
+  const aliceToken = (try connectOAuthGrant({
+    accountId: alice.account.accountId,
+    clientName: "Perp Flip Agent",
+    redirectUri: "http://127.0.0.1:4104/callback",
+    scope: "read social:write messages trade",
+    state: "state_perp_flip",
+    verifier: "pkce_verifier_perp_flip_0123456789abcdef0123456789",
+    authConfig
+  })).access_token
+  const marketsPayload = unwrapToolPayload(try callMcpTool(301, "list_markets", { kind: "perp", limit: 5 }, authConfig))
+  const firstPerp = ((marketsPayload.perpMarkets ?? []) as ReadonlyArray<{ readonly ticker: string }>)[0]
+  const ticker = firstPerp?.ticker ?? ""
+  const previewFreshShort = unwrapToolPayload(try callMcpTool(
+    302,
+    "preview_perp",
+    { ticker, side: "short", collateralPts: 5, leverage: 3 },
+    authConfig,
+    aliceToken
+  ))
+  const openedLong = unwrapToolPayload(try callMcpTool(
+    303,
+    "open_perp",
+    { ticker, side: "long", collateralPts: 10, leverage: 3 },
+    authConfig,
+    aliceToken
+  ))
+  const longPositionId = String(openedLong.positionId ?? "")
+  const previewReduce = unwrapToolPayload(try callMcpTool(
+    304,
+    "preview_perp",
+    { ticker, side: "short", collateralPts: 5, leverage: 3 },
+    authConfig,
+    aliceToken
+  ))
+  const previewFlip = unwrapToolPayload(try callMcpTool(
+    305,
+    "preview_perp",
+    { ticker, side: "short", collateralPts: 5, leverage: 3, mode: "flip" },
+    authConfig,
+    aliceToken
+  ))
+  const flipped = unwrapToolPayload(try callMcpTool(
+    306,
+    "open_perp",
+    { ticker, side: "short", collateralPts: 5, leverage: 3, mode: "flip" },
+    authConfig,
+    aliceToken
+  ))
+  const flipFeeCents = Math.round(Number(flipped.feePts) * 100)
+  const openFeeCents = Math.round(Number(openedLong.feePts) * 100)
+  const freshShortFeeCents = Math.round(Number(previewFreshShort.estimatedFeePts) * 100)
+  try check(() => {
+    assert.notStrictEqual(ticker, "")
+    assert.strictEqual(previewFreshShort.action, "open")
+    assert.strictEqual(openedLong.action, "open")
+    assert.strictEqual(openedLong.side, "long")
+    assert.strictEqual(openedLong.sizePts, 30)
+    assert.strictEqual(previewReduce.action, "reduce")
+    assert.strictEqual(previewFlip.action, "flip")
+    assert.strictEqual(flipped.action, "flip")
+    assert.strictEqual(flipped.side, "short")
+    assert.strictEqual(flipped.sizePts, 15)
+    assert.strictEqual(flipped.collateralPts, 5)
+    assert.strictEqual(flipped.leverage, 3)
+    assert.notStrictEqual(flipped.positionId, longPositionId)
+    assert.strictEqual(flipped.closedPositionId, longPositionId)
+    assert.strictEqual(flipped.feePts, previewFlip.estimatedFeePts)
+    assert.strictEqual(flipFeeCents, openFeeCents + freshShortFeeCents)
+  })
+}))
