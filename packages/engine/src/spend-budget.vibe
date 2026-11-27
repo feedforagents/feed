@@ -227,11 +227,20 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
   const actualMicros = Math.round(input.actualMicros)
   const store = try Store
   try store.transaction(effect (tx: Tx) => {
+    const rows = try tx.query(
+      `SELECT reserved_micros FROM feed_llm_spend_reservations
+       WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain') FOR UPDATE`,
+      [input.attemptId.trim()],
+    )
+    const row = rows[0]
+    if (row === undefined) return
+    const boundMicros = Math.max(0, toInt(row.reserved_micros))
+    const settledMicros = Math.min(actualMicros, boundMicros)
     try tx.query(
       `UPDATE feed_llm_spend_reservations
        SET status = 'settled', actual_micros = $2, updated_at = $3
        WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
-      [input.attemptId.trim(), actualMicros, resolvedNow],
+      [input.attemptId.trim(), settledMicros, resolvedNow],
     )
   })
 }
