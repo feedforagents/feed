@@ -477,10 +477,23 @@ export async function createPost(
     const matchesActiveMarket =
       (options?.ticker && cur.selectedMarketKind === "perp" && cur.selectedMarketId?.toUpperCase() === options.ticker.toUpperCase()) ||
       (options?.marketId && cur.selectedMarketKind === "prediction" && cur.selectedMarketId === options.marketId);
+    const bundle = cur.profileBundle;
+    const bundleIsAuthor =
+      bundle !== null && bundle.summary.handle.toLowerCase() === res.data.card.authorHandle.toLowerCase();
+    const bundleHasPost = bundleIsAuthor && bundle.posts.some((p) => p.card.id === res.data?.card.id);
     setStoreState({
       feedPosts: [res.data, ...cur.feedPosts.filter((p) => p.card.id !== res.data?.card.id)],
       ...(matchesActiveMarket
         ? { marketSocialPosts: [res.data, ...cur.marketSocialPosts.filter((p) => p.card.id !== res.data?.card.id)] }
+        : {}),
+      ...(bundleIsAuthor && !bundleHasPost
+        ? {
+            profileBundle: {
+              ...bundle,
+              posts: [res.data, ...bundle.posts],
+              postsCount: bundle.postsCount + 1,
+            },
+          }
         : {}),
     });
   } else {
