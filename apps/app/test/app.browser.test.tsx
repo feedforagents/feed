@@ -896,6 +896,39 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
   await expect.element(page.getByText("BUY YES").first()).toBeInTheDocument();
 });
 
+it('Public post links preserve URL parentheses but not surrounding prose (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const orchard = "http://127.0.0.1:8787/resources/Orchard_(garden)";
+  const club = "http://127.0.0.1:8787/resources/Club";
+  const posts = [
+    `Read the orchard page: ${orchard}`,
+    `A link in prose (see ${club}).`,
+    `The guide is available (see ${orchard}).`,
+  ].map((content, index) => ({
+    ...SAMPLE_POSTS[0],
+    id: `garden-resource-${index}`,
+    content,
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+  }));
+  await mountCustomMockApp({
+    handle(path) {
+      if (path === "/api/feed") return Promise.resolve(Response.json({ items: posts, nextCursor: null }));
+      if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+      return undefined;
+    },
+  });
+
+  await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+  const main = page.getByRole("main");
+  await expect.element(main.getByRole("link", { name: club, exact: true })).toHaveAttribute("href", club);
+  const orchardLinks = main.getByRole("link", { name: orchard, exact: true });
+  await expect.element(orchardLinks.first()).toHaveAttribute("href", orchard);
+  await expect.element(orchardLinks.last()).toHaveAttribute("href", orchard);
+  expect(orchardLinks.elements()).toHaveLength(2);
+});
+
 it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
   await mountAppAtHome();
 
