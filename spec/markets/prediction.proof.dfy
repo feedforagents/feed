@@ -160,23 +160,44 @@ lemma SellPreservesConstantProduct(m: PredictionMarket, traderId: string, side: 
   reveal canSell, sell, alwaysConstantProductPreserved;
 }
 
+lemma InvImpliesBalances(m: PredictionMarket)
+  requires inv(m)
+  ensures alwaysBalancesAndPositionsNonNegative(m)
+{
+  hide *;
+  reveal inv;
+}
+
+lemma SellAccountPreservesNonNeg(a: TraderAccount, side: Side, sellShares: int, netCredit: int)
+  requires a.balanceCents >= 0 && a.yesShares >= 0 && a.noShares >= 0 && a.yesCostCents >= 0 && a.noCostCents >= 0
+  requires netCredit >= 0
+  ensures var a' := sellAccountUpdate(a, side, sellShares, netCredit);
+    a'.id == a.id && a'.balanceCents >= 0 && a'.yesShares >= 0 && a'.noShares >= 0 && a'.yesCostCents >= 0 && a'.noCostCents >= 0
+{
+  hide *;
+  reveal sellAccountUpdate, heldSharesFor, heldCostFor, shared__money_clampMin0;
+  var held := heldSharesFor(a, side);
+  var prevCost := heldCostFor(a, side);
+  var remaining := shared__money_clampMin0(held - sellShares);
+  if held > 0 && remaining > 0 {
+    QuotientBounds(prevCost * remaining, held);
+  }
+}
+
 lemma SellPreservesBalances(m: PredictionMarket, traderId: string, side: Side, sellShares: int)
   requires inv(m) && canSell(m, traderId, side, sellShares)
   ensures alwaysBalancesAndPositionsNonNegative(sell(m, traderId, side, sellShares))
 {
   hide *;
-  reveal inv, canSell, sell, sellAccountUpdate, hasTrader, heldSharesFor, heldCostFor, shared__money_sellNetProceeds, shared__money_clampMin0;
+  reveal canSell, sell, shared__money_sellNetProceeds, shared__money_clampMin0;
+  InvImpliesBalances(m);
   var after := sell(m, traderId, side, sellShares);
   var settledCents := cpmmSellGrossUnits(m.yesReserve, m.noReserve, side, sellShares);
-  var fee := shared__money_canonicalTradingFee(settledCents);
   var netCredit := shared__money_sellNetProceeds(settledCents);
   CanonicalTradingFeeNonNeg(settledCents);
-  assert netCredit <= settledCents;
+  assert netCredit >= 0;
   BalancesFilterBridge(m);
   BalancesFilterBridge(after);
-  AccountsDistinctIds(m);
-  var idx :| 0 <= idx < |m.accounts| && m.accounts[idx].id == traderId;
-  AccountForAt(m, idx);
   forall i | 0 <= i < |after.accounts|
     ensures |ProofLib.Filter((b: TraderAccount) => (b.id == after.accounts[i].id), after.accounts)| == 1
     ensures after.accounts[i].balanceCents >= 0
@@ -186,16 +207,18 @@ lemma SellPreservesBalances(m: PredictionMarket, traderId: string, side: Side, s
     var a := m.accounts[i];
     var a' := after.accounts[i];
     assert a in m.accounts;
-    ProofLib.FilterLengthPointwise((b: TraderAccount) => (b.id == a'.id), (b: TraderAccount) => (b.id == a.id), after.accounts, m.accounts);
     if a.id == traderId {
-      assert i == idx;
-      var held := heldSharesFor(a, side);
-      var prevCost := heldCostFor(a, side);
-      var remaining := shared__money_clampMin0(held - sellShares);
-      if held > 0 && remaining > 0 {
-        QuotientBounds(prevCost * remaining, held);
+      SellAccountPreservesNonNeg(a, side, sellShares, netCredit);
+    }
+    forall j | 0 <= j < |m.accounts|
+      ensures after.accounts[j].id == m.accounts[j].id
+    {
+      if m.accounts[j].id == traderId {
+        assert m.accounts[j] in m.accounts;
+        SellAccountPreservesNonNeg(m.accounts[j], side, sellShares, netCredit);
       }
     }
+    ProofLib.FilterLengthPointwise((b: TraderAccount) => (b.id == a'.id), (b: TraderAccount) => (b.id == a.id), after.accounts, m.accounts);
   }
 }
 

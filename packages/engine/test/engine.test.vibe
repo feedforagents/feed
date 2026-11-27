@@ -770,7 +770,7 @@ it.effect('Clock mode honors DEPLOYMENT_ENV=production, game_running=false pause
   })
 }))
 
-it.effect('RSS headlines decode decimal and hexadecimal character references before prompt rendering (spec/engine/worldClock.md, "Story: Refresh RSS headlines into grounded NPC prompts")', () => effect {
+it.effect('RSS headlines decode decimal and hexadecimal character references before prompt rendering (spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', () => effect {
   const xml = `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item><title>OpenAGI &amp; MetAI &#8217; the &#x2014; deal</title></item></channel></rss>`
   const headlines = extractRssHeadlinesFromXml(xml, "https://example.test/feed.xml")
   assert.deepStrictEqual(headlines, [{ title: "OpenAGI & MetAI ’ the — deal", sourceUrl: "https://example.test/feed.xml" }])

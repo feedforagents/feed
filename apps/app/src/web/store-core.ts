@@ -722,6 +722,28 @@ export function toSpecGatedKind(action: PendingAction["kind"]) {
   }
 }
 
+const CLOSED_DIALOGS: Partial<StoreState> = {
+  joinSheetOpen: false,
+  followListKind: null,
+  composeOpen: false,
+  quotePostTarget: null,
+  reportTarget: null,
+  blockTarget: null,
+  muteTarget: null,
+  deletePostTargetId: null,
+};
+
+export function joinSheetOpenPatch(tab?: JoinTab): Partial<StoreState> {
+  return {
+    ...CLOSED_DIALOGS,
+    joinSheetOpen: true,
+    joinTab: tab ?? defaultJoinTab(currentState),
+    joinEmailStep: "entry",
+    joinPhoneStep: "entry",
+    joinError: null,
+  };
+}
+
 export function requireAuthOrQueue(action: PendingAction): boolean {
   if (currentState.viewer !== null) return true;
   pendingActionSeq += 1;
@@ -729,12 +751,8 @@ export function requireAuthOrQueue(action: PendingAction): boolean {
   sendOnboarding({ type: "triggerGatedAction", actionKind: specKind, targetId: pendingActionSeq });
   sendApp({ type: "triggerAppGatedAction", actionKind: specKind, targetId: pendingActionSeq });
   setStoreState({
+    ...joinSheetOpenPatch(),
     pendingAction: action,
-    joinSheetOpen: true,
-    joinTab: defaultJoinTab(currentState),
-    joinEmailStep: "entry",
-    joinPhoneStep: "entry",
-    joinError: null,
   });
   return false;
 }
@@ -793,17 +811,8 @@ export function buildHostActionNote(hostId: AgentHostId): string {
 }
 
 export function openComposeDialog(quotePost: AppPost | null = null): void {
-  if (!currentState.viewer) {
-    setStoreState({
-      joinSheetOpen: true,
-      joinTab: defaultJoinTab(currentState),
-      joinEmailStep: "entry",
-      joinPhoneStep: "entry",
-      joinError: null,
-    });
-    return;
-  }
-  setStoreState({ composeOpen: true, quotePostTarget: quotePost });
+  if (!ensureViewerForDialog()) return;
+  setStoreState({ ...CLOSED_DIALOGS, composeOpen: true, quotePostTarget: quotePost });
 }
 
 export function closeComposeDialog(): void {
@@ -811,17 +820,8 @@ export function closeComposeDialog(): void {
 }
 
 export function openReportDialog(target: GlobalReportTarget): void {
-  if (!currentState.viewer) {
-    setStoreState({
-      joinSheetOpen: true,
-      joinTab: defaultJoinTab(currentState),
-      joinEmailStep: "entry",
-      joinPhoneStep: "entry",
-      joinError: null,
-    });
-    return;
-  }
-  setStoreState({ reportTarget: target });
+  if (!ensureViewerForDialog()) return;
+  setStoreState({ ...CLOSED_DIALOGS, reportTarget: target });
 }
 
 export function closeReportDialog(): void {
@@ -830,19 +830,13 @@ export function closeReportDialog(): void {
 
 function ensureViewerForDialog(): boolean {
   if (currentState.viewer) return true;
-  setStoreState({
-    joinSheetOpen: true,
-    joinTab: defaultJoinTab(currentState),
-    joinEmailStep: "entry",
-    joinPhoneStep: "entry",
-    joinError: null,
-  });
+  setStoreState(joinSheetOpenPatch());
   return false;
 }
 
 export function openBlockDialog(handle: string, currentlyActive: boolean): void {
   if (!ensureViewerForDialog()) return;
-  setStoreState({ blockTarget: { handle, currentlyActive } });
+  setStoreState({ ...CLOSED_DIALOGS, blockTarget: { handle, currentlyActive } });
 }
 
 export function closeBlockDialog(): void {

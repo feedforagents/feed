@@ -1,3 +1,4 @@
+// spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { loadFollowList } from "../src/web/store-world.ts";
@@ -44,7 +45,7 @@ afterEach(() => {
 });
 
 describe("follow-list race", () => {
-  it("slow Following response must not overwrite a newer Followers dialog", async () => {
+  it('slow Following response must not overwrite a newer Followers dialog (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
     const pending = installDeferredFetch();
     const first = loadFollowList("alice", "following");
     const second = loadFollowList("alice", "followers");
@@ -58,7 +59,7 @@ describe("follow-list race", () => {
     expect(getStoreSnapshot().followListItems.map((entry) => entry.handle)).toEqual(["dave"]);
   });
 
-  it("slow Followers response must not overwrite a newer Following dialog", async () => {
+  it('slow Followers response must not overwrite a newer Following dialog (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
     const pending = installDeferredFetch();
     const first = loadFollowList("alice", "followers");
     const second = loadFollowList("alice", "following");

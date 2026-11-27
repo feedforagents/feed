@@ -6,6 +6,7 @@ import {
   clearPersistedPendingAction,
   defaultJoinTab,
   getStoreSnapshot,
+  joinSheetOpenPatch,
   navigateViaHook,
   notifyAuthChanged,
   persistExplainerDismissed,
@@ -230,13 +231,7 @@ export function openJoinSheet(tab?: JoinTab): void {
   const effectiveTab: JoinTab = resolvedTab === "email" && !s.emailAuthEnabled ? "phone" : resolvedTab;
   sendOnboarding({ type: "openJoinSheetDirectly" });
   sendApp({ type: "openJoinSheet" });
-  setStoreState({
-    joinSheetOpen: true,
-    joinTab: effectiveTab,
-    joinEmailStep: "entry",
-    joinPhoneStep: "entry",
-    joinError: null,
-  });
+  setStoreState(joinSheetOpenPatch(effectiveTab));
 }
 
 export function setJoinSheetOpen(open: boolean): void {

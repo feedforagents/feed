@@ -650,12 +650,17 @@ lemma ComputeMarkMonotonic(indexCents: int, l1: int, s1: int, l2: int, s2: int)
   requires boundedPremiumBps(l1, s1) <= boundedPremiumBps(l2, s2)
   ensures computeMarkPriceCents(indexCents, l1, s1) <= computeMarkPriceCents(indexCents, l2, s2)
 {
+  hide *;
+  reveal computeMarkPriceCents, shared__money_BPS_DENOMINATOR, shared__money_maxInt;
   var p1 := boundedPremiumBps(l1, s1);
   var p2 := boundedPremiumBps(l2, s2);
   BoundedPremiumBounds(l1, s1);
   BoundedPremiumBounds(l2, s2);
-  assert (indexCents * (shared__money_BPS_DENOMINATOR + p1)) * shared__money_BPS_DENOMINATOR <= (indexCents * (shared__money_BPS_DENOMINATOR + p2)) * shared__money_BPS_DENOMINATOR;
-  QuotientMonotonic(indexCents * (shared__money_BPS_DENOMINATOR + p1), shared__money_BPS_DENOMINATOR, indexCents * (shared__money_BPS_DENOMINATOR + p2), shared__money_BPS_DENOMINATOR);
+  var n1 := indexCents * (shared__money_BPS_DENOMINATOR + p1);
+  var n2 := indexCents * (shared__money_BPS_DENOMINATOR + p2);
+  assert n1 <= n2;
+  assert n1 * shared__money_BPS_DENOMINATOR <= n2 * shared__money_BPS_DENOMINATOR;
+  QuotientMonotonic(n1, shared__money_BPS_DENOMINATOR, n2, shared__money_BPS_DENOMINATOR);
 }
 
 lemma FloorCentsNonPos(numer: int, denom: int)
