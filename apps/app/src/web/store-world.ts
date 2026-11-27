@@ -76,6 +76,8 @@ const likeOwnEngagementLanded = new Set<string>();
 const likeInFlightKind = new Map<string, "like" | "unlike">();
 const repostInFlight = new Set<string>();
 const repostServerCountLanded = new Set<string>();
+const repostOwnEngagementLanded = new Set<string>();
+const repostInFlightKind = new Map<string, "repost" | "unrepost">();
 
 export function markLikeServerCountLanded(postId: string): void {
   if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
@@ -87,6 +89,10 @@ export function markLikeOwnEngagementLanded(postId: string, kind: string): void 
 
 export function markRepostServerCountLanded(postId: string): void {
   if (repostInFlight.has(postId)) repostServerCountLanded.add(postId);
+}
+
+export function markRepostOwnEngagementLanded(postId: string, kind: string): void {
+  if (repostInFlightKind.get(postId) === kind) repostOwnEngagementLanded.add(postId);
 }
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
@@ -754,7 +760,9 @@ export async function repostPost(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "repost", postId, label: currentlyReposted ? "remove repost" : "repost this post" })) return;
   if (repostInFlight.has(postId)) return;
   repostInFlight.add(postId);
+  repostInFlightKind.set(postId, currentlyReposted ? "unrepost" : "repost");
   repostServerCountLanded.delete(postId);
+  repostOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.repostCount ?? 0;
   const optimisticReposted = !currentlyReposted;
   const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
@@ -781,14 +789,17 @@ export async function repostPost(postId: string): Promise<void> {
     const rec = isRecord(res.data) ? res.data : {};
     const serverReposted = typeof rec.reposted === "boolean" ? rec.reposted : optimisticReposted;
     const serverCount = typeof rec.repostCount === "number" ? rec.repostCount : optimisticCount;
+    const ownEngagementLanded = repostOwnEngagementLanded.has(postId);
     patchPostCardAcrossStore(postId, (card) => ({
       ...card,
       reposted: serverReposted,
-      repostCount: Math.max(0, card.repostCount + (serverCount - optimisticCount)),
+      ...(ownEngagementLanded ? {} : { repostCount: Math.max(0, serverCount) }),
     }));
   } finally {
     repostInFlight.delete(postId);
+    repostInFlightKind.delete(postId);
     repostServerCountLanded.delete(postId);
+    repostOwnEngagementLanded.delete(postId);
   }
 }
 

@@ -129,6 +129,7 @@ import {
   markAllNotificationsRead,
   markLikeOwnEngagementLanded,
   markLikeServerCountLanded,
+  markRepostOwnEngagementLanded,
   markRepostServerCountLanded,
   markChatRead,
   markNotificationRead,
@@ -500,6 +501,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
       const engagementKind = optStr(data.kind);
       if (engagementKind && optStr(data.accountId) === s.viewer?.accountId) {
         markLikeOwnEngagementLanded(postId, engagementKind);
+        markRepostOwnEngagementLanded(postId, engagementKind);
       }
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
