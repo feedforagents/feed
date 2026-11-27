@@ -9,6 +9,14 @@ import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
 
+function fallbackReadOrNotFound(url: URL, method: string, readPosts: string[]): Promise<Response> {
+  if (url.pathname.endsWith("/read") && method === "POST") {
+    readPosts.push(url.pathname);
+    return Promise.resolve(Response.json({ unreadCount: 0 }));
+  }
+  return Promise.resolve(Response.json({}, { status: 404 }));
+}
+
 function seedChat(unreadCount: number): AppChatSummary {
   return {
     id: "chat-1",
@@ -94,11 +102,7 @@ it("clears the previous room's messages on switch and drops its late response wi
           resolve(Response.json({ messages: [{ ...bobMessage, id: "m2", content: "from B" }] }));
       });
     }
-    if (url.pathname.endsWith("/read") && method === "POST") {
-      readPosts.push(url.pathname);
-      return Promise.resolve(Response.json({ unreadCount: 0 }));
-    }
-    return Promise.resolve(Response.json({}, { status: 404 }));
+    return fallbackReadOrNotFound(url, method, readPosts);
   }, "http://localhost");
   setStoreState({
     chats: [seedChat(1), { ...seedChat(1), id: "chat-2", title: "Carol", peerHandle: "carol" }],
@@ -301,11 +305,7 @@ it("keeps the room the user switched to when a send in the previous room finishe
         gates.roomB = () => resolve(reply());
       });
     }
-    if (url.pathname.endsWith("/read") && method === "POST") {
-      readPosts.push(url.pathname);
-      return Promise.resolve(Response.json({ unreadCount: 0 }));
-    }
-    return Promise.resolve(Response.json({}, { status: 404 }));
+    return fallbackReadOrNotFound(url, method, readPosts);
   }, "http://localhost");
   setStoreState({ route: "Chats", chats: [seedChat(0)], selectedChatId: "chat-1", chatMessages: [] });
   const view = () => ({

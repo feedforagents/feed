@@ -11,23 +11,17 @@ import {
   type FeedRealtimeEvent,
 } from "../src/index.vibe"
 
-effect function queryStore(sql: string, params: ReadonlyArray<unknown> = []) {
+effect function seedTestAccounts(accounts: ReadonlyArray<readonly [string, string]>) {
   const store = try Store
-  return try store.transaction((tx) => tx.query(sql, params))
-}
-
-effect function seedAccount(
-  accountId: string,
-  handle: string,
-  displayName: string,
-  balanceCents = 10_000,
-  uiMode: "game" | "social" = "game"
-) {
   const now = try Clock.currentTimeMillis
-  try queryStore(
-    "INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
-    [accountId, handle, displayName, `${displayName} bio`, uiMode, balanceCents, now]
-  )
+  try store.transaction(effect (tx) => {
+    for (const [handle, displayName] of accounts) {
+      try tx.query(
+        "INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at) VALUES ($1, $1, $2, '', 'game', 10000, $3, $3)",
+        [handle, displayName, now]
+      )
+    }
+  })
 }
 
 it.effect(
@@ -40,9 +34,11 @@ it.effect(
     ) {
       try migrateFeedSchema()
       try seedFeedWorld()
-      try seedAccount("alice", "alice", "Alice Player")
-      try seedAccount("bob", "bob", "Bob Trader")
-      try seedAccount("carol", "carol", "Carol Analyst")
+      try seedTestAccounts([
+        ["alice", "Alice Player"],
+        ["bob", "Bob Trader"],
+        ["carol", "Carol Analyst"],
+      ])
 
       const root = try createPost({
         authorId: "alice",

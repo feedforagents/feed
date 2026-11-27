@@ -135,45 +135,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const expectedReplyCounts = (count: number) => ({
+  home: count,
+  other: 5,
+  explore: count,
+  market: count,
+  profile: count,
+  thread: count,
+});
+
 it("sets the parent card reply count from a personalized post.created event (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", () => {
-  expect(parentReplyCounts()).toEqual({
-    home: 1,
-    other: 5,
-    explore: 1,
-    market: 1,
-    profile: 1,
-    thread: 1,
-  });
+  expect(parentReplyCounts()).toEqual(expectedReplyCounts(1));
   dispatchCreated({ parentReplyCount: 2 });
-  expect(parentReplyCounts()).toEqual({
-    home: 2,
-    other: 5,
-    explore: 2,
-    market: 2,
-    profile: 2,
-    thread: 2,
-  });
+  expect(parentReplyCounts()).toEqual(expectedReplyCounts(2));
   dispatchCreated({ parentReplyCount: 2 });
-  expect(parentReplyCounts()).toEqual({
-    home: 2,
-    other: 5,
-    explore: 2,
-    market: 2,
-    profile: 2,
-    thread: 2,
-  });
+  expect(parentReplyCounts()).toEqual(expectedReplyCounts(2));
 });
 
 it("does not bump the parent count when post.created has no personalized parentReplyCount (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", () => {
   dispatchCreated({});
-  expect(parentReplyCounts()).toEqual({
-    home: 1,
-    other: 5,
-    explore: 1,
-    market: 1,
-    profile: 1,
-    thread: 1,
-  });
+  expect(parentReplyCounts()).toEqual(expectedReplyCounts(1));
 });
 
 it("does not change a parent count for a top-level post.created event (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", () => {

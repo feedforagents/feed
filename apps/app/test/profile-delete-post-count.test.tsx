@@ -2,61 +2,14 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { deletePost, loadProfile, loadProfileReplies, removePostAcrossStore } from "../src/web/store-world.ts";
-import { makeViewerSession } from "./app-test-helpers.tsx";
+import { makeRawPost, makeRawProfileBundle, makeViewerSession } from "./app-test-helpers.tsx";
 
 const createdAt = Date.now() - 60_000;
-
-function rawPost(overrides: Record<string, unknown>): Record<string, unknown> {
-  return {
-    id: "post-x",
-    authorId: "alice",
-    authorKind: "user",
-    authorHandle: "alice",
-    authorDisplayName: "Alice Player",
-    content: "Alice market note",
-    replyToPostId: null,
-    quotePostId: null,
-    quotePost: null,
-    repostedByHandle: null,
-    repostedByName: null,
-    likeCount: 0,
-    repostCount: 0,
-    replyCount: 0,
-    likedByViewer: false,
-    repostedByViewer: false,
-    createdAt,
-    ...overrides,
-  };
-}
-
-const firstRaw = rawPost({ id: "alice-post-1", content: "Alice first call" });
-const secondRaw = rawPost({ id: "alice-post-2", content: "Alice second call" });
+const firstRaw = makeRawPost(createdAt, { id: "alice-post-1", content: "Alice first call" });
+const secondRaw = makeRawPost(createdAt, { id: "alice-post-2", content: "Alice second call" });
 
 function profileRaw(postsCount: number, posts: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> {
-  return {
-    profile: {
-      id: "alice",
-      kind: "user",
-      handle: "alice",
-      displayName: "Alice Player",
-      bio: "",
-      avatarUrl: null,
-      bannerUrl: null,
-      createdAt,
-      followersCount: 0,
-      followingCount: 0,
-      postsCount,
-      viewerFollows: false,
-      viewerFollowedBy: false,
-      viewerBlocks: false,
-      viewerBlockedBy: false,
-      viewerMutes: false,
-      isParody: false,
-    },
-    posts,
-    nextCursor: null,
-    positions: { predictionPositions: [], perpPositions: [] },
-  };
+  return makeRawProfileBundle({ handle: "alice", displayName: "Alice Player", createdAt, postsCount, posts });
 }
 
 const aliceViewer = makeViewerSession();
@@ -113,7 +66,7 @@ it('Deleting an own post from the profile drops the header post count with the l
 });
 
 it('Removing another author\'s reposted post from the profile list leaves the header post count unchanged (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
-  const carolRaw = rawPost({
+  const carolRaw = makeRawPost(createdAt, {
     id: "carol-post-1",
     authorId: "carol",
     authorHandle: "carol",
@@ -142,7 +95,7 @@ it('Removing another author\'s reposted post from the profile list leaves the he
 });
 
 it('Deleting an own reply from the profile replies tab drops the header post count with the reply list (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
-  const replyRaw = rawPost({
+  const replyRaw = makeRawPost(createdAt, {
     id: "alice-reply-1",
     content: "Alice reply note",
     replyToPostId: "carol-post-9",
