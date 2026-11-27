@@ -48,19 +48,19 @@ const bobMessage = {
 
 let readPosts: Array<string> = [];
 let roomMessages: Array<Record<string, unknown>> = [bobMessage];
+let readResponse: () => Response = () => Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 });
 
 beforeEach(() => {
   readPosts = [];
   roomMessages = [bobMessage];
+  readResponse = () => Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 });
   stubFetchByUrl((url, init) => {
     if (url.pathname === "/api/chats/chat-1/messages" && (init?.method ?? "GET") === "GET") {
       return Promise.resolve(Response.json({ messages: roomMessages }));
     }
     if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
       readPosts.push(url.pathname);
-      return Promise.resolve(
-        Response.json({ chatId: "chat-1", accountId: "alice", lastReadAt: 2, unreadCount: 0 }),
-      );
+      return Promise.resolve(readResponse());
     }
     return Promise.resolve(Response.json({}, { status: 404 }));
   }, "http://localhost");
@@ -407,16 +407,7 @@ it("clears the open room's chat-message notifications and badge when the room is
 });
 
 it("keeps chat-message notifications unread when the room read request fails (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\"; spec/social/moderation.md, \"Story: In-app notifications and Social-mode presentation filtering\")", async () => {
-  stubFetchByUrl((url, init) => {
-    if (url.pathname === "/api/chats/chat-1/messages" && (init?.method ?? "GET") === "GET") {
-      return Promise.resolve(Response.json({ messages: roomMessages }));
-    }
-    if (url.pathname === "/api/chats/chat-1/read" && init?.method === "POST") {
-      readPosts.push(url.pathname);
-      return Promise.resolve(Response.json({ message: "boom" }, { status: 500 }));
-    }
-    return Promise.resolve(Response.json({}, { status: 404 }));
-  }, "http://localhost");
+  readResponse = () => Response.json({ message: "boom" }, { status: 500 });
   setStoreState({ chats: [seedChat(1)] });
   seedChatNotifications();
   await loadChatMessages("chat-1");
