@@ -427,6 +427,37 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
     const perpMarkets = try listPerpMarkets()
     const hundMarket = perpMarkets.find((m) => m.ticker === "HUND")
 
+    // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
+    const heldLong = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "long",
+      collateralCents: 1_000,
+      leverage: 10
+    })
+    try TestClock.adjust(Duration.seconds(3_600))
+    const quietSpotBuy = try executeNpcSpotTrade({
+      actorId: "ailon-musk",
+      ticker: "HUND",
+      side: "buy",
+      quoteCents: 200
+    })
+    try TestClock.adjust(Duration.seconds(3_600))
+    const balancingShort = try openPerpPosition({
+      ownerId: "user-bob",
+      ownerKind: "user",
+      ticker: "HUND",
+      side: "short",
+      collateralCents: 1_000,
+      leverage: 10
+    })
+    try TestClock.adjust(Duration.seconds(23 * 3_600 + 1_800))
+    const hundAfterPremiumClosed = (try listPerpMarkets()).find((m) => m.ticker === "HUND")
+    const hundDetailAfterPremiumClosed = try getPerpMarket("HUND")
+    try TestClock.adjust(Duration.seconds(3_600))
+    const hundFlatForADay = try getPerpMarket("HUND")
+
     try check(() => assert.deepStrictEqual(
       {
         nonNpcCode,
@@ -453,7 +484,16 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
           shortClose.realizedPnlCents === bobEconAfter.balanceCents - INITIAL_GRANT_CENTS
         ],
         historyRecorded: perpHistory.length >= 6,
-        hundVolumeRecorded: (hundMarket?.volumeCents ?? 0) === 40_000
+        hundVolumeRecorded: (hundMarket?.volumeCents ?? 0) === 40_000,
+        markDayAgoAndNow: [
+          heldLong.position.markPriceCents,
+          quietSpotBuy.indexPriceCents,
+          quietSpotBuy.markPriceCents,
+          balancingShort.position.markPriceCents,
+          hundAfterPremiumClosed?.markPriceCents
+        ],
+        change24hAfterPremiumClosed: [hundAfterPremiumClosed?.change24hPct, hundDetailAfterPremiumClosed.change24hPct],
+        change24hOnceFlatForADay: [hundFlatForADay.markPriceCents, hundFlatForADay.change24hPct]
       },
       {
         nonNpcCode: "FORBIDDEN_NON_NPC",
@@ -464,7 +504,10 @@ it.effect('Spot BASE_SCALE=100, NPC inventory enforcement, and anti-exploit perp
         longFillsPostImpactAndLosesOnRoundTrip: [true, true, true, true],
         shortFillsPostImpactAndLosesOnRoundTrip: [true, true, true, true],
         historyRecorded: true,
-        hundVolumeRecorded: true
+        hundVolumeRecorded: true,
+        markDayAgoAndNow: [10_505, 10_006, 10_506, 10_006, 10_006],
+        change24hAfterPremiumClosed: [-4.76, -4.76],
+        change24hOnceFlatForADay: [10_006, 0]
       }
     ))
   })
