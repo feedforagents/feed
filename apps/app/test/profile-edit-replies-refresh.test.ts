@@ -12,17 +12,16 @@ function ownPost(id: string, displayName: string, replyToPostId: string | null):
       id,
       authorDisplayName: displayName,
       authorHandle: "alice",
-      authorAvatarUrl: null,
+      isNpcParody: false,
+      createdAt: "1970-01-01T00:00:00.001Z",
       content: "hello",
-      createdAtMs: 1,
       likeCount: 0,
       replyCount: 0,
       repostCount: 0,
-      viewCount: 0,
       liked: false,
       reposted: false,
       isFollowingAuthor: false,
-    } as AppPost["card"],
+    },
     authorId: "alice",
     authorKind: "user",
     replyToPostId,
@@ -50,7 +49,6 @@ function ownBundle(displayName: string): AppProfileBundle {
     summary: {
       displayName,
       handle: "alice",
-      avatarUrl: null,
       followersCount: 0,
       followingCount: 0,
       isFollowing: false,
@@ -58,7 +56,7 @@ function ownBundle(displayName: string): AppProfileBundle {
       isBlocked: false,
       isOwnProfile: true,
     },
-  } as AppProfileBundle;
+  };
 }
 
 function postPayload(id: string, displayName: string, replyToPostId: string | null) {
