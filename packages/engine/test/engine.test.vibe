@@ -815,9 +815,11 @@ it.effect('An exhausted LLM budget defers clues without failing the markets tick
   })
 }))
 
-it.effect('RSS refresh runs once five minute indices have passed, however many seconds into the minute each run starts (spec/engine/worldClock.md, "RSS ingestion and parody generation have one scheduled owner at 5-minute cadence")', () => scoped(effect {
+it.effect('RSS refresh ingests unseen headlines when five minute indices have passed (spec/engine/worldClock.md, "RSS ingestion and parody generation have one scheduled owner at 5-minute cadence")', () => scoped(effect {
   const firstMs = Date.UTC(2026, 10, 27, 10, 0, 30)
-  const xml = `<?xml version="1.0"?><rss version="2.0"><channel><item><title>Cadence headline</title></item></channel></rss>`
+  const headlines = Array.from({ length: 7 }, (_, i) => `Cadence headline ${i + 1}`)
+  const items = headlines.map((title) => `<item><title>${title}</title></item>`).join("")
+  const xml = `<?xml version="1.0"?><rss version="2.0"><channel>${items}</channel></rss>`
   try withSeededEngine(firstMs, effect {
     try withStubProvider(200, xml, effect (baseUrl: string) => {
       const runAt = (nowMs: number) => withEnvOverrides({ FEED_RSS_URLS: `${baseUrl}/rss.xml` }, runRssRefreshTick(nowMs))
@@ -825,11 +827,17 @@ it.effect('RSS refresh runs once five minute indices have passed, however many s
       const fourMinutesLater = try runAt(Date.UTC(2026, 10, 27, 10, 4, 59))
       const fiveMinutesLater = try runAt(Date.UTC(2026, 10, 27, 10, 5, 0))
       const health = (try queryRows("SELECT last_success_at FROM feed_tick_health WHERE job_name = 'rss-refresh'"))[0] ?? {}
+      const stored = try queryRows("SELECT title FROM feed_rss_headlines WHERE title = ANY($1::text[]) ORDER BY title", [headlines])
       try check(() => {
         assert.deepStrictEqual(
-          [first, fourMinutesLater, fiveMinutesLater].map((r) => [r.skipped, r.fetchedCount]),
-          [[false, 1], [true, 0], [false, 1]],
+          [first, fourMinutesLater, fiveMinutesLater],
+          [
+            { skipped: false, fetchedCount: 7, insertedCount: 6 },
+            { skipped: true, fetchedCount: 0, insertedCount: 0 },
+            { skipped: false, fetchedCount: 7, insertedCount: 1 },
+          ],
         )
+        assert.deepStrictEqual(stored.map((row) => toText(row.title)), headlines)
         assert.strictEqual(toInt(health.last_success_at), Date.UTC(2026, 10, 27, 10, 5, 0))
       })
     })
