@@ -1050,12 +1050,16 @@ export async function adminResolveReport(reportId: string, status: "reviewed" | 
   if (res.ok) await loadAdminReports("open");
 }
 
+let adminUsersRequestSeq = 0;
+
 export async function loadAdminUsers(query = ""): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminUsersRequestSeq;
   setStoreState({ adminTabLoading: true });
   const q = query.trim();
   const url = q ? `/api/admin/users?q=${encodeURIComponent(q)}&limit=50` : "/api/admin/users?limit=50";
   const res = await requestJson(url, { parse: decodeAdminUsers });
+  if (reqSeq !== adminUsersRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminTabLoading: false });
     setErrorNotice(res.message);
