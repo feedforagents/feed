@@ -1468,20 +1468,22 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
 
 let chatMessagesLoadCount = 0;
 
-export async function loadChatMessages(chatId: string): Promise<void> {
+export async function loadChatMessages(chatId: string): Promise<boolean> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
-  if (!viewerId) return;
+  if (!viewerId) return false;
   const loadId = ++chatMessagesLoadCount;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
     parse: (raw) => decodeChatMessages(raw, viewerId),
   });
-  if (loadId !== chatMessagesLoadCount) return;
-  if (res.ok && getStoreSnapshot().selectedChatId === chatId) {
+  if (loadId !== chatMessagesLoadCount) return true;
+  if (!res.ok) return false;
+  if (getStoreSnapshot().selectedChatId === chatId) {
     setStoreState({ chatMessages: res.data });
     if (res.data.length > 0) {
       await markChatRead(chatId);
     }
   }
+  return true;
 }
 
 export async function selectChat(chatId: string): Promise<void> {
@@ -1669,7 +1671,10 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
     return false;
   }
   const stillOpen = getStoreSnapshot().selectedChatId === chatId;
-  await Promise.all([stillOpen ? loadChatMessages(chatId) : undefined, loadChats(false)]);
+  const [reloaded] = await Promise.all([stillOpen ? loadChatMessages(chatId) : true, loadChats(false)]);
+  if (!reloaded) {
+    setErrorNotice("Message sent, but the thread failed to refresh.");
+  }
   return true;
 }
 
