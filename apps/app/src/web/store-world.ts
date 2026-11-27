@@ -83,7 +83,7 @@ export function markRepostServerCountLanded(postId: string): void {
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
-let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null } | null = null;
+let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null; viewerId: string | null } | null = null;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
@@ -340,7 +340,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     setStoreState({
       feedTab: feedLoadedTab,
       feedLoading: false,
-      ...(snapshot && snapshot.tab === feedLoadedTab
+      ...(snapshot && snapshot.tab === feedLoadedTab && snapshot.viewerId === (latest.viewer?.accountId ?? null)
         ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor }
         : {}),
     });
@@ -352,7 +352,9 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     feedTabSwitchSnapshot = null;
     setStoreState({
       feedLoading: false,
-      ...(snapshot && snapshot.tab === tab ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor } : {}),
+      ...(snapshot && snapshot.tab === tab && snapshot.viewerId === (latest.viewer?.accountId ?? null)
+        ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor }
+        : {}),
     });
   }
   setErrorNotice(res.message);
@@ -428,7 +430,7 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   sendApp({ type: "selectTab", tab: specTab });
   if (tab !== s.feedTab) {
     if (s.feedTab === feedLoadedTab) {
-      feedTabSwitchSnapshot = { tab: s.feedTab, posts: s.feedPosts, cursor: s.feedNextCursor };
+      feedTabSwitchSnapshot = { tab: s.feedTab, posts: s.feedPosts, cursor: s.feedNextCursor, viewerId: s.viewer?.accountId ?? null };
     }
     setStoreState({ feedTab: tab, feedPosts: [], feedNextCursor: null, feedLoadingMore: false, pendingNewPostCount: 0 });
   } else {

@@ -1,7 +1,8 @@
 // spec/app/navigation.md, "Story: Browse public world content without a login wall"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { loadMoreFeed, selectFeedTab } from "../src/web/store-world.ts";
+import { loadFeed, loadMoreFeed, selectFeedTab } from "../src/web/store-world.ts";
+import { makeViewerSession } from "./app-test-helpers.tsx";
 import { decodePosts } from "../src/web/types.ts";
 import { feedErrorResponse as errorResponse, feedPost as post, installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
 
@@ -80,5 +81,25 @@ describe("home feed tab switch and Load more", () => {
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
     expect(s.feedNextCursor).toBe("1764201600000:latest-1");
     expect(s.feedLoadingMore).toBe(false);
+  });
+
+  it('signing out before a failed reload does not restore the signed-in tab page (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+    const pending = installDeferredFetch();
+    setStoreState({ viewer: makeViewerSession() });
+    seedLatestPage();
+    const loaded = selectFeedTab("latest");
+    pending.get("GET /api/feed?tab=latest")?.resolve(jsonResponse({ items: [post("latest-1")], nextCursor: "1764201600000:latest-1" }));
+    await loaded;
+    const toTop = selectFeedTab("top");
+    setStoreState({ viewer: null, feedTab: "latest" });
+    const reloading = loadFeed("latest");
+    pending.get("GET /api/feed?tab=latest&mode=game")?.resolve(errorResponse());
+    await reloading;
+    pending.get("GET /api/feed?tab=top")?.resolve(errorResponse());
+    await toTop;
+    const s = getStoreSnapshot();
+    expect(s.feedPosts.map((p) => p.card.id)).toEqual([]);
+    expect(s.feedNextCursor).toBeNull();
+    expect(s.feedLoading).toBe(false);
   });
 });
