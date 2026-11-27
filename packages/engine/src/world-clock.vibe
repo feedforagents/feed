@@ -1063,7 +1063,7 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
         const rows = try tx.query("SELECT last_success_at FROM feed_tick_health WHERE job_name = 'rss-refresh'")
         return rows.length > 0 ? safeNonNegInt(rows[0]?.last_success_at, 0) : 0
       })
-      if (lastRunAt > 0 && resolvedNow - lastRunAt < cadenceMs) {
+      if (lastRunAt > 0 && minuteIndexOf(resolvedNow) - minuteIndexOf(lastRunAt) < routeCadenceMinutes("RouteRssRefresh")) {
         return { skipped: true, fetchedCount: 0, insertedCount: 0 }
       }
       const envUrls = readEnv("FEED_RSS_URLS")?.trim()
