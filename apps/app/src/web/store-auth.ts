@@ -130,7 +130,7 @@ export async function hydrateAuth(): Promise<void> {
   if (authenticated && viewer) {
     const switchedAccount = prevViewerId !== null && prevViewerId !== viewer.accountId;
     if (switchedAccount) {
-      clearAccountState();
+      clearAccountStateKeepingRoute();
     }
     sendNav({ type: "signInNav", asAdmin: viewer.isAdmin });
     sendOnboarding({ type: "verifySmsCode", codeValid: true, isNewAccount: false });
@@ -171,7 +171,7 @@ export async function hydrateAuth(): Promise<void> {
     return;
   }
   if (prevViewerId !== null) {
-    clearAccountState();
+    clearAccountStateKeepingRoute();
   }
   const snap = getStoreSnapshot();
   const currentRoute = snap.route;
@@ -194,7 +194,7 @@ export async function hydrateAuth(): Promise<void> {
   });
   if (prevViewerId !== null) {
     notifyAuthChanged();
-    await loadFeed("latest");
+    await refreshViewerSurfaces();
   }
 }
 
@@ -857,6 +857,12 @@ async function performSignOut({
   setStatusNotice(statusMessage);
   notifyAuthChanged();
   await loadFeed("latest");
+}
+
+function clearAccountStateKeepingRoute(): void {
+  const { activePostId, profileHandle } = getStoreSnapshot();
+  clearAccountState();
+  setStoreState({ activePostId, profileHandle });
 }
 
 function clearAccountState(): void {

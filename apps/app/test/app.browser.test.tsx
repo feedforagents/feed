@@ -1419,11 +1419,13 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   network.setFeedFails(false);
   await act(() => storeActions.selectFeedTab("following"));
   await act(() => storeActions.loadPnlHistory("1W"));
+  await act(() => storeActions.navigate("/u/alice"));
   const feedLoadsBeforeExpiry = fetchPaths.filter((path) => path === "/api/feed").length;
   network.expireSession();
   await act(() => hydrateAuth());
   const expired = getStoreSnapshot();
   expect({ viewer: expired.viewer, feedTab: expired.feedTab, pnlTimeRange: expired.pnlTimeRange, pnlHistory: expired.pnlHistory }).toEqual({ viewer: null, feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [] });
+  expect({ route: expired.route, profileHandle: expired.profileBundle?.summary.handle }).toEqual({ route: "Profile", profileHandle: "alice" });
   expect(fetchPaths.filter((path) => path === "/api/feed").length).toBe(feedLoadsBeforeExpiry + 1);
 
   await act(() => userEvent.click(page.getByRole("button", { name: "Sign in" }).first()));
@@ -1439,9 +1441,11 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   await act(() => hydrateAuth());
   expect(accountState()).toEqual(accountA);
 
+  await act(() => storeActions.navigate("/post/browser-post-1"));
   network.switchAccount();
   await act(() => hydrateAuth());
   expect(accountState()).toEqual({ accountId: "acct-email-1", feedTab: "latest", pnlTimeRange: "ALL", pnlHistory: [], followingPostShown: false });
+  expect({ route: getStoreSnapshot().route, threadPostId: getStoreSnapshot().activeThread?.post.card.id }).toEqual({ route: "PostDetail", threadPostId: "browser-post-1" });
 });
 
 it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
