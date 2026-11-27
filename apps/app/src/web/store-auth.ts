@@ -1010,10 +1010,14 @@ export async function approveDeviceCode(userCode: string, scopes: ReadonlyArray<
   await hydrateAuth();
 }
 
+let adminStatusRequestSeq = 0;
+
 export async function loadAdminStatus(): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminStatusRequestSeq;
   setStoreState({ adminLoading: true });
   const res = await requestJson("/api/admin/status", { parse: decodeAdminStatus });
+  if (reqSeq !== adminStatusRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminLoading: false });
     setErrorNotice(res.message);
