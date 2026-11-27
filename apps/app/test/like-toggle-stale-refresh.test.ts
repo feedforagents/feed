@@ -168,3 +168,21 @@ it("restores the pre-click count when the like fails with no live engagement in 
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(5);
   expect(getStoreSnapshot().errorMessage).toBe("Like failed");
 });
+
+it("rolls back only the optimistic like in each copy when a feed refresh lands and the like then fails (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const fresher = decodedPost(postRaw({ id: "post-1", likeCount: 8, likedByViewer: false }));
+  setStoreState({ activeThread: { post: fresher, parentPost: null, ancestors: [], replies: [] }, profileLikes: [fresher] });
+  const likeCopies = () => {
+    const s = getStoreSnapshot();
+    return [s.feedPosts[0], s.activeThread?.post, s.profileLikes[0]].map((p) => `${String(p?.card.liked)}:${String(p?.card.likeCount)}`);
+  };
+  gateLike = true;
+  const toggle = toggleLike("post-1");
+  expect(likeCopies()).toEqual(["true:6", "true:9", "true:9"]);
+  const refresh = loadFeed();
+  releaseFeed?.(jsonPayload({ items: [postRaw({ id: "post-1", likeCount: 8, likedByViewer: false })], nextCursor: null }));
+  await refresh;
+  releaseLike?.(jsonPayload({ message: "Like failed" }, 500));
+  await toggle;
+  expect(likeCopies()).toEqual(["false:8", "false:8", "false:8"]);
+});
