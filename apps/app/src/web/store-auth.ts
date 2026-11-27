@@ -55,6 +55,7 @@ import {
   decodeDeviceLookup,
   decodeOAuthConsent,
   decodeSkillHosts,
+  decodeViewer,
   isRecord,
   optStr,
   str,
@@ -369,10 +370,21 @@ export async function verifyEmailMagicLink(token: string | null): Promise<void> 
   const redirectTo = optStr(rec.redirectTo);
 
   if (status === "email_linked") {
+    const linked = decodeViewer(isRecord(res.data) ? res.data.account : null);
+    const viewer = getStoreSnapshot().viewer;
     setStoreState({
       emailVerifyStatus: "linked",
       emailVerifyError: null,
       devEmailMagicLinkUrl: null,
+      ...(linked && viewer && linked.accountId === viewer.accountId
+        ? {
+            viewer: {
+              ...viewer,
+              emailMasked: linked.emailMasked ?? viewer.emailMasked,
+              emailVerifiedAt: linked.emailVerifiedAt ?? viewer.emailVerifiedAt,
+            },
+          }
+        : {}),
     });
     await hydrateAuth();
     setStatusNotice("Email address linked.");
