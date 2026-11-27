@@ -135,3 +135,39 @@ it("keeps a live engagement count that landed while the like request was in flig
   expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(7);
 });
+
+function errorResponse(message: string): Response {
+  return new Response(JSON.stringify({ message }), {
+    status: 500,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+it("keeps a live engagement count that landed while the like request was in flight when the like then fails (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  gateLike = true;
+  reconnectRealtime();
+  const toggle = toggleLike("post-1");
+  StubEventSource.latest?.dispatchEvent(
+    new MessageEvent("post.engagement", {
+      data: JSON.stringify({ type: "post.engagement", postId: "post-1", kind: "like", likeCount: 7, repostCount: 0 }),
+    }),
+  );
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(7);
+  releaseLike?.(errorResponse("Like failed"));
+  await toggle;
+  expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(false);
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(7);
+  expect(getStoreSnapshot().errorMessage).toBe("Like failed");
+});
+
+it("restores the pre-click count when the like fails with no live engagement in between (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  gateLike = true;
+  const toggle = toggleLike("post-1");
+  expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(6);
+  releaseLike?.(errorResponse("Like failed"));
+  await toggle;
+  expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(false);
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(5);
+  expect(getStoreSnapshot().errorMessage).toBe("Like failed");
+});

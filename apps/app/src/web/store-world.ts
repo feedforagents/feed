@@ -69,7 +69,12 @@ import {
 } from "./types.ts";
 
 const likeInFlight = new Set<string>();
+const likeServerCountLanded = new Set<string>();
 const repostInFlight = new Set<string>();
+
+export function markLikeServerCountLanded(postId: string): void {
+  if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
+}
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let exploreRequestSeq = 0;
@@ -144,6 +149,7 @@ function preserveEngagementSince(
     if (!start || !current) return post;
     const now = engagementOf(current.card);
     if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
+      if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
       return post;
     }
     return { ...post, card: { ...post.card, ...now } };
@@ -540,6 +546,7 @@ export async function toggleLike(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
   if (likeInFlight.has(postId)) return;
   likeInFlight.add(postId);
+  likeServerCountLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
   const optimisticLiked = !currentlyLiked;
   const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
@@ -554,10 +561,11 @@ export async function toggleLike(postId: string): Promise<void> {
       parse: passThrough,
     });
     if (!res.ok) {
+      const serverCountLanded = likeServerCountLanded.has(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         liked: currentlyLiked,
-        likeCount: prevCount,
+        ...(serverCountLanded ? {} : { likeCount: prevCount }),
       }));
       setErrorNotice(res.message);
       return;
@@ -572,6 +580,7 @@ export async function toggleLike(postId: string): Promise<void> {
     }));
   } finally {
     likeInFlight.delete(postId);
+    likeServerCountLanded.delete(postId);
   }
 }
 
