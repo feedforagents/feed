@@ -1,0 +1,75 @@
+// spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+import { assert, it } from "@effect/vitest"
+import { Store, migrateFeedSchema, seedFeedWorld } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { TestClock } from "effect/testing"
+import {
+  createPost,
+  muteAccount,
+  personalizePostDeletedEvent,
+  realtimeBusLayer,
+  type FeedRealtimeEvent,
+} from "../src/index.vibe"
+
+it.effect(
+  'personalizePostDeletedEvent attaches a viewer-visible parentReplyCount to post.created replies (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => effect {
+    try TestClock.setTime(1_760_000_700_000)
+    provide Layer.merge(
+      Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })),
+      Layer.fresh(realtimeBusLayer),
+    ) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+
+      const root = try createPost({
+        authorId: "alice",
+        authorKind: "user",
+        content: "Parent post for live reply counts",
+        nowMs: 1_760_000_700_000
+      })
+      try createPost({
+        authorId: "bob",
+        authorKind: "user",
+        content: "Visible reply from Bob",
+        replyToPostId: root.id,
+        nowMs: 1_760_000_700_100
+      })
+      try createPost({
+        authorId: "carol",
+        authorKind: "user",
+        content: "Reply Alice will mute",
+        replyToPostId: root.id,
+        nowMs: 1_760_000_700_200
+      })
+      try muteAccount("alice", "carol")
+
+      const created: FeedRealtimeEvent = {
+        type: "post.created",
+        postId: "live-reply-event",
+        authorId: "bob",
+        authorKind: "user",
+        replyToPostId: root.id,
+        quotePostId: null,
+        createdAt: 1_760_000_700_100
+      }
+      const store = try Store
+      const forAlice = try personalizePostDeletedEvent(store, created, "alice")
+      const forBob = try personalizePostDeletedEvent(store, created, "bob")
+      const forAnon = try personalizePostDeletedEvent(store, created, null)
+
+      assert.deepStrictEqual(
+        {
+          alice: forAlice.type === "post.created" ? forAlice.parentReplyCount : null,
+          bob: forBob.type === "post.created" ? forBob.parentReplyCount : null,
+          anon: forAnon.type === "post.created" ? forAnon.parentReplyCount : null,
+        },
+        {
+          alice: 1,
+          bob: 2,
+          anon: 2,
+        },
+      )
+    }
+  },
+)

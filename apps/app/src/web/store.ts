@@ -463,6 +463,13 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
 
   if (eventType === "post.created" || eventType === "org.posted") {
     const replyToPostId = data ? optStr(data.replyToPostId) : null;
+    const parentReplyCount = data && typeof data.parentReplyCount === "number" ? data.parentReplyCount : null;
+    if (replyToPostId && parentReplyCount !== null) {
+      patchPostCardAcrossStore(replyToPostId, (card) => ({
+        ...card,
+        replyCount: Math.max(0, parentReplyCount),
+      }));
+    }
     if (s.route === "PostDetail" && s.activePostId && replyToPostId === s.activePostId) {
       void runDomainRefresh("feed", () => openThread(s.activePostId ?? "", s.threadSort));
       return;
