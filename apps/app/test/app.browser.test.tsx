@@ -21,6 +21,7 @@ const createdEventSources: Array<EventTarget> = [];
 const liveEventSources: EventTarget[] = [];
 let profileShouldFail = false;
 let profileShould404 = false;
+let marketHistoryShouldFail = false;
 let explorePosts: typeof SAMPLE_POSTS = [];
 const fetchPaths: string[] = [];
 const POST_DELETED_VIEWER = makeViewerSession({
@@ -300,6 +301,7 @@ function installMockNetwork(
   const requestedReplies = new Set<string>();
   profileShouldFail = false;
   profileShould404 = false;
+  marketHistoryShouldFail = false;
   explorePosts = [];
   fetchPaths.length = 0;
   let signedIn = false;
@@ -474,6 +476,9 @@ function installMockNetwork(
           { timestamp: Date.now(), recordedAt: Date.now(), priceCents: finalPriceCents, yesPriceBps: 5000, volumeCents: 2500 },
         ],
       };
+      if (marketHistoryShouldFail) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "http_503", code: "http_503", message: "Request failed (503)" }), { status: 503 }));
+      }
       if (options.holdHistoryRange === range) {
         requestedHistoryRanges.add(range);
         return new Promise<Response>((resolve) => {
@@ -1005,6 +1010,45 @@ it('Market refresh in flight loads the newly selected market (spec/markets/predi
   await act(() => Promise.resolve());
   expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(3333);
   expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+});
+
+it('A failed market details refresh keeps the open terminal panels (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
+  const network = await mountApp();
+
+  await act(() => storeActions.navigate("/markets"));
+  expect(getStoreSnapshot().route).toBe("Markets");
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(1111);
+    expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+  });
+  expect(getStoreSnapshot().marketTrades.length).toBe(1);
+  expect(getStoreSnapshot().marketSocialPosts.length).toBe(1);
+
+  marketHistoryShouldFail = true;
+  act(() => {
+    network.dispatchSse("world.tick", "{}");
+  });
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().errorMessage).not.toBeNull();
+    expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+  });
+  expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(1111);
+  expect(getStoreSnapshot().marketTrades.length).toBe(1);
+  expect(getStoreSnapshot().marketSocialPosts.length).toBe(1);
+
+  marketHistoryShouldFail = false;
+  act(() => {
+    network.dispatchSse("world.tick", "{}");
+  });
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().marketHistory.at(-1)?.priceCents).toBe(1111);
+    expect(getStoreSnapshot().marketHistoryLoading).toBe(false);
+  });
+  expect(getStoreSnapshot().marketTrades.length).toBe(1);
+  expect(getStoreSnapshot().marketSocialPosts.length).toBe(1);
 });
 
 async function openAliceTabThenNavigateBob(
