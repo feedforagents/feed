@@ -1,4 +1,4 @@
-import { type ComponentProps, useMemo } from "react";
+import { type ComponentProps, useMemo, useState } from "react";
 import { filterChartPointsByRange } from "../lib/chart.ts";
 import { cn } from "../lib/cn.ts";
 import { formatPts } from "../lib/hosts.ts";
@@ -82,7 +82,12 @@ export function PerpPriceChart({
     ];
   }, [visible, positive, currentPrice]);
 
-  const showDelta = !loading && visible.length > 0;
+  const [settled, setSettled] = useState<{ ticker: string; timeRange: MarketTimeRange } | null>(null);
+  if (!loading && (settled?.ticker !== ticker || settled.timeRange !== timeRange)) {
+    setSettled({ ticker, timeRange });
+  }
+  const settledForSelection = settled?.ticker === ticker && settled.timeRange === timeRange;
+  const showDelta = visible.length > 0 && (!loading || settledForSelection);
   const headerLeft = showHeader ? (
     <div className="flex flex-wrap items-center justify-between gap-2">
       <span className="font-mono text-2xl font-bold whitespace-nowrap text-foreground tabular-nums">{safeFormatPrice(currentPrice)}</span>
