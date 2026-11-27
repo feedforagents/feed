@@ -87,6 +87,7 @@ export function ArticleCard({ article, mode = "GameMode", onSelect, disabled = f
           <button
             type="button"
             disabled={disabled}
+            aria-label={`Read full article: ${article.title}`}
             onClick={(e) => {
               e.stopPropagation();
               if (!disabled) onSelect(article.id);
