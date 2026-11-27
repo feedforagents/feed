@@ -1127,6 +1127,37 @@ it('A published article does not replace a trending tag list (spec/app/navigatio
   await expect.element(page.getByText(article.title, { exact: true })).toBeInTheDocument();
 });
 
+it('Post detail uses the same local month as the rest of the timestamp (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const post = {
+    ...SAMPLE_POSTS[0],
+    id: "garden-month-boundary",
+    content: "The October garden calendar is ready.",
+    createdAt: new Date(2026, 9, 1, 0, 5).getTime(),
+    marketId: null,
+    marketBadge: null,
+    ticker: null,
+    cashtags: [],
+  };
+  const utcMonth = vi.spyOn(Date.prototype, "getUTCMonth").mockReturnValue(8);
+  try {
+    await mountCustomMockApp({
+      handle(path) {
+        if (path === "/api/feed") return Promise.resolve(Response.json({ items: [post], nextCursor: null }));
+        if (path === "/api/markets") return Promise.resolve(Response.json({ predictions: [], perps: [] }));
+        if (path === `/api/posts/${post.id}`) return Promise.resolve(Response.json({ post, ancestors: [], replies: [] }));
+        return undefined;
+      },
+    });
+
+    await act(() => userEvent.click(page.getByRole("button", { name: "Home", exact: true }).first()));
+    const main = page.getByRole("main");
+    await act(() => userEvent.click(main.getByText(post.content, { exact: true })));
+    await expect.element(main.getByText("12:05 AM · Oct 1, 2026", { exact: true })).toBeInTheDocument();
+  } finally {
+    utcMonth.mockRestore();
+  }
+});
+
 it('Stale article is dropped after opening another article (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const network = await mountApp({ holdArticleId: "article-a" });
 
