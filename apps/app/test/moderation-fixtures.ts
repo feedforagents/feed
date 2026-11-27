@@ -1,4 +1,5 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+import { vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { decodePost, type AppPost } from "../src/web/types.ts";
 
@@ -98,4 +99,72 @@ export function resetModerationStore(): void {
     activeThread: null,
     blockedAccounts: [],
   });
+}
+
+export function jsonPayload(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+export function stubFetchUrl(handler: (url: string) => Promise<Response>): void {
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    return handler(url);
+  }));
+}
+
+export function resetWorldFeedStore(
+  overrides: Parameters<typeof setStoreState>[0],
+): void {
+  setStoreState({
+    viewer: aliceViewer,
+    route: "Home",
+    feedTab: "latest",
+    feedPosts: [],
+    feedLoading: false,
+    explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
+    profileBundle: null,
+    profileReplies: [],
+    profileLikes: [],
+    marketSocialPosts: [],
+    activeThread: null,
+    activePostId: null,
+    ...overrides,
+  });
+}
+
+export function makeProfileBundle(
+  handle: string,
+  displayName: string,
+  followersCount: number,
+  followingCount: number,
+  isOwnProfile: boolean,
+) {
+  return {
+    summary: {
+      displayName,
+      handle,
+      followersCount,
+      followingCount,
+      isFollowing: false,
+      isMuted: false,
+      isBlocked: false,
+      isOwnProfile,
+    },
+    id: handle,
+    kind: "user" as const,
+    postsCount: 0,
+    createdAtMs: 0,
+    actorMeta: null,
+    orgMeta: null,
+    viewerFollowedBy: false,
+    viewerBlockedBy: false,
+    tradeCount: null,
+    openPositionCount: null,
+    posts: [],
+    postsNextCursor: null,
+    positions: [],
+  };
 }

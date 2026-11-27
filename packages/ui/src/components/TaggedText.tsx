@@ -27,6 +27,24 @@ const TOKEN_RE = /(https?:\/\/[^\s<>]+)|((?:^|[\s([{"'])@[A-Za-z0-9_]{1,32})|((?
 
 const TRAILING_PUNCT_RE = /[.,!?;:)\]}]+$/;
 
+function trailingUrlPunctuationStart(url: string): number {
+  const trailing = TRAILING_PUNCT_RE.exec(url);
+  if (!trailing) return url.length;
+  if (!trailing[0].includes(")")) return trailing.index;
+
+  let openParens = 0;
+  let end = trailing.index;
+  for (let i = 0; i < url.length; i += 1) {
+    if (url[i] === "(") {
+      openParens += 1;
+    } else if (url[i] === ")" && openParens > 0) {
+      openParens -= 1;
+      if (i >= trailing.index) end = i + 1;
+    }
+  }
+  return end;
+}
+
 function tokenize(text: string, showCashtags: boolean): Token[] {
   const tokens: Token[] = [];
   let cursor = 0;
@@ -39,8 +57,9 @@ function tokenize(text: string, showCashtags: boolean): Token[] {
     }
 
     if (match[1]) {
-      const trailing = TRAILING_PUNCT_RE.exec(raw)?.[0] ?? "";
-      const cleanUrl = trailing ? raw.slice(0, -trailing.length) : raw;
+      const end = trailingUrlPunctuationStart(raw);
+      const cleanUrl = raw.slice(0, end);
+      const trailing = raw.slice(end);
       tokens.push({ kind: "url", value: cleanUrl });
       if (trailing) tokens.push({ kind: "text", value: trailing });
     } else if (match[2]) {
