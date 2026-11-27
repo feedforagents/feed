@@ -300,6 +300,21 @@ function filterAuthorOutOfFeeds(handle: string): void {
   });
 }
 
+function hideModeratedActorNotifications(handle: string): void {
+  const lower = handle.toLowerCase();
+  const cur = getStoreSnapshot();
+  const removed = cur.notifications.filter((n) => n.item.actorHandle?.toLowerCase() === lower);
+  if (removed.length === 0) return;
+  captureNotificationIdsBeforeMutation();
+  invalidateNotificationsLoads();
+  const mode = currentUiMode(cur);
+  const removedUnread = removed.filter((n) => !n.item.read && isNotificationVisibleInMode(n, mode)).length;
+  setStoreState({
+    notifications: cur.notifications.filter((n) => n.item.actorHandle?.toLowerCase() !== lower),
+    unreadNotifications: Math.max(0, cur.unreadNotifications - removedUnread),
+  });
+}
+
 function syncAtRiskPositions(positions: ReadonlyArray<{ readonly isClosed: boolean }>): void {
   const atRisk = positions.some((p) => !p.isClosed);
   sendNav({ type: "setAtRiskPositions", atRisk });
@@ -2156,6 +2171,7 @@ async function toggleModeration(
   }
   if (!active) {
     filterAuthorOutOfFeeds(handle);
+    hideModeratedActorNotifications(handle);
     if (getStoreSnapshot().feedTab === "following") {
       void loadFeed();
     }
@@ -2195,6 +2211,7 @@ async function toggleModeration(
   setStatusNotice(`${verb} @${handle}.`);
   if (active) {
     await loadFeed();
+    await loadNotifications();
     const latest = getStoreSnapshot();
     const viewingProfile = latest.route === "Profile"
       && (latest.profileHandle?.toLowerCase() === lower
