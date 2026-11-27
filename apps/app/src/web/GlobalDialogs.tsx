@@ -183,7 +183,16 @@ export function GlobalDialogs() {
               onChange={(e) => setReportDetails(e.target.value)}
             />
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" size="sm" onClick={storeActions.closeReportDialog}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setReportCategory("Spam");
+                  setReportDetails("");
+                  storeActions.closeReportDialog();
+                }}
+              >
                 Cancel
               </Button>
               <Button type="submit" variant="destructive" size="sm" loading={reportBusy}>
