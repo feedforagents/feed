@@ -273,6 +273,7 @@ function installMockNetwork(
     holdArticleId?: string;
     holdLeaderboardScope?: string;
     holdPnlRange?: string;
+    holdClosedPositionsFirst?: boolean;
     holdProfileReplies?: boolean;
     readonly perps?: ReadonlyArray<Record<string, unknown>>;
     readonly threadFetch?: (path: string) => Promise<Response> | null;
@@ -293,6 +294,8 @@ function installMockNetwork(
   const requestedLeaderboardScopes = new Set<string>();
   const heldPnl = new Map<string, Array<() => void>>();
   const requestedPnlRanges = new Set<string>();
+  const heldClosedPositions: Array<() => void> = [];
+  let closedPositionsCalls = 0;
   const heldReplies = new Map<string, Array<(res: Response) => void>>();
   const requestedReplies = new Set<string>();
   profileShouldFail = false;
@@ -536,7 +539,34 @@ function installMockNetwork(
         positions: SAMPLE_MARKETS.positions,
       });
     }
-    if (path === "/api/markets/positions/closed") return json({ accountId: "acct-player-1", items: [], predictionPositions: [], perpPositions: [] });
+    if (path === "/api/markets/positions/closed") {
+      closedPositionsCalls += 1;
+      const callNo = closedPositionsCalls;
+      const body = {
+        accountId: "acct-player-1",
+        items: [],
+        predictionPositions: [],
+        perpPositions:
+          options.holdClosedPositionsFirst && callNo !== 1
+            ? [
+                {
+                  id: "closed-perp-2",
+                  ticker: "BTC",
+                  side: "long",
+                  marginCents: 10000,
+                  realizedPnlCents: 22200,
+                  closedAt: Date.now(),
+                },
+              ]
+            : [],
+      };
+      if (options.holdClosedPositionsFirst && callNo === 1) {
+        return new Promise<Response>((resolve) => {
+          heldClosedPositions.push(() => resolve(Response.json(body)));
+        });
+      }
+      return json(body);
+    }
     if (path === "/api/economy/me/pnl-history") {
       const range = url.searchParams.get("range") ?? "ALL";
       const finalPnlCents = range === "1D" ? 11_100 : range === "1W" ? 22_200 : 1528;
@@ -672,6 +702,10 @@ function installMockNetwork(
     releasePnl: (range: string) => {
       for (const release of heldPnl.get(range)?.splice(0) ?? []) release();
     },
+    closedPositionsRequested: () => closedPositionsCalls > 0,
+    releaseClosedPositions: () => {
+      for (const release of heldClosedPositions.splice(0)) release();
+    },
     repliesRequested: (handle: string) => requestedReplies.has(handle),
     releaseReplies: (handle: string, items: unknown[]) => {
       for (const release of heldReplies.get(handle)?.splice(0) ?? []) {
@@ -741,6 +775,14 @@ async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
 async function mountAppAtHome(options?: Parameters<typeof installMockNetwork>[0]) {
   const network = await mountApp(options);
   await act(() => storeActions.navigate("/"));
+  return network;
+}
+
+async function mountSignedInApp(options?: Parameters<typeof installMockNetwork>[0]) {
+  const network = await mountApp(options);
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await signInAsReviewer();
   return network;
 }
 
@@ -1065,11 +1107,7 @@ it('Stale leaderboard is dropped after switching filters (spec/markets/economy.m
 });
 
 it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
-  const network = await mountApp({ holdPnlRange: "1D" });
-
-  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
-  await act(() => userEvent.click(signInBtn));
-  await signInAsReviewer();
+  const network = await mountSignedInApp({ holdPnlRange: "1D" });
 
   act(() => {
     void storeActions.loadPnlHistory("1D");
@@ -1087,6 +1125,27 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
   expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
   expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
+});
+
+it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
+  const network = await mountSignedInApp({ holdClosedPositionsFirst: true });
+
+  act(() => {
+    void storeActions.loadClosedPositions();
+  });
+  await act(() => Promise.resolve());
+  expect(network.closedPositionsRequested()).toBe(true);
+
+  await act(() => storeActions.loadClosedPositions());
+  expect(getStoreSnapshot().closedPositions).toHaveLength(1);
+  expect(getStoreSnapshot().closedPositions[0]?.realizedPnlPts).toBe(222);
+
+  network.releaseClosedPositions();
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  expect(getStoreSnapshot().closedPositions).toHaveLength(1);
+  expect(getStoreSnapshot().closedPositions[0]?.realizedPnlPts).toBe(222);
+  expect(getStoreSnapshot().closedPositionsLoading).toBe(false);
 });
 
 it('Late replies never land on another profile (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
