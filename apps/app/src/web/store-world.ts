@@ -121,6 +121,40 @@ function followSeqSnapshot(keys: ReadonlyArray<string>): Map<string, number> {
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
 let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null; viewerId: string | null } | null = null;
+let authorHideSeq = 0;
+const authorHiddenAtSeq = new Map<string, number>();
+
+function captureAuthorHides(): number {
+  return authorHideSeq;
+}
+
+function wasAuthorHiddenSince(handle: string, hidesAtStart: number): boolean {
+  return (authorHiddenAtSeq.get(handle.toLowerCase()) ?? 0) > hidesAtStart;
+}
+
+function stripHiddenAuthorRefs(p: AppPost, isHidden: (handle: string) => boolean): AppPost {
+  const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+  const stripRepost = reposter !== undefined && isHidden(reposter);
+  const stripQuote = p.card.quotePost !== undefined && isHidden(p.card.quotePost.authorHandle);
+  if (!stripRepost && !stripQuote) return p;
+  return {
+    ...p,
+    card: {
+      ...p.card,
+      ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
+      ...(stripQuote ? { quotePost: undefined } : {}),
+    },
+  };
+}
+
+function dropAuthorsHiddenSince(
+  posts: ReadonlyArray<AppPost>,
+  hidesAtStart: number,
+): ReadonlyArray<AppPost> {
+  if (hidesAtStart === authorHideSeq) return posts;
+  const isHidden = (handle: string): boolean => wasAuthorHiddenSince(handle, hidesAtStart);
+  return posts.filter((p) => !isHidden(p.card.authorHandle)).map((p) => stripHiddenAuthorRefs(p, isHidden));
+}
 let exploreRequestSeq = 0;
 let exploreLoadedQuery = "";
 let exploreLoadedTag: string | null = null;
@@ -401,24 +435,7 @@ export function removePostAcrossStore(
 function filterAuthorOutOfFeeds(handle: string): void {
   const normalized = handle.toLowerCase();
   const isBlockedHandle = (value: string): boolean => value.toLowerCase() === normalized;
-  const reposterHandle = (p: AppPost): string | undefined => p.card.repostedBy?.handle ?? p.card.repostedByHandle;
-  const isBlockedReposter = (p: AppPost): boolean => {
-    const reposter = reposterHandle(p);
-    return reposter !== undefined && isBlockedHandle(reposter);
-  };
-  const cleanPost = (p: AppPost): AppPost => {
-    const stripRepost = isBlockedReposter(p);
-    const stripQuote = p.card.quotePost !== undefined && isBlockedHandle(p.card.quotePost.authorHandle);
-    if (!stripRepost && !stripQuote) return p;
-    return {
-      ...p,
-      card: {
-        ...p.card,
-        ...(stripRepost ? { repostedBy: undefined, repostedByHandle: undefined } : {}),
-        ...(stripQuote ? { quotePost: undefined } : {}),
-      },
-    };
-  };
+  const cleanPost = (p: AppPost): AppPost => stripHiddenAuthorRefs(p, isBlockedHandle);
   const cleanList = (list: ReadonlyArray<AppPost>): ReadonlyArray<AppPost> =>
     list.filter((p) => !isBlockedHandle(p.card.authorHandle)).map(cleanPost);
   const cur = getStoreSnapshot();
@@ -464,6 +481,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   const reqSeq = ++feedRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ feedLoading: true });
   const url = appendAnonymousModeParam(`/api/feed?tab=${encodeURIComponent(tab)}`, s);
   const res = await requestJson(url, {
@@ -475,7 +493,10 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     feedLoadedTab = tab;
     feedTabSwitchSnapshot = null;
     setStoreState({
-      feedPosts: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+      feedPosts: dropAuthorsHiddenSince(
+        dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+        hidesAtStart,
+      ),
       feedNextCursor: res.data.nextCursor,
       feedLoading: false,
       pendingNewPostCount: 0,
@@ -526,6 +547,7 @@ export async function loadMoreFeed(): Promise<void> {
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = feedRequestSeq;
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ feedLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/feed?tab=${encodeURIComponent(tab)}&cursor=${encodeURIComponent(s.feedNextCursor)}`,
@@ -539,7 +561,10 @@ export async function loadMoreFeed(): Promise<void> {
   }
   if (res.ok) {
     setStoreState({
-      feedPosts: appendUniquePosts(latest.feedPosts, dropPostsDeletedSince(res.data.items, deletionsAtStart)),
+      feedPosts: appendUniquePosts(
+        latest.feedPosts,
+        dropAuthorsHiddenSince(dropPostsDeletedSince(res.data.items, deletionsAtStart), hidesAtStart),
+      ),
       feedNextCursor: res.data.nextCursor,
       feedLoadingMore: false,
     });
@@ -1145,6 +1170,7 @@ export async function loadWorldStatus(): Promise<void> {
 export function resetAccountLoads(): void {
   pnlHistoryRequestSeq += 1;
   feedLoadedTab = "latest";
+  authorHiddenAtSeq.clear();
 }
 
 export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {
@@ -2488,6 +2514,8 @@ async function toggleModeration(
     return;
   }
   if (!active) {
+    authorHideSeq += 1;
+    authorHiddenAtSeq.set(lower, authorHideSeq);
     filterAuthorOutOfFeeds(handle);
     if (getStoreSnapshot().feedTab === "following") {
       void loadFeed();
@@ -2517,11 +2545,21 @@ async function toggleModeration(
     });
   }
   if (active) {
+    const afterUpdate = getStoreSnapshot();
     setStoreState(
       isBlock
-        ? { blockedAccounts: getStoreSnapshot().blockedAccounts.filter((a) => a.handle.toLowerCase() !== lower) }
-        : { mutedAccounts: getStoreSnapshot().mutedAccounts.filter((a) => a.handle.toLowerCase() !== lower) },
+        ? { blockedAccounts: afterUpdate.blockedAccounts.filter((a) => a.handle.toLowerCase() !== lower) }
+        : { mutedAccounts: afterUpdate.mutedAccounts.filter((a) => a.handle.toLowerCase() !== lower) },
     );
+    const updated = getStoreSnapshot();
+    const stillHidden =
+      (updated.profileBundle?.summary.handle.toLowerCase() === lower
+        && (updated.profileBundle.summary.isBlocked || updated.profileBundle.summary.isMuted))
+      || updated.blockedAccounts.some((a) => a.handle.toLowerCase() === lower)
+      || updated.mutedAccounts.some((a) => a.handle.toLowerCase() === lower);
+    if (!stillHidden) {
+      authorHiddenAtSeq.delete(lower);
+    }
   } else if (cur.route === "Settings") {
     void loadModerationLists();
   }
