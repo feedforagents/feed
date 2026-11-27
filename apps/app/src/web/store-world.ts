@@ -1201,7 +1201,11 @@ export async function loadChatMessages(chatId: string): Promise<void> {
 }
 
 export async function selectChat(chatId: string): Promise<void> {
-  setStoreState({ selectedChatId: chatId });
+  const s = getStoreSnapshot();
+  setStoreState({
+    selectedChatId: chatId,
+    ...(s.selectedChatId !== chatId ? { chatMessages: [] } : {}),
+  });
   await loadChatMessages(chatId);
 }
 

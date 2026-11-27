@@ -79,6 +79,50 @@ it("still marks the open room read when the cached list badge says unread (spec/
   expect(getStoreSnapshot().chats.find((c) => c.id === "chat-1")?.unreadCount).toBe(0);
 });
 
+it("clears the previous room's messages on switch and drops its late response without marking it read (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  const releases: { first?: () => void; second?: () => void } = {};
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
+      return new Promise<Response>((resolve) => {
+        releases.first = () => resolve(Response.json({ messages: roomMessages }));
+      });
+    }
+    if (url.pathname === "/api/chats/chat-2/messages" && method === "GET") {
+      return new Promise<Response>((resolve) => {
+        releases.second = () =>
+          resolve(Response.json({ messages: [{ ...bobMessage, id: "m2", content: "from B" }] }));
+      });
+    }
+    if (url.pathname.endsWith("/read") && method === "POST") {
+      readPosts.push(url.pathname);
+      return Promise.resolve(Response.json({ unreadCount: 0 }));
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  }, "http://localhost");
+  setStoreState({
+    chats: [seedChat(1), { ...seedChat(1), id: "chat-2", title: "Carol", peerHandle: "carol" }],
+    selectedChatId: "chat-2",
+    chatMessages: [{ id: "m0", senderName: "Carol", senderHandle: "carol", isNpc: false, isOwn: false, timestamp: "now", content: "earlier B", reactions: [] }],
+  });
+  const loadingFirst = selectChat("chat-1");
+  await Promise.resolve();
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-1");
+  expect(getStoreSnapshot().chatMessages).toEqual([]);
+  const loadingSecond = selectChat("chat-2");
+  await Promise.resolve();
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-2");
+  expect(getStoreSnapshot().chatMessages).toEqual([]);
+  releases.second?.();
+  await loadingSecond;
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["from B"]);
+  releases.first?.();
+  await loadingFirst;
+  expect(getStoreSnapshot().selectedChatId).toBe("chat-2");
+  expect(getStoreSnapshot().chatMessages.map((m) => m.content)).toEqual(["from B"]);
+  expect(readPosts).toEqual(["/api/chats/chat-2/read"]);
+});
+
 it("does not mark read when the room loads with no messages (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
   setStoreState({ chats: [seedChat(0)] });
   roomMessages = [];
