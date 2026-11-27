@@ -253,3 +253,35 @@ it('Blocking an author on Latest cleans the Home feed without a reload and clear
     activeThread: null,
   });
 });
+
+it('Blocking an author hides their Explore people entries until the next search (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  setStoreState({
+    viewer: aliceViewer,
+    feedTab: "latest",
+    explore: {
+      ...getStoreSnapshot().explore,
+      accounts: [
+        { accountId: "bob", handle: "bob", displayName: "Bob Trader", bio: "", avatarUrl: null, viewerFollows: true },
+        { accountId: "erin", handle: "erin", displayName: "Erin Fox", bio: "", avatarUrl: null, viewerFollows: false },
+      ],
+      actors: [
+        { id: "bob", username: "bob", name: "Bob Trader", tier: "npc", description: "", avatarUrl: null, isParody: false, viewerFollows: true },
+        { id: "erin", username: "erin", name: "Erin Fox", tier: "npc", description: "", avatarUrl: null, isParody: false, viewerFollows: false },
+      ],
+    },
+    blockedAccounts: [],
+  });
+
+  vi.stubGlobal("fetch", () => Promise.resolve(Response.json({ blocked: true })));
+
+  await toggleBlock("bob", false);
+
+  const s = getStoreSnapshot();
+  expect({
+    accounts: s.explore.accounts.map((a) => a.handle),
+    actors: s.explore.actors.map((a) => a.username),
+  }).toEqual({
+    accounts: ["erin"],
+    actors: ["erin"],
+  });
+});
