@@ -1023,6 +1023,26 @@ it.effect(
       otherEventKept: try realtimeEventForViewer(store, inviteEvent, "alice"),
       otherEventDropped: try realtimeEventForViewer(store, inviteEvent, "bob")
     }
+    const npcSpotEvent: FeedRealtimeEvent = {
+      type: "market.spot",
+      actorId: "ailon-musk",
+      ticker: "NVDAI",
+      side: "buy",
+      quoteCents: 2500
+    }
+    const spotUnrelatedGameViewer = try realtimeEventForViewer(store, npcSpotEvent, "bob")
+    try blockAccount("alice", "ailon-musk")
+    try blockAccount("ailon-musk", "carol")
+    try muteAccount("bob", "ailon-musk")
+    const spotStream = {
+      viewerBlocksNpc: try realtimeEventForViewer(store, npcSpotEvent, "alice"),
+      npcBlocksViewer: try realtimeEventForViewer(store, npcSpotEvent, "carol"),
+      viewerMutesNpc: try realtimeEventForViewer(store, npcSpotEvent, "bob"),
+      unrelatedGameViewer: spotUnrelatedGameViewer,
+      socialModeViewer: try realtimeEventForViewer(store, npcSpotEvent, "dave"),
+      anonymousViewer: try realtimeEventForViewer(store, npcSpotEvent, null),
+      brokenStore: try realtimeEventForViewer(brokenStore, npcSpotEvent, "bob")
+    }
 
     try check(() => assert.deepStrictEqual({
       rateKeys: [
@@ -1082,7 +1102,8 @@ it.effect(
         sseFailClosedMissingStoreChat
       ],
       perpStream,
-      perpFrames
+      perpFrames,
+      spotStream
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -1146,6 +1167,15 @@ it.effect(
         brokenStore: undefined,
         otherEventKept: inviteEvent,
         otherEventDropped: undefined
+      },
+      spotStream: {
+        viewerBlocksNpc: aggregateFrame,
+        npcBlocksViewer: aggregateFrame,
+        viewerMutesNpc: npcSpotEvent,
+        unrelatedGameViewer: npcSpotEvent,
+        socialModeViewer: undefined,
+        anonymousViewer: npcSpotEvent,
+        brokenStore: undefined
       }
     }))
   })

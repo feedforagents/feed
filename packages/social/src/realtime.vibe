@@ -537,13 +537,13 @@ export effect function canDeliverRealtimeEventToViewer(
   const viewerId = normalizeViewerId(viewerAccountId)
   switch (event.type) {
     case "world.tick":
-    case "market.spot":
     case "market.prediction":
     case "market.clue":
     case "market.resolved":
     case "org.posted":
     case "article.published":
       return true
+    case "market.spot":
     case "market.perp":
       return viewerId === undefined ? true : (try traderActivityDeliveryInStore(store, viewerId, event.actorId)) === "full"
     case "post.created":
@@ -596,7 +596,7 @@ export effect function realtimeEventForViewer(
   viewerAccountId: string | null | undefined
 ): (FeedRealtimeEvent | undefined)!! {
   const viewerId = normalizeViewerId(viewerAccountId)
-  if (event.type !== "market.perp" || viewerId === undefined) {
+  if ((event.type !== "market.perp" && event.type !== "market.spot") || viewerId === undefined) {
     return (try canDeliverRealtimeEventToViewer(store, event, viewerAccountId)) ? event : undefined
   }
   const delivery = try traderActivityDeliveryInStore(store, viewerId, event.actorId)
