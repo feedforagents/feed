@@ -1313,11 +1313,14 @@ export async function markChatRead(chatId: string): Promise<void> {
       unreadNotifications: Math.max(0, cur.unreadNotifications - unreadChatNotifications.length),
     });
   }
-  await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
+  const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/read`, {
     method: "POST",
     body: {},
     parse: passThrough,
   });
+  const mode = currentUiMode(cur);
+  const loadedUnread = cur.notifications.filter((n) => isNotificationVisibleInMode(n, mode) && !n.item.read).length;
+  if (res.ok && cur.unreadNotifications > loadedUnread) await loadNotifications();
 }
 
 let chatsLoadCount = 0;
@@ -2181,6 +2184,7 @@ async function toggleModeration(
       void loadFeed();
     }
   }
+  void loadNotifications();
   const cur = getStoreSnapshot();
   if (cur.profileBundle && cur.profileBundle.summary.handle.toLowerCase() === lower) {
     setStoreState({
