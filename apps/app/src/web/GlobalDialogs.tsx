@@ -83,11 +83,22 @@ function ConfirmAlertDialog({
 export function GlobalDialogs() {
   const s = useAppStore();
   const [composeText, setComposeText] = useState("");
+  const [composeDraftTargetId, setComposeDraftTargetId] = useState<string | null>(null);
+  const [composeWasOpen, setComposeWasOpen] = useState(false);
   const [composeBusy, setComposeBusy] = useState(false);
   const [reportCategory, setReportCategory] = useState<(typeof REPORT_CATEGORIES)[number]>("Spam");
   const [reportDetails, setReportDetails] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+
+  const quoteTargetId = s.quotePostTarget?.card.id ?? null;
+  if (s.composeOpen !== composeWasOpen) {
+    setComposeWasOpen(s.composeOpen);
+    if (s.composeOpen && composeDraftTargetId !== quoteTargetId) {
+      setComposeText("");
+      setComposeDraftTargetId(quoteTargetId);
+    }
+  }
 
   const quoteContext: PostComposerContext | undefined = s.quotePostTarget
     ? { authorHandle: s.quotePostTarget.card.authorHandle, excerpt: s.quotePostTarget.card.content }
@@ -102,6 +113,7 @@ export function GlobalDialogs() {
     setComposeBusy(false);
     if (ok) {
       setComposeText("");
+      setComposeDraftTargetId(null);
       storeActions.closeComposeDialog();
     }
   };
@@ -150,7 +162,10 @@ export function GlobalDialogs() {
             authorName={s.viewer?.displayName ?? "You"}
             authorAvatarUrl={s.viewer?.avatarUrl ?? undefined}
             quotePost={quoteContext}
-            onCancelContext={() => storeActions.openComposeDialog(null)}
+            onCancelContext={() => {
+              setComposeDraftTargetId(null);
+              storeActions.openComposeDialog(null);
+            }}
             placeholder={s.quotePostTarget ? "Add a comment..." : "What's happening?"}
             submitLabel="Post"
             loading={composeBusy}
