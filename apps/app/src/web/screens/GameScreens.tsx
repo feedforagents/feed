@@ -53,7 +53,7 @@ function buildCloseConfirmation(pos: AppPosition): TradeConfirmationDetails {
       unrealizedPnlPct: pos.pnlPct,
     };
   }
-  const grossCents = Math.max(0, pos.sizeCents);
+  const grossCents = Math.max(0, pos.grossSizeCents);
   const grossProceedsPts = grossCents / 100;
   const estimatedFeePts = calcCeilFeePts(grossCents, 10);
   return {
@@ -61,7 +61,7 @@ function buildCloseConfirmation(pos: AppPosition): TradeConfirmationDetails {
     question: pos.row.marketLabel,
     side: pos.rawSide === "no" ? "NO" : "YES",
     shares: pos.wholeShares,
-    avgPricePct: pos.currentPricePct,
+    avgPricePct: pos.wholeShares > 0 ? grossCents / pos.wholeShares : pos.currentPricePct,
     grossProceedsPts,
     estimatedFeePts,
     netProceedsPts: Math.max(0, grossProceedsPts - estimatedFeePts),

@@ -124,6 +124,7 @@ const SAMPLE_MARKETS = {
         yesPriceBps: 5200,
         noPriceBps: 4800,
         estimatedValueCents: 1028,
+        grossEstimatedValueCents: 1030,
       },
     ],
     perpPositions: [],
@@ -811,6 +812,14 @@ it('Visitors browse feed, markets, leaderboard, sign in, and view profile (spec/
   const walletButton = page.getByRole("button", { name: "Wallet" }).first();
   await act(() => userEvent.click(walletButton));
   await expect.element(page.getByText("Size 19.78 shares")).toBeInTheDocument();
+  await act(() => userEvent.click(page.getByRole("button", { name: "Close" }).first()));
+  await expect.element(page.getByText("Confirm Sell YES")).toBeInTheDocument();
+  await expect.element(page.getByText("10.30 pts")).toBeInTheDocument();
+  await expect.element(page.getByText("0.02 pts")).toBeInTheDocument();
+  expect(document.body.textContent).toContain("Net Proceeds10.28 pts");
+  expect(document.body.textContent).toContain("Est. PnL+0.28 pts");
+  expect(document.body.textContent).not.toContain("10.26 pts");
+  await act(() => userEvent.click(page.getByRole("button", { name: "Cancel" })));
   expect(document.body.textContent).not.toContain("1978 shares");
   expect(document.body.textContent).not.toMatch(/Buy pts|Stripe/i);
   await expect.element(page.getByText("Starting Grant")).toBeInTheDocument();

@@ -82,6 +82,7 @@ export interface PredictionPositionView {
   readonly yesPriceBps: number
   readonly noPriceBps: number
   readonly estimatedValueCents: number
+  readonly grossEstimatedValueCents: number
 }
 
 export interface ClosedPredictionPositionView {
@@ -434,11 +435,14 @@ function toPredictionPositionView(row: Row, nowMs: number): PredictionPositionVi
   const shares = toInt(row.shares)
   const status = parsePredictionStatus(row.market_status)
   const isTradeable = status === "open" && nowMs < toInt(row.expires_at)
-  const estimatedValueCents = status === "resolved" || status === "cancelled"
+  const grossEstimatedValueCents = status === "resolved" || status === "cancelled"
     ? toInt(row.payout_cents)
     : isTradeable
-      ? markToMarketPredictionCents(side, shares, yesShares, noShares)
+      ? safeSellGrossCents(yesShares, noShares, side, shares)
       : 0
+  const estimatedValueCents = status === "resolved" || status === "cancelled"
+    ? grossEstimatedValueCents
+    : sellNetProceeds(grossEstimatedValueCents)
   return {
     marketId: requiredText(row.market_id),
     question: requiredText(row.question),
@@ -452,7 +456,8 @@ function toPredictionPositionView(row: Row, nowMs: number): PredictionPositionVi
     payoutCents: toInt(row.payout_cents),
     yesPriceBps,
     noPriceBps,
-    estimatedValueCents
+    estimatedValueCents,
+    grossEstimatedValueCents
   }
 }
 
