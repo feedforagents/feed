@@ -592,7 +592,7 @@ function installMockNetwork(
     }
     if (path === "/api/economy/me") {
       economyCalls += 1;
-      const fresh = economyCalls > 1;
+      const fresh = options.holdEconomyFirst && economyCalls > 1;
       const body = {
         economy: {
           accountId: viewerIsReviewer ? "acct-player-1" : "acct-email-1",
@@ -800,6 +800,14 @@ async function mountSignedInApp(options?: Parameters<typeof installMockNetwork>[
   return network;
 }
 
+async function selectSeedMarket(network: Awaited<ReturnType<typeof mountApp>>) {
+  act(() => {
+    storeActions.selectMarket("prediction", "seed-market-1");
+  });
+  await act(() => Promise.resolve());
+  expect(network.historyRequested("1D")).toBe(true);
+}
+
 async function signInAsReviewer() {
   await act(() => userEvent.click(page.getByRole("button", { name: "Reviewer sign-in" })));
   await act(() => userEvent.fill(page.getByLabelText(/Reviewer username|Username/i), "alice"));
@@ -938,11 +946,7 @@ it('Email Magic Link sign-in, onboarding, and Settings view (spec/auth/email.md,
 it('Stale market history is dropped after switching ranges (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
   const network = await mountApp({ holdHistoryRange: "1D" });
 
-  act(() => {
-    storeActions.selectMarket("prediction", "seed-market-1");
-  });
-  await act(() => Promise.resolve());
-  expect(network.historyRequested("1D")).toBe(true);
+  await selectSeedMarket(network);
   expect(getStoreSnapshot().marketTimeRange).toBe("1D");
 
   await act(() => storeActions.setMarketTimeRange("1W"));
@@ -964,11 +968,7 @@ it('Market refresh in flight loads the newly selected market (spec/markets/predi
   expect(getStoreSnapshot().route).toBe("Markets");
   await act(() => storeActions.setMarketTimeRange("1D"));
 
-  act(() => {
-    storeActions.selectMarket("prediction", "seed-market-1");
-  });
-  await act(() => Promise.resolve());
-  expect(network.historyRequested("1D")).toBe(true);
+  await selectSeedMarket(network);
 
   network.releaseHistory("1D");
   await act(() => Promise.resolve());
@@ -1149,11 +1149,7 @@ it('Stale closed positions are dropped after a newer refresh (spec/markets/econo
 });
 
 it('Stale economy is dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
-  const network = await mountApp({ holdEconomyFirst: true });
-
-  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
-  await act(() => userEvent.click(signInBtn));
-  await signInAsReviewer();
+  const network = await mountSignedInApp({ holdEconomyFirst: true });
 
   act(() => {
     void storeActions.loadEconomy();
