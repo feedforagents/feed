@@ -878,12 +878,16 @@ export async function loadMarketDetails(
   const latest = getStoreSnapshot();
   if (latest.selectedMarketKind !== kind || latest.selectedMarketId !== id) return;
   setStoreState({
-    marketHistory: histRes.ok ? histRes.data : [],
+    marketHistory: histRes.ok ? histRes.data : latest.marketHistory,
     marketHistoryLoading: false,
-    marketTrades: tradesRes.ok ? tradesRes.data : [],
+    marketTrades: tradesRes.ok ? tradesRes.data : latest.marketTrades,
     marketTradesLoading: false,
-    marketSocialPosts: socialRes.ok ? socialRes.data.items : [],
+    marketSocialPosts: socialRes.ok ? socialRes.data.items : latest.marketSocialPosts,
   });
+  const failed = !histRes.ok ? histRes : !tradesRes.ok ? tradesRes : !socialRes.ok ? socialRes : null;
+  if (failed !== null) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function setMarketTimeRange(range: MarketTimeRange): Promise<void> {
