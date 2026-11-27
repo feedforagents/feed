@@ -1090,14 +1090,21 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
       )
       const perFeedBuckets = perFeedResults.filter((bucket) => bucket.length > 0)
       const interleaved = interleaveRssFeedItems(perFeedBuckets)
+      const storedTitles = interleaved.length === 0 ? [] : try store.transaction((tx) => tx.query(
+        "SELECT DISTINCT title FROM feed_rss_headlines WHERE title = ANY($1::text[])",
+        [interleaved.map((item) => item.title)],
+      ))
+      const knownTitles = new Set(storedTitles.map((row) => toText(row.title)))
+      const candidates: RssFeedHeadlineItem[] = []
+      for (const item of interleaved) {
+        if (knownTitles.has(item.title)) continue
+        knownTitles.add(item.title)
+        candidates.push(item)
+        if (candidates.length === 6) break
+      }
       let insertedCount = 0
       const rosterHint = groundingRosterSummary()
-      for (const item of interleaved.slice(0, 6)) {
-        const exists = try store.transaction(effect (tx: Tx) => {
-          const rows = try tx.query("SELECT id FROM feed_rss_headlines WHERE title = $1 LIMIT 1", [item.title])
-          return rows.length > 0
-        })
-        if (exists) continue
+      for (const item of candidates) {
         const rendered = renderPrompt("rssParodyRewrite", { headline: item.title, sourceUrl: item.sourceUrl, rosterHint })
         const completion = generateCompletion({
           promptId: "rssParodyRewrite",
@@ -1108,14 +1115,14 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
           nowMs: resolvedNow,
         }) catch effect () => null
         const parody = completion ? sanitizeNarrativeText(completion.text, 180) : item.title
-        try store.transaction(effect (tx: Tx) => {
-          try tx.query(
-            `INSERT INTO feed_rss_headlines (id, source_url, title, parody_headline, published_at, created_at)
-             VALUES ($1, $2, $3, $4, $5, $5)`,
-            [newEngineId("rss"), item.sourceUrl, item.title, parody, resolvedNow],
-          )
-        })
-        insertedCount += 1
+        const inserted = try store.transaction((tx) => tx.query(
+          `INSERT INTO feed_rss_headlines (id, source_url, title, parody_headline, published_at, created_at)
+           SELECT $1, $2, $3, $4, $5, $5
+           WHERE NOT EXISTS (SELECT 1 FROM feed_rss_headlines WHERE title = $3)
+           RETURNING id`,
+          [newEngineId("rss"), item.sourceUrl, item.title, parody, resolvedNow],
+        ))
+        insertedCount += inserted.length
       }
       const endWall = try Clock.currentTimeMillis
       try recordTickHealth("rss-refresh", resolvedNow, "ok", null, 0, null, endWall - startWall)
