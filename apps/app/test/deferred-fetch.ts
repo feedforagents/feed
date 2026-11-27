@@ -25,17 +25,14 @@ export function installDeferredFetch() {
 
 export function installDeferredFetchQueue() {
   const queues = new Map<string, Array<Deferred>>();
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, "https://feed.fun");
-    const method = init?.method ?? "GET";
-    const key = `${method} ${url.pathname}${url.search}`;
-    return new Promise<Response>((resolve) => {
-      const queue = queues.get(key) ?? [];
-      queue.push({ resolve });
-      queues.set(key, queue);
+  const fetchMock: typeof fetch = (input, init) =>
+    new Promise<Response>((resolve) => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const key = `${init?.method ?? "GET"} ${new URL(raw, "https://feed.fun").href.replace("https://feed.fun", "")}`;
+      const held = queues.get(key);
+      if (held) held.push({ resolve });
+      else queues.set(key, [{ resolve }]);
     });
-  };
   vi.stubGlobal("fetch", fetchMock);
   return {
     resolveOldest(key: string, res: Response): void {
