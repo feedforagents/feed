@@ -380,3 +380,38 @@ it("keeps the room the user switched to when a send in the previous room finishe
   await switching;
   expect(view()).toEqual({ selected: "chat-2", thread: ["from B"], roomAPreview: "sent while B loads" });
 });
+
+it("surfaces a failed thread refresh after a successful send instead of silently hiding the sent message (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "POST") {
+      return Promise.resolve(Response.json({ ok: true }, { status: 201 }));
+    }
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
+      return Promise.resolve(Response.json({ message: "Reload exploded" }, { status: 500 }));
+    }
+    if (url.pathname === "/api/chats" && method === "GET") {
+      return Promise.resolve(
+        Response.json({
+          chats: [
+            { id: "chat-1", kind: "direct", unreadCount: 0, lastMessagePreview: "hello", members: [{ memberId: "bob", handle: "bob", displayName: "Bob" }] },
+          ],
+        }),
+      );
+    }
+    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    return fallbackReadOrNotFound(url, method, readPosts);
+  }, "http://localhost");
+  setStoreState({
+    chats: [seedChat(0)],
+    selectedChatId: "chat-1",
+    chatMessages: [{ id: "m1", senderName: "Bob", senderHandle: "bob", isNpc: false, isOwn: false, timestamp: "now", content: "hello", reactions: [] }],
+    toasts: [],
+    errorMessage: null,
+  });
+  expect(await sendChatMessage("chat-1", "sent but invisible")).toBe(true);
+  const s = getStoreSnapshot();
+  expect(s.chatMessages.map((m) => m.content)).toEqual(["hello"]);
+  expect(s.toasts.map((t) => t.message)).toEqual(["Message sent, but the thread failed to refresh."]);
+  expect(s.errorMessage).toBe("Message sent, but the thread failed to refresh.");
+});
