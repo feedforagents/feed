@@ -23,6 +23,7 @@ import {
 import { HelpIcon } from "../icons.tsx";
 import { FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+import { toPredictionStatus } from "./markets-status.ts";
 import type { AppWorldStatus } from "../types.ts";
 
 function WorldClockHud({ status }: { readonly status: AppWorldStatus | null }) {
@@ -98,22 +99,6 @@ type ActiveTerminalMarket =
   | { readonly kind: "perp"; readonly data: TerminalPerpMarket }
   | { readonly kind: "prediction"; readonly data: TerminalPredictionMarket };
 
-function toDashboardPredictionStatus(raw: string): PredictionMarketRow["status"] {
-  const lower = raw.toLowerCase();
-  if (lower === "resolved") return "resolved";
-  if (lower === "cancelled") return "cancelled";
-  if (lower === "expired" || lower === "awaiting_proof" || lower === "manual_hold") return "expired";
-  return "active";
-}
-
-function toTerminalPredictionStatus(raw: string): TerminalPredictionMarket["status"] {
-  const lower = raw.toLowerCase();
-  if (lower === "resolved") return "resolved";
-  if (lower === "cancelled") return "cancelled";
-  if (lower === "expired" || lower === "awaiting_proof" || lower === "manual_hold") return "expired";
-  return "active";
-}
-
 function toTerminalOutcome(raw?: "YES" | "NO" | "CANCELLED"): "yes" | "no" | null {
   if (raw === "YES") return "yes";
   if (raw === "NO") return "no";
@@ -174,7 +159,7 @@ function buildTerminalMarket(
       endsAtLabel: selectedPrediction.card.closesIn ?? selectedPrediction.card.timeframe,
       feeBps: 10,
       maxOddsMoveBps: 2000,
-      status: toTerminalPredictionStatus(selectedPrediction.status),
+      status: toPredictionStatus(selectedPrediction.status),
       resolvedOutcome: toTerminalOutcome(selectedPrediction.card.resolvedOutcome),
       ...(selectedPrediction.resolutionProof
         ? { resolutionCriteria: selectedPrediction.resolutionProof }
@@ -261,7 +246,7 @@ export function MarketsScreen() {
     liquidityPts: m.liquidityCents / 100,
     endsAtLabel: m.card.closesIn ?? m.card.timeframe,
     ...(m.expiresAtMs > 0 ? { endsAtMs: m.expiresAtMs } : {}),
-    status: toDashboardPredictionStatus(m.status),
+    status: toPredictionStatus(m.status),
     resolvedOutcome: toTerminalOutcome(m.card.resolvedOutcome),
     isFavorite: favorites.has(`prediction:${m.card.id}`),
   }));

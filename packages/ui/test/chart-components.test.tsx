@@ -1,38 +1,16 @@
 // @vitest-environment happy-dom
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { PerpPriceChart } from "../src/components/PerpPriceChart.tsx";
 import { PredictionProbabilityChart } from "../src/components/PredictionProbabilityChart.tsx";
-
-const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
-environment.IS_REACT_ACT_ENVIRONMENT = true;
+import { reactRootHarness } from "./react-root.ts";
 
 const HOUR = 3600_000;
 
-let container: HTMLDivElement | null = null;
-let root: Root | null = null;
-
-beforeEach(() => {
-  container = document.createElement("div");
-  document.body.appendChild(container);
-  root = createRoot(container);
-});
-
-afterEach(() => {
-  act(() => {
-    root?.unmount();
-  });
-  container?.remove();
-  container = null;
-  root = null;
-});
+const harness = reactRootHarness();
 
 function renderText(node: React.ReactElement): string {
-  act(() => {
-    root?.render(node);
-  });
-  return container?.textContent ?? "";
+  harness.render(node);
+  return harness.container?.textContent ?? "";
 }
 
 it("an empty probability history shows dashes, not an invented 50/50 split", () => {
@@ -60,7 +38,7 @@ it("a quiet market's server-shaped history still shows its real latest odds unde
   );
   expect(text).toContain("YES 60.0%");
   expect(text).toContain("NO 40.0%");
-  expect(container?.querySelector("[aria-label='Prediction probability chart: YES 60.0%, NO 40.0%']")).not.toBeNull();
+  expect(harness.container?.querySelector("[aria-label='Prediction probability chart: YES 60.0%, NO 40.0%']")).not.toBeNull();
 });
 
 it("an empty perp history says the market has no history yet, with no range claim", () => {
