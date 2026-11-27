@@ -262,6 +262,14 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
   if (getStoreSnapshot().route === "PostDetail" && parsed.route !== "PostDetail") {
     closeThread();
   }
+  const followList = getStoreSnapshot();
+  if (
+    followList.followListKind !== null
+    && (parsed.route !== "Profile"
+      || (parsed.profileHandle ?? "").toLowerCase() !== (followList.followListHandle ?? "").toLowerCase())
+  ) {
+    closeFollowList();
+  }
   const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
   setStoreState({
     route: parsed.route,
