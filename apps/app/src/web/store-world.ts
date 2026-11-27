@@ -346,6 +346,12 @@ function filterAuthorOutOfFeeds(handle: string): void {
   const thread = cur.activeThread;
   setStoreState({
     ...cleanedPostLists(cur, cleanList, cleanProfileList),
+    explore: {
+      ...cur.explore,
+      posts: cleanList(cur.explore.posts),
+      accounts: cur.explore.accounts.filter((a) => !isBlockedHandle(a.handle)),
+      actors: cur.explore.actors.filter((a) => !isBlockedHandle(a.username)),
+    },
     activeThread: thread
       ? isBlockedHandle(thread.post.card.authorHandle)
         ? null
