@@ -546,9 +546,8 @@ function installMockNetwork(
         items: [],
         predictionPositions: [],
         perpPositions:
-          callNo === 1
-            ? []
-            : [
+          options.holdClosedPositionsFirst && callNo !== 1
+            ? [
                 {
                   id: "closed-perp-2",
                   ticker: "BTC",
@@ -557,7 +556,8 @@ function installMockNetwork(
                   realizedPnlCents: 22200,
                   closedAt: Date.now(),
                 },
-              ],
+              ]
+            : [],
       };
       if (options.holdClosedPositionsFirst && callNo === 1) {
         return new Promise<Response>((resolve) => {
@@ -774,6 +774,14 @@ async function mountApp(options?: Parameters<typeof installMockNetwork>[0]) {
 async function mountAppAtHome(options?: Parameters<typeof installMockNetwork>[0]) {
   const network = await mountApp(options);
   await act(() => storeActions.navigate("/"));
+  return network;
+}
+
+async function mountSignedInApp(options?: Parameters<typeof installMockNetwork>[0]) {
+  const network = await mountApp(options);
+  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
+  await act(() => userEvent.click(signInBtn));
+  await signInAsReviewer();
   return network;
 }
 
@@ -1084,11 +1092,7 @@ it('Stale leaderboard is dropped after switching filters (spec/markets/economy.m
 });
 
 it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
-  const network = await mountApp({ holdPnlRange: "1D" });
-
-  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
-  await act(() => userEvent.click(signInBtn));
-  await signInAsReviewer();
+  const network = await mountSignedInApp({ holdPnlRange: "1D" });
 
   act(() => {
     void storeActions.loadPnlHistory("1D");
@@ -1109,11 +1113,7 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
 });
 
 it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
-  const network = await mountApp({ holdClosedPositionsFirst: true });
-
-  const signInBtn = page.getByRole("button", { name: "Sign in" }).first();
-  await act(() => userEvent.click(signInBtn));
-  await signInAsReviewer();
+  const network = await mountSignedInApp({ holdClosedPositionsFirst: true });
 
   act(() => {
     void storeActions.loadClosedPositions();
