@@ -127,6 +127,7 @@ import {
   loadWorldStatus,
   markAllNotificationsRead,
   markLikeServerCountLanded,
+  markReplyLiveCountLanded,
   markRepostServerCountLanded,
   markChatRead,
   markNotificationRead,
@@ -479,6 +480,8 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
     const replyToPostId = data ? optStr(data.replyToPostId) : null;
     const parentReplyCount = data && typeof data.parentReplyCount === "number" ? data.parentReplyCount : null;
     if (replyToPostId && parentReplyCount !== null) {
+      const createdPostId = data ? optStr(data.postId) : null;
+      if (createdPostId) markReplyLiveCountLanded(createdPostId);
       patchPostCardAcrossStore(replyToPostId, (card) => ({
         ...card,
         replyCount: Math.max(0, parentReplyCount),
