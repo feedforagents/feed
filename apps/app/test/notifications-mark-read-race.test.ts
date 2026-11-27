@@ -3,29 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { clearNotifications, loadNotifications, markAllNotificationsRead, markNotificationRead } from "../src/web/store-world.ts";
 import { decodeNotifications } from "../src/web/types.ts";
-
-type Deferred = { resolve: (value: Response) => void };
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function installDeferredFetch() {
-  const pending = new Map<string, Deferred>();
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const path = new URL(raw, "https://feed.fun").pathname;
-    const method = init?.method ?? "GET";
-    return new Promise<Response>((resolve) => {
-      pending.set(`${method} ${path}`, { resolve });
-    });
-  };
-  vi.stubGlobal("fetch", fetchMock);
-  return pending;
-}
+import { installDeferredFetch, jsonResponse } from "./deferred-fetch.ts";
 
 const viewer = {
   accountId: "acct-player-1",
@@ -57,42 +35,45 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function seedUnreadNotifications() {
+  const pending = installDeferredFetch();
+  const seeded = decodeNotifications(unreadPayload);
+  setStoreState({ viewer, notifications: seeded.items, unreadNotifications: 1 });
+  return pending;
+}
+
+function expectAllRead() {
+  expect(getStoreSnapshot().notifications[0]?.item.read).toBe(true);
+  expect(getStoreSnapshot().unreadNotifications).toBe(0);
+}
+
 describe("notifications mark-read race", () => {
   it('stale refetch must not undo mark-all-read (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-    const pending = installDeferredFetch();
-    const seeded = decodeNotifications(unreadPayload);
-    setStoreState({ viewer, notifications: seeded.items, unreadNotifications: 1 });
+    const pending = seedUnreadNotifications();
     const marking = markAllNotificationsRead();
     const loading = loadNotifications();
     pending.get("POST /api/notifications/read")?.resolve(jsonResponse({}));
     await marking;
-    expect(getStoreSnapshot().notifications[0]?.item.read).toBe(true);
-    expect(getStoreSnapshot().unreadNotifications).toBe(0);
+    expectAllRead();
     pending.get("GET /api/notifications")?.resolve(jsonResponse(unreadPayload));
     await loading;
-    expect(getStoreSnapshot().notifications[0]?.item.read).toBe(true);
-    expect(getStoreSnapshot().unreadNotifications).toBe(0);
+    expectAllRead();
   });
 
   it('stale refetch must not undo a single mark-read (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-    const pending = installDeferredFetch();
-    const seeded = decodeNotifications(unreadPayload);
-    setStoreState({ viewer, notifications: seeded.items, unreadNotifications: 1 });
+    const pending = seedUnreadNotifications();
     const marking = markNotificationRead("notif-1");
     const loading = loadNotifications();
     pending.get("POST /api/notifications/read")?.resolve(jsonResponse({ unreadCount: 0 }));
     await marking;
-    expect(getStoreSnapshot().notifications[0]?.item.read).toBe(true);
+    expectAllRead();
     pending.get("GET /api/notifications")?.resolve(jsonResponse(unreadPayload));
     await loading;
-    expect(getStoreSnapshot().notifications[0]?.item.read).toBe(true);
-    expect(getStoreSnapshot().unreadNotifications).toBe(0);
+    expectAllRead();
   });
 
   it('stale refetch must not resurrect cleared notifications (spec/social/moderation.md, "Story: In-app notifications and Social-mode presentation filtering")', async () => {
-    const pending = installDeferredFetch();
-    const seeded = decodeNotifications(unreadPayload);
-    setStoreState({ viewer, notifications: seeded.items, unreadNotifications: 1 });
+    const pending = seedUnreadNotifications();
     const clearing = clearNotifications();
     const loading = loadNotifications();
     pending.get("DELETE /api/notifications")?.resolve(jsonResponse({}));
