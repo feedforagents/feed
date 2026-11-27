@@ -1072,10 +1072,14 @@ export async function loadAdminUsers(query = ""): Promise<void> {
   setStoreState({ adminTabLoading: false, adminUsers: res.data });
 }
 
+let adminFactsRequestSeq = 0;
+
 export async function loadAdminWorldFacts(): Promise<void> {
   if (!getStoreSnapshot().viewer?.isAdmin) return;
+  const reqSeq = ++adminFactsRequestSeq;
   setStoreState({ adminTabLoading: true });
   const res = await requestJson("/api/admin/world-facts?limit=100", { parse: decodeAdminWorldFacts });
+  if (reqSeq !== adminFactsRequestSeq) return;
   if (!res.ok) {
     setStoreState({ adminTabLoading: false });
     setErrorNotice(res.message);
