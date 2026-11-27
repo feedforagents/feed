@@ -33,11 +33,15 @@ function exploreKey(q: string) {
   return `GET /api/explore?q=${q}&mode=game`;
 }
 
-async function loadAliceResults(pending: ReturnType<typeof installDeferredFetch>) {
-  const loading = loadExplore("alice");
-  pending.get(exploreKey("alice"))?.resolve(jsonResponse(explorePayload("alice-1", "alice")));
+async function loadExploreWith(pending: ReturnType<typeof installDeferredFetch>, query: string, response: Response) {
+  const loading = loadExplore(query);
+  pending.get(exploreKey(query))?.resolve(response);
   pending.get("GET /api/markets")?.resolve(jsonResponse({ predictions: [], perps: [] }));
   await loading;
+}
+
+async function loadAliceResults(pending: ReturnType<typeof installDeferredFetch>) {
+  await loadExploreWith(pending, "alice", jsonResponse(explorePayload("alice-1", "alice")));
 }
 
 afterEach(() => {
@@ -48,10 +52,7 @@ describe("explore search query change", () => {
   it('a failed new search leaves no previous-query posts or people under the new query (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     const pending = installDeferredFetch();
     await loadAliceResults(pending);
-    const searching = loadExplore("boris");
-    pending.get(exploreKey("boris"))?.resolve(errorResponse());
-    pending.get("GET /api/markets")?.resolve(jsonResponse({ predictions: [], perps: [] }));
-    await searching;
+    await loadExploreWith(pending, "boris", errorResponse());
     const s = getStoreSnapshot();
     expect(s.exploreQuery).toBe("boris");
     expect(s.explore.posts.map((p) => p.card.id)).toEqual([]);
@@ -62,10 +63,7 @@ describe("explore search query change", () => {
   it('a successful new search replaces the previous query results (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     const pending = installDeferredFetch();
     await loadAliceResults(pending);
-    const searching = loadExplore("boris");
-    pending.get(exploreKey("boris"))?.resolve(jsonResponse(explorePayload("boris-1", "boris")));
-    pending.get("GET /api/markets")?.resolve(jsonResponse({ predictions: [], perps: [] }));
-    await searching;
+    await loadExploreWith(pending, "boris", jsonResponse(explorePayload("boris-1", "boris")));
     const s = getStoreSnapshot();
     expect(s.exploreQuery).toBe("boris");
     expect(s.explore.posts.map((p) => p.card.id)).toEqual(["boris-1"]);
@@ -75,10 +73,7 @@ describe("explore search query change", () => {
   it('a failed refresh of the current query keeps its results for retry (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     const pending = installDeferredFetch();
     await loadAliceResults(pending);
-    const refreshing = loadExplore("alice");
-    pending.get(exploreKey("alice"))?.resolve(errorResponse());
-    pending.get("GET /api/markets")?.resolve(jsonResponse({ predictions: [], perps: [] }));
-    await refreshing;
+    await loadExploreWith(pending, "alice", errorResponse());
     const s = getStoreSnapshot();
     expect(s.exploreQuery).toBe("alice");
     expect(s.explore.posts.map((p) => p.card.id)).toEqual(["alice-1"]);
