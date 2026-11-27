@@ -300,8 +300,8 @@ export function computeLiquidationPriceCents(pos: PerpPosition): number {
   const maint = maintenanceMarginCents(pos.sizeCents)
   const netBuffer = pos.marginCents - pos.fundingPaidCents - maint
   const raw = pos.perpSide === "Long"
-    ? Math.floor((pos.entryPriceCents * (pos.sizeCents - netBuffer)) / pos.sizeCents)
-    : Math.floor((pos.entryPriceCents * (pos.sizeCents + netBuffer)) / pos.sizeCents)
+    ? Math.floor((pos.entryPriceCents * (pos.sizeCents - netBuffer + 1) - 1) / pos.sizeCents)
+    : Math.floor((pos.entryPriceCents * (pos.sizeCents + netBuffer - 1)) / pos.sizeCents) + 1
   return Math.max(1, raw)
 }
 

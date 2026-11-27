@@ -1825,3 +1825,56 @@ it.effect("prediction, perp, and NPC spot write helpers stamp explicit nowMs tim
     ))
   }
 })
+
+effect function setHundredCorpPrices(priceCents: number): void!StoreFailure!Store {
+  const store = try Store
+  try store.transaction(effect (tx: Tx) => {
+    try tx.query(
+      `UPDATE feed_perp_markets SET index_price_cents = ${priceCents}, mark_price_cents = ${priceCents} WHERE ticker = 'HUND'`
+    )
+  })
+}
+
+effect function sweepLiquidatedIds(): Array<string>!(MarketFailure | StoreFailure)!Store {
+  const busLayer = Layer.succeed(MarketRealtimeBus, {
+    publish: (_event: MarketPerpRealtimeEvent) => Effect.sync(() => true)
+  })
+  return try effect {
+    provide busLayer {
+      const summary = try liquidateEligiblePositions()
+      return [...summary.liquidatedPositionIds]
+    }
+  }
+}
+
+it.effect("displayed liquidation price is the exact sweep boundary", () =>
+  runWithSeededMarketDay(effect (now) => {
+    try seedHundredCorpMarket(now)
+    try createVerifiedAccount("user-liq-a", "liqalice", 500_000)
+    try createVerifiedAccount("user-liq-b", "liqbob", 500_000)
+    try createVerifiedAccount("user-liq-c", "liqcarol", 500_000)
+
+    const longA = try openPerpPosition({ ownerId: "user-liq-a", ownerKind: "user", ticker: "HUND", side: "long", collateralCents: 300, leverage: 20 })
+    const liqA = longA.position.liquidationPriceCents
+    try setHundredCorpPrices(liqA + 1)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [])
+    try setHundredCorpPrices(liqA)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [longA.position.id])
+
+    try setHundredCorpPrices(10_000)
+    const longB = try openPerpPosition({ ownerId: "user-liq-b", ownerKind: "user", ticker: "HUND", side: "long", collateralCents: 500, leverage: 20 })
+    const liqB = longB.position.liquidationPriceCents
+    try setHundredCorpPrices(liqB + 1)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [])
+    try setHundredCorpPrices(liqB)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [longB.position.id])
+
+    try setHundredCorpPrices(10_000)
+    const shortC = try openPerpPosition({ ownerId: "user-liq-c", ownerKind: "user", ticker: "HUND", side: "short", collateralCents: 500, leverage: 20 })
+    const liqC = shortC.position.liquidationPriceCents
+    try setHundredCorpPrices(liqC - 1)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [])
+    try setHundredCorpPrices(liqC)
+    assert.deepStrictEqual(try sweepLiquidatedIds(), [shortC.position.id])
+  })
+)
