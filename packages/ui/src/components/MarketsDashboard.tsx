@@ -344,6 +344,11 @@ function PredictionsMarketsTable({
   );
 }
 
+const PRED_STATUS_FILTER_LABELS: Record<"active" | "resolved", string> = {
+  active: "Active",
+  resolved: "Closed",
+};
+
 /** High-density sortable markets dashboard with search, watchlist filter, and Perps / Predictions underline tabs. */
 export function MarketsDashboard({
   perpMarkets,
@@ -502,7 +507,7 @@ export function MarketsDashboard({
                           : "text-muted-foreground hover:text-foreground",
                       )}
                     >
-                      {statusOption}
+                      {PRED_STATUS_FILTER_LABELS[statusOption]}
                     </button>
                   ))}
                 </div>

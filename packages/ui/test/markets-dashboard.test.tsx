@@ -51,7 +51,7 @@ it('an expired prediction market leaves the active list and shows an Expired bad
   expect(container()?.textContent).not.toContain("Market awaiting proof?");
   expect(container()?.textContent).not.toContain("Resolved market settled?");
 
-  clickFilter("resolved");
+  clickFilter("Closed");
 
   expect(container()?.textContent).toContain("Market awaiting proof?");
   expect(container()?.textContent).toContain("Expired");
@@ -68,4 +68,21 @@ it('expired markets alone still get the status filter, so none of them sits in t
   expect(container()?.querySelector("[aria-label='Prediction status filter']")).not.toBeNull();
   expect(container()?.textContent).toContain("Open market still trading?");
   expect(container()?.textContent).not.toContain("Market awaiting proof?");
+});
+
+it('the closed status filter is labelled Closed because it also holds cancelled and expired markets (spec/markets/prediction.md, "Story: Close on schedule, review, resolve, or cancel")', () => {
+  renderDashboard([
+    predictionRow({ id: "pred-open", question: "Open market still trading?" }),
+    predictionRow({ id: "pred-cancelled", question: "Cancelled market?", status: "cancelled" }),
+    predictionRow({ id: "pred-expired", question: "Market awaiting proof?", status: "expired", endsAtLabel: "0m" }),
+  ]);
+
+  const labels = [...(container()?.querySelectorAll("[aria-label='Prediction status filter'] button") ?? [])]
+    .map((button) => button.textContent?.trim());
+  expect(labels).toEqual(["Active", "Closed"]);
+
+  clickFilter("Closed");
+  expect(container()?.textContent).toContain("Cancelled market?");
+  expect(container()?.textContent).toContain("Market awaiting proof?");
+  expect(container()?.textContent).not.toContain("Open market still trading?");
 });
