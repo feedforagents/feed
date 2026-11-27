@@ -122,6 +122,7 @@ let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
 let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null; viewerId: string | null } | null = null;
 let exploreRequestSeq = 0;
+let exploreLoadedQuery = "";
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
 let leaderboardRequestSeq = 0;
@@ -887,7 +888,16 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
-  setStoreState({ exploreLoading: true, exploreQuery: q });
+  const loadedQuery = q.trim().toLowerCase();
+  const queryChanged = loadedQuery !== exploreLoadedQuery;
+  exploreLoadedQuery = loadedQuery;
+  setStoreState({
+    exploreLoading: true,
+    exploreQuery: q,
+    ...(queryChanged
+      ? { explore: { ...s.explore, posts: [], accounts: [], actors: [], organizations: [], tags: [] } }
+      : {}),
+  });
   const url = appendAnonymousModeParam(`/api/explore?q=${encodeURIComponent(q.trim())}`, s);
   const needMarkets = s.perps.length === 0;
   const [res, mktRes] = await Promise.all([
