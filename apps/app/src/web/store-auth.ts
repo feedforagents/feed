@@ -898,6 +898,10 @@ function clearAccountState(): void {
   setStoreState({
     viewer: null,
     feedTab: "latest",
+    feedPosts: [],
+    feedNextCursor: null,
+    feedLoadingMore: false,
+    pendingNewPostCount: 0,
     chats: [],
     selectedChatId: null,
     chatMessages: [],
