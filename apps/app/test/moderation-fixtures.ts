@@ -1,7 +1,7 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { decodePost, type AppPost } from "../src/web/types.ts";
+import { decodePost, type AppPost, type ViewerSession } from "../src/web/types.ts";
 
 export const aliceViewer = {
   accountId: "alice",
@@ -167,4 +167,12 @@ export function makeProfileBundle(
     postsNextCursor: null,
     positions: [],
   };
+}
+
+export async function setupAuthStore(handler: (path: string) => Response, viewerState: ViewerSession) {
+  stubFetchUrl((url) => Promise.resolve(handler(new URL(url, "https://feed.local").pathname)));
+  const core = await import("../src/web/store-core.ts");
+  const auth = await import("../src/web/store-auth.ts");
+  core.setStoreState({ viewer: viewerState, route: "Settings", settingsTab: "account" });
+  return { core, auth };
 }
