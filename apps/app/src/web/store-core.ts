@@ -103,6 +103,7 @@ export interface StoreState {
   readonly activeArticle: AppArticle | null;
   readonly articleLoading: boolean;
   readonly activeTrendingTag: string | null;
+  readonly exploreNewsRequest: number | null;
   readonly walletView: boolean;
   readonly settingsTab: SettingsTabId;
   readonly selectedTicker: string | null;
@@ -453,6 +454,7 @@ let currentState: StoreState = {
   activeArticle: null,
   articleLoading: false,
   activeTrendingTag: initialLocation.trendingTag,
+  exploreNewsRequest: null,
   walletView: initialLocation.walletView,
   settingsTab: initialLocation.settingsTab ?? "profile",
   selectedTicker: initialLocation.queryTicker,
