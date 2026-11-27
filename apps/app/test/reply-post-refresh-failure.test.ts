@@ -64,11 +64,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("shows a posted reply in the thread when the follow-up thread refresh fails (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", async () => {
+async function expectReplyShownOnce() {
   expect(await createPost("Fresh reply", { replyToPostId: "post-1" })).toBe(true);
   const s = getStoreSnapshot();
   expect(s.activeThread?.replies.map((r) => r.card.id)).toEqual(["reply-existing", "reply-new"]);
   expect(s.activeThread?.post.card.replyCount).toBe(2);
+}
+
+it("shows a posted reply in the thread when the follow-up thread refresh fails (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", async () => {
+  await expectReplyShownOnce();
 });
 
 it("does not double-count a posted reply whose live count already landed when the refresh fails (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", async () => {
@@ -86,16 +90,10 @@ it("does not double-count a posted reply whose live count already landed when th
       }),
     }),
   );
-  expect(await createPost("Fresh reply", { replyToPostId: "post-1" })).toBe(true);
-  const s = getStoreSnapshot();
-  expect(s.activeThread?.replies.map((r) => r.card.id)).toEqual(["reply-existing", "reply-new"]);
-  expect(s.activeThread?.post.card.replyCount).toBe(2);
+  await expectReplyShownOnce();
 });
 
 it("keeps the server thread when the follow-up refresh succeeds (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", async () => {
   threadFails = false;
-  expect(await createPost("Fresh reply", { replyToPostId: "post-1" })).toBe(true);
-  const s = getStoreSnapshot();
-  expect(s.activeThread?.replies.map((r) => r.card.id)).toEqual(["reply-existing", "reply-new"]);
-  expect(s.activeThread?.post.card.replyCount).toBe(2);
+  await expectReplyShownOnce();
 });
