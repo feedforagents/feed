@@ -111,21 +111,21 @@ it("keeps a live engagement count that landed while the like request was in flig
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(7);
 });
 
-it("shows the server count when live likes land before the like commits (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+async function expectServerCountAfterLiveLikes(ownEventCount: number | null): Promise<void> {
   const toggle = startGatedLikeWithLiveEvent(7);
+  if (ownEventCount !== null) dispatchEngagement("alice", "like", ownEventCount);
   releaseLike?.(jsonPayload({ postId: "post-1", liked: true, likeCount: 8 }));
   await toggle;
   expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(8);
+}
+
+it("shows the server count when live likes land before the like commits (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  await expectServerCountAfterLiveLikes(null);
 });
 
 it("shows the server count when live likes land before the like commits and the own event follows (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
-  const toggle = startGatedLikeWithLiveEvent(7);
-  dispatchEngagement("alice", "like", 8);
-  releaseLike?.(jsonPayload({ postId: "post-1", liked: true, likeCount: 8 }));
-  await toggle;
-  expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
-  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(8);
+  await expectServerCountAfterLiveLikes(8);
 });
 
 it("shows the server count in post detail when a live like lands before the unlike commits (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
