@@ -50,7 +50,7 @@ import {
   type SubjectKind,
   type SubjectProfile
 } from "./shared.vibe"
-import { viewerAuthorVisibilitySql } from "./visibility.vibe"
+import { viewerAuthorVisibilitySql, viewerBlockVisibilitySql } from "./visibility.vibe"
 
 export { SocialFailure, type SocialPresentationMode } from "./shared.vibe"
 
@@ -590,10 +590,15 @@ effect function hydratePostRowsTx(
   const replyParentIds = [...new Set(rows.map((r) => toText(r.reply_to_post_id)).filter((id): id is string => id !== undefined && id !== ""))]
   const parentAuthorByPostId = new Map<string, { readonly authorId: string; readonly authorKind: PostAuthorKind }>()
   if (replyParentIds.length > 0) {
-    const parentRows = try tx.query(
-      "SELECT id, author_id, author_kind FROM feed_posts WHERE id = ANY($1)",
-      [replyParentIds]
-    )
+    const parentRows = viewerId !== undefined && viewerId !== ""
+      ? try tx.query(
+          `SELECT id, author_id, author_kind FROM feed_posts WHERE id = ANY($1) AND ${viewerBlockVisibilitySql("$2", "author_id")}`,
+          [replyParentIds, viewerId]
+        )
+      : try tx.query(
+          "SELECT id, author_id, author_kind FROM feed_posts WHERE id = ANY($1)",
+          [replyParentIds]
+        )
     for (const parentRow of parentRows) {
       const pid = toText(parentRow.id)
       const aid = toText(parentRow.author_id)
