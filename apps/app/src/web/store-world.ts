@@ -83,6 +83,7 @@ export function markRepostServerCountLanded(postId: string): void {
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
 let feedLoadedTab: UiFeedTab = "latest";
+let feedTabSwitchSnapshot: { tab: UiFeedTab; posts: ReadonlyArray<AppPost>; cursor: string | null } | null = null;
 let exploreRequestSeq = 0;
 let userSearchRequestSeq = 0;
 let marketDetailsRequestSeq = 0;
@@ -321,6 +322,7 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
   if (reqSeq !== feedRequestSeq || latest.feedTab !== tab) return;
   if (res.ok) {
     feedLoadedTab = tab;
+    feedTabSwitchSnapshot = null;
     setStoreState({
       feedPosts: preserveEngagementSince(res.data.items, engagementAtStart),
       feedNextCursor: res.data.nextCursor,
@@ -333,8 +335,17 @@ export async function loadFeed(tabOverride?: UiFeedTab): Promise<void> {
     const specTab = toSpecTab(feedLoadedTab);
     sendNav({ type: "selectFeedTab", tab: specTab });
     sendApp({ type: "selectTab", tab: specTab });
-    setStoreState({ feedTab: feedLoadedTab, feedLoading: false });
+    const snapshot = feedTabSwitchSnapshot;
+    feedTabSwitchSnapshot = null;
+    setStoreState({
+      feedTab: feedLoadedTab,
+      feedLoading: false,
+      ...(snapshot && snapshot.tab === feedLoadedTab
+        ? { feedPosts: snapshot.posts, feedNextCursor: snapshot.cursor }
+        : {}),
+    });
   } else if (feedLoadedTab !== tab) {
+    feedTabSwitchSnapshot = null;
     setStoreState({ feedPosts: [], feedNextCursor: null, feedLoading: false });
   } else {
     setStoreState({ feedLoading: false });
@@ -411,6 +422,9 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
   sendNav({ type: "selectFeedTab", tab: specTab });
   sendApp({ type: "selectTab", tab: specTab });
   if (tab !== s.feedTab) {
+    if (s.feedTab === feedLoadedTab) {
+      feedTabSwitchSnapshot = { tab: s.feedTab, posts: s.feedPosts, cursor: s.feedNextCursor };
+    }
     setStoreState({ feedTab: tab, feedPosts: [], feedNextCursor: null, feedLoadingMore: false, pendingNewPostCount: 0 });
   } else {
     setStoreState({ feedTab: tab });

@@ -32,25 +32,29 @@ afterEach(() => {
 });
 
 describe("home feed tab switch and Load more", () => {
-  it('a failed tab load leaves no previous-tab posts or cursor for Load more to reuse (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  it('a failed tab load rolls back to the previous tab with its page and cursor intact (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     const pending = installDeferredFetch();
     seedLatestPage();
     const switching = selectFeedTab("top");
-    pending.get("GET /api/feed")?.resolve(errorResponse());
+    expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual([]);
+    pending.get("GET /api/feed?tab=top&mode=game")?.resolve(errorResponse());
     await switching;
     const s = getStoreSnapshot();
-    expect(s.feedTab).toBe("top");
-    expect(s.feedPosts.map((p) => p.card.id)).toEqual([]);
-    expect(s.feedNextCursor).toBeNull();
-    await loadMoreFeed();
+    expect(s.feedTab).toBe("latest");
+    expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
+    expect(s.feedNextCursor).toBe("1764201600000:latest-1");
+    const loading = loadMoreFeed();
+    pending.get("GET /api/feed?tab=latest&cursor=1764201600000%3Alatest-1&mode=game")?.resolve(errorResponse());
+    await loading;
     expect(getStoreSnapshot().feedLoadingMore).toBe(false);
+    expect(getStoreSnapshot().feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
   });
 
   it('a successful tab load replaces the list and cursor with the new tab page (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
     const pending = installDeferredFetch();
     seedLatestPage();
     const switching = selectFeedTab("top");
-    pending.get("GET /api/feed")?.resolve(jsonResponse({ items: [post("top-1")], nextCursor: "9:1764201600000:1764201600000:top-1" }));
+    pending.get("GET /api/feed?tab=top&mode=game")?.resolve(jsonResponse({ items: [post("top-1")], nextCursor: "9:1764201600000:1764201600000:top-1" }));
     await switching;
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["top-1"]);
@@ -61,7 +65,7 @@ describe("home feed tab switch and Load more", () => {
     const pending = installDeferredFetch();
     seedLatestPage();
     const loading = loadMoreFeed();
-    pending.get("GET /api/feed")?.resolve(errorResponse());
+    pending.get("GET /api/feed?tab=latest&cursor=1764201600000%3Alatest-1&mode=game")?.resolve(errorResponse());
     await loading;
     const s = getStoreSnapshot();
     expect(s.feedPosts.map((p) => p.card.id)).toEqual(["latest-1"]);
