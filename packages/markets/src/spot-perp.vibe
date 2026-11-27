@@ -1458,6 +1458,12 @@ effect function saveIdempotentPerpReceipt(
   )
 }
 
+effect function assertPerpOrderMode(mode: PerpOrderMode | undefined, action: PerpOrderMode): void!MarketFailure {
+  if (mode !== undefined && mode !== action) {
+    throw marketFail("ORDER_MODE_MISMATCH", `Perp order mode '${mode}' does not match the account's position on this ticker: the order would ${action}`)
+  }
+}
+
 export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(MarketFailure | StoreFailure)!Store {
   const sizeCents = try validatePerpOrderInput(input)
   const viaClientName = normalizeViaClient(input.viaClientName)
@@ -1492,6 +1498,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
     )
     let receipt: OpenPerpReceipt
     if (existingRows.length === 0) {
+      try assertPerpOrderMode(input.mode, "open")
       try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, true)
       receipt = try insertFreshPerpPositionTx(tx, {
         ownerId: input.ownerId,
@@ -1514,6 +1521,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
       const existing = toSpecPerpPosition(existingRow)
       const existingSide: PerpSide = existing.perpSide === "Short" ? "short" : "long"
       if (existingSide === input.side) {
+        try assertPerpOrderMode(input.mode, "add")
         try assertUserPerpExposureAndPositionCap(tx, input.ownerId, input.ownerKind, sizeCents, false)
         receipt = try addToPerpPositionTx(tx, {
           existingRow,
@@ -1551,6 +1559,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
           now
         })
       } else if (sizeCents <= existing.sizeCents) {
+        try assertPerpOrderMode(input.mode, "reduce")
         const settled = try settlePerpCloseSliceTx(tx, {
           posRow: existingRow,
           market,
@@ -1580,6 +1589,7 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
           createdAt: now
         }
       } else {
+        try assertPerpOrderMode(input.mode, "flip")
         const flipSizeCents = sizeCents - existing.sizeCents
         if (flipSizeCents < MIN_ORDER_SIZE_CENTS) {
           throw marketFail("ORDER_TOO_SMALL", `Flipped position size must be at least ${MIN_ORDER_SIZE_CENTS} cents`)
