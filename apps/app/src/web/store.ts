@@ -268,6 +268,18 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
     closeThread();
   }
   const enteringTerminal = Boolean(parsed.marketId || parsed.queryTicker);
+  const currentSelection = getStoreSnapshot();
+  const nextMarketKind = parsed.marketKind ?? (parsed.queryTicker ? ("perp" as const) : null);
+  const nextMarketId = parsed.marketId ?? parsed.queryTicker;
+  const sameMarketSelection =
+    nextMarketKind !== null &&
+    nextMarketId !== null &&
+    currentSelection.selectedMarketKind === nextMarketKind &&
+    (nextMarketKind === "perp"
+      ? currentSelection.selectedMarketId?.toUpperCase() === nextMarketId.toUpperCase()
+      : currentSelection.selectedMarketId === nextMarketId);
+  const clearsTradeError =
+    parsed.route === "Markets" && (!enteringTerminal || !sameMarketSelection);
   setStoreState({
     route: parsed.route,
     profileHandle: parsed.profileHandle,
@@ -283,6 +295,7 @@ function applyParsedLocation(parsed: ReturnType<typeof parseLocation>): void {
       ? {
           marketsViewMode: enteringTerminal ? ("terminal" as const) : ("dashboard" as const),
           perpPreview: null,
+          ...(clearsTradeError ? { tradeError: null } : {}),
         }
       : {}),
     ...(parsed.marketKind && parsed.marketId
