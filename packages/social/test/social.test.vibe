@@ -46,6 +46,7 @@ import {
   personalizePostDeletedEvent,
   reactToMessage,
   realtimeBusLayer,
+  realtimeEventForViewer,
   removeGroupMember,
   renameGroupChat,
   reportTarget,
@@ -915,6 +916,20 @@ it.effect(
       anonymousViewer: try canDeliverRealtimeEventToViewer(store, userPerpEvent("carol"), null),
       brokenStore: try canDeliverRealtimeEventToViewer(brokenStore, userPerpEvent("carol"), "bob")
     }
+    // spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium"
+    const aggregateFrame = { type: "world.tick", kind: "market", refId: "NVDAI", createdAt: try Clock.currentTimeMillis }
+    const perpFrames = {
+      viewerBlocksTrader: try realtimeEventForViewer(store, userPerpEvent("carol"), "alice"),
+      traderBlocksViewer: try realtimeEventForViewer(store, { type: "market.perp", action: "close", actorId: "alice", ticker: "NVDAI", side: "short", sizeCents: 1, leverage: 20, positionId: "pos-alice" }, "carol"),
+      viewerMutesTrader: try realtimeEventForViewer(store, userPerpEvent("bob"), "alice"),
+      unrelatedGameViewer: try realtimeEventForViewer(store, userPerpEvent("carol"), "bob"),
+      socialModeViewer: try realtimeEventForViewer(store, userPerpEvent("carol"), "dave"),
+      socialModeOwnTrade: try realtimeEventForViewer(store, userPerpEvent("dave"), "dave"),
+      anonymousViewer: try realtimeEventForViewer(store, userPerpEvent("carol"), null),
+      brokenStore: try realtimeEventForViewer(brokenStore, userPerpEvent("carol"), "alice"),
+      otherEventKept: try realtimeEventForViewer(store, inviteEvent, "alice"),
+      otherEventDropped: try realtimeEventForViewer(store, inviteEvent, "bob")
+    }
 
     try check(() => assert.deepStrictEqual({
       rateKeys: [
@@ -973,7 +988,8 @@ it.effect(
         sseFailClosedBrokenStoreChat,
         sseFailClosedMissingStoreChat
       ],
-      perpStream
+      perpStream,
+      perpFrames
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -1025,6 +1041,18 @@ it.effect(
         socialModeOwnTrade: false,
         anonymousViewer: true,
         brokenStore: false
+      },
+      perpFrames: {
+        viewerBlocksTrader: aggregateFrame,
+        traderBlocksViewer: aggregateFrame,
+        viewerMutesTrader: userPerpEvent("bob"),
+        unrelatedGameViewer: userPerpEvent("carol"),
+        socialModeViewer: undefined,
+        socialModeOwnTrade: undefined,
+        anonymousViewer: userPerpEvent("carol"),
+        brokenStore: undefined,
+        otherEventKept: inviteEvent,
+        otherEventDropped: undefined
       }
     }))
   })
