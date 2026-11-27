@@ -1183,6 +1183,14 @@ function resolveMode(session: SessionIdentity | null, url: URL): SocialPresentat
   return url.searchParams.get("mode") === "social" ? "social" : "game"
 }
 
+// spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+function canViewTraderActivity(
+  profile: { readonly kind: string; readonly viewerBlockedBy: boolean; readonly viewerBlocks: boolean },
+  mode: SocialPresentationMode
+): boolean {
+  return (profile.kind === "user" || profile.kind === "npc") && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
+}
+
 effect function handlePostEngagement(
   request: Request,
   postId: string,
@@ -1527,8 +1535,7 @@ effect function handleSocialPostsAndUsers(
     const mode = resolveMode(session, url)
     const handle = decodeSegment(userTradesMatch[1] ?? "")
     const profile = try getProfile(handle, session?.accountId, mode)
-    const canViewTrades = (profile.kind === "user" || profile.kind === "npc") && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
-    const trades = canViewTrades
+    const trades = canViewTraderActivity(profile, mode)
       ? try listUserTrades({ handleOrId: profile.id, limit: clampIntQuery(url, "limit", 50, 1, 200) })
       : []
     return jsonResponse({ trades })
@@ -1579,8 +1586,7 @@ effect function handleSocialPostsAndUsers(
     const handle = decodeSegment(userMatch[1] ?? "")
     const profile = try getProfile(handle, session?.accountId, mode)
     const feed = try listFeedPosts(profileFeedQuery(profile.id, session?.accountId, mode, url))
-    const canViewPositions = (profile.kind === "user" || profile.kind === "npc") && mode === "game" && !profile.viewerBlockedBy && !profile.viewerBlocks
-    const positions = canViewPositions
+    const positions = canViewTraderActivity(profile, mode)
       ? try getUserPositions(profile.id)
       : { accountId: profile.id, predictionPositions: [], perpPositions: [] }
     return jsonResponse({ profile, posts: feed.items, nextCursor: feed.nextCursor, positions })
@@ -1811,17 +1817,23 @@ function formatPriceHistoryResponse(view: {
   return jsonResponse({ range: view.range, points, history: points })
 }
 
+// spec/app/navigation.md, "Surface visibility and delayed visitor banner derivation"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 effect function respondAssetTrades(
   marketKind: "prediction" | "perp",
   marketRef: string,
-  url: URL
-): Response!(MarketFailure | StoreFailure)!Store {
+  request: Request,
+  url: URL,
+  config: AppServerConfig
+): Response!(AuthFailure | MarketFailure | StoreFailure)!Store {
+  const session = try optionalSession(request, config)
   const trades = try listAssetTrades({
     marketKind,
     marketRef,
+    viewerId: session?.accountId,
     limit: clampIntQuery(url, "limit", 50, 1, 200)
   })
-  return jsonResponse({ trades: trades.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
+  const visible = resolveMode(session, url) === "game" ? trades : []
+  return jsonResponse({ trades: visible.map((t) => ({ ...t, traderDisplayName: t.traderName })) })
 }
 
 function readHistoryQuery(url: URL) {
@@ -1878,7 +1890,7 @@ effect function handlePredictionMarketRoute(
   }
   const predTradesMatch = /^\/api\/markets\/predictions?\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && predTradesMatch !== null) {
-    return try respondAssetTrades("prediction", decodeSegment(predTradesMatch[1] ?? ""), url)
+    return try respondAssetTrades("prediction", decodeSegment(predTradesMatch[1] ?? ""), request, url, config)
   }
   const predPreviewMatch = /^\/api\/markets\/predictions?\/([^/]+)\/preview$/.exec(path)
   if (method === "POST" && predPreviewMatch !== null) {
@@ -2128,7 +2140,7 @@ effect function handleMarketRoute(
   }
   const perpTradesMatch = /^\/api\/markets\/perp\/([^/]+)\/trades$/.exec(path)
   if (method === "GET" && perpTradesMatch !== null) {
-    return try respondAssetTrades("perp", decodeSegment(perpTradesMatch[1] ?? ""), url)
+    return try respondAssetTrades("perp", decodeSegment(perpTradesMatch[1] ?? ""), request, url, config)
   }
   const perpDetailMatch = /^\/api\/markets\/perp\/([^/]+)$/.exec(path)
   if (method === "GET" && perpDetailMatch !== null) {

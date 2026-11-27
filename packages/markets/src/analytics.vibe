@@ -446,12 +446,19 @@ const TRADE_TRADER_JOINS = `FROM feed_trades t
          LEFT JOIN feed_accounts fa ON t.trader_kind = 'user' AND fa.account_id = t.trader_id
          LEFT JOIN feed_actors ac ON t.trader_kind = 'npc' AND ac.id = t.trader_id`
 
+// spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
+const TRADE_VIEWER_BLOCK_FILTER = `($3::text IS NULL OR NOT EXISTS (
+           SELECT 1 FROM feed_blocks b
+           WHERE (b.blocker_id = $3 AND b.blocked_id = t.trader_id) OR (b.blocker_id = t.trader_id AND b.blocked_id = $3)))`
+
 export effect function listAssetTrades(input: {
   readonly marketKind: "perp" | "prediction"
   readonly marketRef: string
+  readonly viewerId?: string
   readonly limit?: number
 }): ReadonlyArray<AssetTradeView>!(MarketFailure | StoreFailure)!Store {
   const safeLimit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
+  const viewerId = input.viewerId ?? null
   const store = try Store
   return try store.transaction(effect (tx: Tx) => {
     if (input.marketKind === "perp") {
@@ -464,10 +471,10 @@ export effect function listAssetTrades(input: {
          ${TRADE_TRADER_JOINS}
          LEFT JOIN feed_spot_pools sp ON sp.ticker = t.market_ref
          LEFT JOIN feed_organizations o ON o.id = sp.organization_id
-         WHERE t.market_kind IN ('perp', 'spot') AND t.market_ref = $1
+         WHERE t.market_kind IN ('perp', 'spot') AND t.market_ref = $1 AND ${TRADE_VIEWER_BLOCK_FILTER}
          ORDER BY t.created_at DESC, t.id DESC
          LIMIT $2`,
-        [input.marketRef, safeLimit]
+        [input.marketRef, safeLimit, viewerId]
       )
       return rows.map(mapTradeRow)
     }
@@ -479,10 +486,10 @@ export effect function listAssetTrades(input: {
       `SELECT ${TRADE_TRADER_SELECT}, pm.question AS market_title
        ${TRADE_TRADER_JOINS}
        LEFT JOIN feed_prediction_markets pm ON pm.id = t.market_ref
-       WHERE t.market_kind = 'prediction' AND t.market_ref = $1
+       WHERE t.market_kind = 'prediction' AND t.market_ref = $1 AND ${TRADE_VIEWER_BLOCK_FILTER}
        ORDER BY t.created_at DESC, t.id DESC
        LIMIT $2`,
-      [input.marketRef, safeLimit]
+      [input.marketRef, safeLimit, viewerId]
     )
     return rows.map(mapTradeRow)
   })
