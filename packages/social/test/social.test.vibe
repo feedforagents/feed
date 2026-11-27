@@ -193,6 +193,14 @@ it.effect(
     const reposted = try repostPost("bob", root.id)
     const unreposted = try unrepostPost("bob", root.id)
     const rereposted = try repostPost("bob", root.id)
+    try followAccount("bob", "alice")
+    try unfollowAccount("bob", "alice")
+    try followAccount("bob", "alice")
+    const bobToggleKinds = effect () => (try listNotifications("alice", 50, "game"))
+      .filter((n) => n.actorId === "bob" && (n.kind === "like" || n.kind === "repost" || n.kind === "follow"))
+      .map((n) => n.kind)
+      .sort()
+    const toggleNotifs = try bobToggleKinds()
 
     const gameFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "game", limit: 50 })
     const socialFeed = try listFeedPosts({ tab: "latest", viewerId: "alice", mode: "social", limit: 50 })
@@ -241,8 +249,14 @@ it.effect(
     const releasedGame = try getArticle("proof-article-1", "game")
     const releasedSocial = try getArticle("proof-article-1", "social")
 
+    try TestClock.adjust(Duration.minutes(5))
+    try unlikePost("bob", root.id)
+    try likePost("bob", root.id)
+    const toggleNotifsLater = try bobToggleKinds()
+
     try check(() => assert.deepStrictEqual({
       rejections: [emptyCode, overLimitCode, spoofedGrantCode, nonAuthorDeleteCode, deletedLookupCode, unreleasedGetCode],
+      toggleNotifs: [toggleNotifs, toggleNotifsLater],
       rootLength: root.content.length,
       threadCounts: [threadBeforeDelete.post.replyCount, threadBeforeDelete.replies.map((r) => r.id), replyThread.parentPost?.id, threadAfterDelete.post.replyCount, threadAfterDelete.replies.length],
       engagement: [liked.likeCount, unliked.likeCount, reliked.liked, reposted.repostCount, unreposted.repostCount, rereposted.reposted],
@@ -307,6 +321,7 @@ it.effect(
       ]
     }, {
       rejections: ["InvalidInput", "InvalidInput", "Forbidden", "Forbidden", "NotFound", "NotFound"],
+      toggleNotifs: [["follow", "like", "repost"], ["follow", "like", "like", "repost"]],
       rootLength: 280,
       threadCounts: [2, [reply.id, carolReply.id], root.id, 1, 1],
       engagement: [1, 0, true, 1, 0, true],
