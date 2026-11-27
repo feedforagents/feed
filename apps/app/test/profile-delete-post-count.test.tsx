@@ -23,6 +23,18 @@ function signInAsAlice(): void {
   });
 }
 
+function fetchPath(input: RequestInfo | URL): string {
+  return input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+}
+
+function deletePostResponse(postId: string, replyToPostId: string | null = null, parentReplyCount: number | null = null): Promise<Response> {
+  return Promise.resolve(Response.json({ postId, deleted: true, replyToPostId, parentReplyCount }));
+}
+
+function isDeletePost(input: RequestInfo | URL, init: RequestInit | undefined, postId: string): boolean {
+  return fetchPath(input).includes(`/api/posts/${postId}`) && (init?.method ?? "GET") === "DELETE";
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   setStoreState({
@@ -37,11 +49,8 @@ afterEach(() => {
 
 it('Deleting an own post from the profile drops the header post count with the list (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
-    const method = init?.method ?? "GET";
-    if (url.includes("/api/posts/alice-post-1") && method === "DELETE") {
-      return Promise.resolve(Response.json({ postId: "alice-post-1", deleted: true, replyToPostId: null, parentReplyCount: null }));
-    }
+    const url = fetchPath(input);
+    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
     if (url.startsWith("/api/users/alice")) {
       return Promise.resolve(Response.json(profileRaw(2, [firstRaw, secondRaw])));
     }
@@ -157,11 +166,7 @@ it('Deleting an own post turns its quote embeds unavailable in the same lists (s
   expect(decodedQuoting.card.quotePost?.content).toBe("Alice first call");
 
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
-    const method = init?.method ?? "GET";
-    if (url.includes("/api/posts/alice-post-1") && method === "DELETE") {
-      return Promise.resolve(Response.json({ postId: "alice-post-1", deleted: true, replyToPostId: null, parentReplyCount: null }));
-    }
+    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
 
