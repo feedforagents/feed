@@ -127,6 +127,7 @@ import {
   loadWorldStatus,
   markAllNotificationsRead,
   markLikeServerCountLanded,
+  markRepostServerCountLanded,
   markChatRead,
   markNotificationRead,
   openMarketsDashboard,
@@ -453,6 +454,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
       const likeCount = typeof data.likeCount === "number" ? data.likeCount : undefined;
       const repostCount = typeof data.repostCount === "number" ? data.repostCount : undefined;
       if (likeCount !== undefined) markLikeServerCountLanded(postId);
+      if (repostCount !== undefined) markRepostServerCountLanded(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         ...(likeCount !== undefined ? { likeCount } : {}),

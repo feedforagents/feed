@@ -71,9 +71,14 @@ import {
 const likeInFlight = new Set<string>();
 const likeServerCountLanded = new Set<string>();
 const repostInFlight = new Set<string>();
+const repostServerCountLanded = new Set<string>();
 
 export function markLikeServerCountLanded(postId: string): void {
   if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
+}
+
+export function markRepostServerCountLanded(postId: string): void {
+  if (repostInFlight.has(postId)) repostServerCountLanded.add(postId);
 }
 const followInFlight = new Set<string>();
 let feedRequestSeq = 0;
@@ -158,6 +163,7 @@ function preserveEngagementSince(
     const now = engagementOf(current.card);
     if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
       if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
+      if (repostInFlight.has(post.card.id)) markRepostServerCountLanded(post.card.id);
       return post;
     }
     return { ...post, card: { ...post.card, ...now } };
@@ -609,6 +615,7 @@ export async function repostPost(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "repost", postId, label: currentlyReposted ? "remove repost" : "repost this post" })) return;
   if (repostInFlight.has(postId)) return;
   repostInFlight.add(postId);
+  repostServerCountLanded.delete(postId);
   const prevCount = existing?.card.repostCount ?? 0;
   const optimisticReposted = !currentlyReposted;
   const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
@@ -623,10 +630,11 @@ export async function repostPost(postId: string): Promise<void> {
       parse: passThrough,
     });
     if (!res.ok) {
+      const serverCountLanded = repostServerCountLanded.has(postId);
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         reposted: currentlyReposted,
-        repostCount: prevCount,
+        ...(serverCountLanded ? {} : { repostCount: prevCount }),
       }));
       setErrorNotice(res.message);
       return;
@@ -641,6 +649,7 @@ export async function repostPost(postId: string): Promise<void> {
     }));
   } finally {
     repostInFlight.delete(postId);
+    repostServerCountLanded.delete(postId);
   }
 }
 
