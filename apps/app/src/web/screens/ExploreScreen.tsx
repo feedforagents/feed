@@ -385,7 +385,7 @@ function ExploreBrowseScreen({ mode, browseTab, setBrowseTab }: {
             }
           }}
         >
-          <TabsList variant="underline" className="border-b-0">
+          <TabsList variant="underline" className="border-b-0 max-sm:[&>[role=tab]]:px-2">
             <TabsTrigger value={hasSearch ? "top" : "trending"}>{hasSearch ? "Top" : "Trending"}</TabsTrigger>
             <TabsTrigger value={hasSearch ? "latest" : "news"}>{hasSearch ? "Latest" : "News"}</TabsTrigger>
             <TabsTrigger value="people">People</TabsTrigger>
