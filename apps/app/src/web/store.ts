@@ -127,6 +127,7 @@ import {
   loadTrendingTag,
   loadWorldStatus,
   markAllNotificationsRead,
+  markLikeOwnEngagementLanded,
   markLikeServerCountLanded,
   markRepostServerCountLanded,
   markChatRead,
@@ -485,6 +486,10 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
       const repostCount = typeof data.repostCount === "number" ? data.repostCount : undefined;
       if (likeCount !== undefined) markLikeServerCountLanded(postId);
       if (repostCount !== undefined) markRepostServerCountLanded(postId);
+      const engagementKind = optStr(data.kind);
+      if (engagementKind && optStr(data.accountId) === s.viewer?.accountId) {
+        markLikeOwnEngagementLanded(postId, engagementKind);
+      }
       patchPostCardAcrossStore(postId, (card) => ({
         ...card,
         ...(likeCount !== undefined ? { likeCount } : {}),

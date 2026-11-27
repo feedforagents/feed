@@ -72,11 +72,17 @@ import {
 
 const likeInFlight = new Set<string>();
 const likeServerCountLanded = new Set<string>();
+const likeOwnEngagementLanded = new Set<string>();
+const likeInFlightKind = new Map<string, "like" | "unlike">();
 const repostInFlight = new Set<string>();
 const repostServerCountLanded = new Set<string>();
 
 export function markLikeServerCountLanded(postId: string): void {
   if (likeInFlight.has(postId)) likeServerCountLanded.add(postId);
+}
+
+export function markLikeOwnEngagementLanded(postId: string, kind: string): void {
+  if (likeInFlightKind.get(postId) === kind) likeOwnEngagementLanded.add(postId);
 }
 
 export function markRepostServerCountLanded(postId: string): void {
@@ -674,7 +680,9 @@ export async function toggleLike(postId: string): Promise<void> {
   if (!requireAuthOrQueue({ kind: "like", postId, currentlyLiked, label: "like this post" })) return;
   if (likeInFlight.has(postId)) return;
   likeInFlight.add(postId);
+  likeInFlightKind.set(postId, currentlyLiked ? "unlike" : "like");
   likeServerCountLanded.delete(postId);
+  likeOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
   const optimisticLiked = !currentlyLiked;
   const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
@@ -701,14 +709,17 @@ export async function toggleLike(postId: string): Promise<void> {
     const rec = isRecord(res.data) ? res.data : {};
     const serverLiked = typeof rec.liked === "boolean" ? rec.liked : optimisticLiked;
     const serverCount = typeof rec.likeCount === "number" ? rec.likeCount : optimisticCount;
+    const ownEngagementLanded = likeOwnEngagementLanded.has(postId);
     patchPostCardAcrossStore(postId, (card) => ({
       ...card,
       liked: serverLiked,
-      likeCount: Math.max(0, card.likeCount + (serverCount - optimisticCount)),
+      ...(ownEngagementLanded ? {} : { likeCount: Math.max(0, serverCount) }),
     }));
   } finally {
     likeInFlight.delete(postId);
+    likeInFlightKind.delete(postId);
     likeServerCountLanded.delete(postId);
+    likeOwnEngagementLanded.delete(postId);
   }
 }
 
