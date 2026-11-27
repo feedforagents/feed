@@ -6,6 +6,7 @@ import {
   UnauthorizedError,
   checkAndConsumeRateLimit,
   exchangeOAuthToken,
+  fetchClientMetadata,
   getRateLimitStatus,
   recordAgentAttribution,
   setPlayMode,
@@ -161,7 +162,7 @@ error InvalidRpcParamsFailure {
 
 export { MCP_TOOL_DEFINITIONS, type McpToolDefinition, type McpToolName, type McpScope }
 
-const DEFAULT_DEVICE_CLIENT_ID = "https://feed.fun/clients/mcp-device"
+const DEFAULT_DEVICE_CLIENT_ID = "feed-mcp-device"
 const DEFAULT_DEVICE_CLIENT_NAME = "Feed MCP Agent"
 
 effect function maybePublishFeedEvent(event: FeedRealtimeEvent): void!! {
@@ -624,8 +625,13 @@ effect function executePublicWorldTool(
       return guideSectionForTopic(topic, baseOrigin)
     }
     case "start_sign_in": {
-      const clientId = asOptionalString(args.clientId) ?? DEFAULT_DEVICE_CLIENT_ID
-      const clientName = asOptionalString(args.clientName) ?? DEFAULT_DEVICE_CLIENT_NAME
+      let clientId = asOptionalString(args.clientId) ?? DEFAULT_DEVICE_CLIENT_ID
+      let clientName = asOptionalString(args.clientName) ?? DEFAULT_DEVICE_CLIENT_NAME
+      if (/^https?:\/\//i.test(clientId)) {
+        const cimd = try fetchClientMetadata(clientId)
+        clientId = cimd.clientId
+        clientName = cimd.clientName
+      }
       const rawScopes = Array.isArray(args.scopes) ? (args.scopes as ReadonlyArray<string>) : undefined
       const scopeString = rawScopes !== undefined && rawScopes.length > 0 ? rawScopes.join(" ") : undefined
       const device = try startDeviceAuthorization({
