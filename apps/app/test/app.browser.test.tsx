@@ -1380,6 +1380,17 @@ it('Stale PnL history is dropped after switching ranges (spec/markets/economy.md
   expect(getStoreSnapshot().pnlTimeRange).toBe("1W");
   expect(getStoreSnapshot().pnlHistory.at(-1)?.value).toBe(222);
   expect(getStoreSnapshot().pnlHistoryLoading).toBe(false);
+
+  act(() => {
+    void storeActions.loadPnlHistory("1D");
+  });
+  await act(() => Promise.resolve());
+  await act(() => storeActions.logout());
+  network.releasePnl("1D");
+  await act(() => Promise.resolve());
+  await act(() => Promise.resolve());
+  const { pnlTimeRange, pnlHistory, pnlHistoryLoading } = getStoreSnapshot();
+  expect({ pnlTimeRange, pnlHistory, pnlHistoryLoading }).toEqual({ pnlTimeRange: "ALL", pnlHistory: [], pnlHistoryLoading: false });
 });
 
 it('Stale closed positions are dropped after a newer refresh (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {

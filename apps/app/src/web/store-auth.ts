@@ -24,6 +24,7 @@ import {
 } from "./store-core.ts";
 import {
   createPost,
+  invalidatePnlHistoryLoads,
   loadArticle,
   loadChats,
   loadClosedPositions,
@@ -844,6 +845,7 @@ async function performSignOut({
   sendOnboarding({ type: "signOutOnboarding" });
   sendApp({ type: "signOutApp" });
   pushBrowserRoute("Home");
+  invalidatePnlHistoryLoads();
   setStoreState({
     viewer: null,
     route: "Home",
@@ -859,6 +861,9 @@ async function performSignOut({
     closedPositions: [],
     economy: null,
     ledger: [],
+    pnlTimeRange: "ALL",
+    pnlHistory: [],
+    pnlHistoryLoading: false,
     perpPreview: null,
     leaderboardCurrentUser: null,
     blockedAccounts: [],

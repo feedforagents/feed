@@ -893,6 +893,10 @@ export async function loadWorldStatus(): Promise<void> {
   }
 }
 
+export function invalidatePnlHistoryLoads(): void {
+  pnlHistoryRequestSeq += 1;
+}
+
 export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer) return;
