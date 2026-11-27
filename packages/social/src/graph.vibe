@@ -392,7 +392,7 @@ export effect function getProfile(
     }
     let tradeCount: number | null = null
     let openPositionCount: number | null = null
-    if (effectiveMode === "game" && (target.kind === "user" || target.kind === "npc")) {
+    if (effectiveMode === "game" && (target.kind === "user" || target.kind === "npc") && !viewerBlocks && !viewerBlockedBy) {
       tradeCount = safeInt((try tx.query("SELECT count(*) AS count FROM feed_trades WHERE trader_id = $1", [target.id]))[0]?.count, 0)
       const openPerps = safeInt((try tx.query("SELECT count(*) AS count FROM feed_perp_positions WHERE holder_id = $1 AND status = 'open'", [target.id]))[0]?.count, 0)
       const openPreds = safeInt((try tx.query("SELECT count(*) AS count FROM feed_prediction_positions WHERE holder_id = $1 AND settled_at IS NULL AND shares > 0", [target.id]))[0]?.count, 0)
