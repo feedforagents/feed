@@ -1781,6 +1781,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   setStoreState({ profileRepliesLoading: false });
+  setErrorNotice(res.message);
 }
 
 function isProfileHandleCurrent(handle: string): boolean {
@@ -1821,6 +1822,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   setStoreState({ profileLikesLoading: false });
+  setErrorNotice(res.message);
 }
 
 let profileTradesLoadCount = 0;
@@ -1844,6 +1846,7 @@ export async function loadProfileTrades(handleOrSelf?: string | null): Promise<v
     return;
   }
   setStoreState({ profileTradesLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadMoreProfilePosts(): Promise<void> {
