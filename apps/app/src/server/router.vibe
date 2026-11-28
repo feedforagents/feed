@@ -1903,6 +1903,9 @@ effect function handlePredictionMarketRoute(
     const rawShares = numField(data, "shareUnits", "share_units", "shares")
     const rawAmount = numField(data, "amountCents", "amount_cents") ?? (numField(data, "amountPts") !== undefined ? Math.round((numField(data, "amountPts") ?? 0) * 100) : undefined)
     const isSell = rawAction === "sell" || (rawAction !== "buy" && rawShares !== undefined && rawAmount === undefined)
+    if (rawAction !== "buy" && rawAction !== "sell" && rawShares !== undefined && rawAmount !== undefined) {
+    return try badRequest("conflicting_amount", "Provide only one of shares/amountCents, or an explicit action.")
+    }
     if (isSell) {
       const preview = try previewPredictionSell({
         marketId,
