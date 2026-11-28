@@ -11,20 +11,24 @@ const newestReply = decodedPost(postRaw({ id: "reply-newest", replyToPostId: "po
 
 let failThread = false;
 
+function threadResponse(replies: Record<string, unknown>[]): Response {
+  return jsonPayload({
+    post: postRaw({ id: "post-1" }),
+    parentPost: null,
+    ancestors: [],
+    replies,
+  });
+}
+
 beforeEach(() => {
   failThread = false;
   stubFetchUrl((url) => {
     if (url.includes("/api/posts/post-1?")) {
       if (failThread) return Promise.resolve(jsonPayload({ message: "Thread failed" }, 500));
-      return Promise.resolve(jsonPayload({
-        post: postRaw({ id: "post-1" }),
-        parentPost: null,
-        ancestors: [],
-        replies: [
-          postRaw({ id: "reply-newest", replyToPostId: "post-1", likeCount: 0 }),
-          postRaw({ id: "reply-popular", replyToPostId: "post-1", likeCount: 9 }),
-        ],
-      }));
+      return Promise.resolve(threadResponse([
+        postRaw({ id: "reply-newest", replyToPostId: "post-1", likeCount: 0 }),
+        postRaw({ id: "reply-popular", replyToPostId: "post-1", likeCount: 9 }),
+      ]));
     }
     return Promise.resolve(jsonPayload({}));
   });
@@ -77,15 +81,10 @@ it("keeps the displayed reply sort when a second sort switch fails while the fir
     if (url.includes("sort=newest")) return newestGate;
     if (url.includes("sort=oldest")) return Promise.resolve(jsonPayload({ message: "Thread failed" }, 500));
     if (url.includes("/api/posts/post-1?")) {
-      return Promise.resolve(jsonPayload({
-        post: postRaw({ id: "post-1" }),
-        parentPost: null,
-        ancestors: [],
-        replies: [
-          postRaw({ id: "reply-popular", replyToPostId: "post-1", likeCount: 9 }),
-          postRaw({ id: "reply-newest", replyToPostId: "post-1", likeCount: 0 }),
-        ],
-      }));
+      return Promise.resolve(threadResponse([
+        postRaw({ id: "reply-popular", replyToPostId: "post-1", likeCount: 9 }),
+        postRaw({ id: "reply-newest", replyToPostId: "post-1", likeCount: 0 }),
+      ]));
     }
     return Promise.resolve(jsonPayload({}));
   });
@@ -93,15 +92,10 @@ it("keeps the displayed reply sort when a second sort switch fails while the fir
   const firstSwitch = openThread("post-1", "newest");
   await openThread("post-1", "oldest");
   expectPopularThreadFailure();
-  releaseNewest(jsonPayload({
-    post: postRaw({ id: "post-1" }),
-    parentPost: null,
-    ancestors: [],
-    replies: [
-      postRaw({ id: "reply-newest", replyToPostId: "post-1", likeCount: 0 }),
-      postRaw({ id: "reply-popular", replyToPostId: "post-1", likeCount: 9 }),
-    ],
-  }));
+  releaseNewest(threadResponse([
+    postRaw({ id: "reply-newest", replyToPostId: "post-1", likeCount: 0 }),
+    postRaw({ id: "reply-popular", replyToPostId: "post-1", likeCount: 9 }),
+  ]));
   await firstSwitch;
   expectPopularThreadFailure();
 });
