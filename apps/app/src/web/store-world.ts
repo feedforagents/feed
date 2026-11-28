@@ -918,6 +918,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const loadedQuery = q.trim().toLowerCase();
   const queryChanged = loadedQuery !== exploreLoadedQuery;
   exploreLoadedQuery = loadedQuery;
@@ -956,7 +957,15 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     const cur = getStoreSnapshot();
     const isBrowse = q.trim() === "";
     setStoreState({
-      explore: { ...res.data, posts: dropPostsDeletedSince(preserveEngagementSince(res.data.posts, engagementAtStart), deletionsAtStart) },
+      explore: {
+        ...res.data,
+        posts: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(res.data.posts, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
+        accounts: res.data.accounts.filter((a) => !wasAuthorHiddenSince(a.handle, hidesAtStart)),
+        actors: res.data.actors.filter((a) => !wasAuthorHiddenSince(a.username, hidesAtStart)),
+      },
       ...(isBrowse && res.data.trending.length > 0 ? { rightRailTrending: res.data.trending } : {}),
       ...(isBrowse && res.data.articles.length > 0 ? { rightRailArticles: res.data.articles } : {}),
       exploreLoading: false,
@@ -978,6 +987,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag, exploreLoading: true });
   const url = appendAnonymousModeParam(`/api/trending/${encodeURIComponent(cleanTag)}`, s);
   const res = await requestJson(url, {
@@ -990,7 +1000,10 @@ export async function loadTrendingTag(tag: string): Promise<void> {
     setStoreState({
       explore: {
         ...cur.explore,
-        posts: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+        posts: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
         accounts: [],
         actors: [],
         organizations: [],
