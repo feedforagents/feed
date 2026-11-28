@@ -1083,9 +1083,14 @@ export async function searchAccounts(query: string): Promise<{
   return res.data;
 }
 
+let positionsSilentSeq = 0;
+
 export async function loadPositionsSilent(): Promise<void> {
   if (!getStoreSnapshot().viewer) return;
+  const seq = ++positionsSilentSeq;
+  const marketsLoadsAtStart = marketsLoadsStarted;
   const res = await requestJson("/api/markets", { parse: passThrough });
+  if (seq !== positionsSilentSeq || marketsLoadsAtStart !== marketsLoadsStarted) return;
   if (!res.ok || !isRecord(res.data)) return;
   const rawPreds = arr(res.data.predictions ?? res.data.predictionMarkets);
   const rawPerps = arr(res.data.perps ?? res.data.perpMarkets);
@@ -1352,8 +1357,10 @@ type MarketsLoadOutcome = {
 };
 
 let latestMarketsLoad: Promise<MarketsLoadOutcome> | undefined;
+let marketsLoadsStarted = 0;
 
 function startMarketsLoad(): Promise<MarketsLoadOutcome> {
+  marketsLoadsStarted += 1;
   const load: Promise<MarketsLoadOutcome> = requestJson("/api/markets", { parse: passThrough }).then(
     (response) => {
       if (latestMarketsLoad !== load) return { ok: false, superseded: true };
