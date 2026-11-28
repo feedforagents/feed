@@ -72,6 +72,10 @@ export const onboardingRuntime = ManagedRuntime.make(onboardingLayer);
 
 export type UiFeedTab = "latest" | "following" | "top";
 
+export type ExploreBrowseTab = "trending" | "news" | "people" | "orgs" | "markets";
+
+export type ExploreSearchTab = "top" | "latest" | "people" | "orgs" | "markets";
+
 export type ThreadReplySort = "popular" | "newest" | "oldest";
 
 export interface PostedReplyClear {
@@ -112,6 +116,8 @@ export interface StoreState {
   readonly articleLoading: boolean;
   readonly activeTrendingTag: string | null;
   readonly exploreNewsRequest: number | null;
+  readonly exploreBrowseTab: ExploreBrowseTab;
+  readonly exploreSearchTab: ExploreSearchTab;
   readonly walletView: boolean;
   readonly settingsTab: SettingsTabId;
   readonly selectedTicker: string | null;
@@ -463,6 +469,8 @@ let currentState: StoreState = {
   articleLoading: false,
   activeTrendingTag: initialLocation.trendingTag,
   exploreNewsRequest: null,
+  exploreBrowseTab: "trending",
+  exploreSearchTab: "top",
   walletView: initialLocation.walletView,
   settingsTab: initialLocation.settingsTab ?? "profile",
   selectedTicker: initialLocation.queryTicker,

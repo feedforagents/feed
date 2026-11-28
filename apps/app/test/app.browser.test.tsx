@@ -988,9 +988,12 @@ it('Latest News See all opens the full News list (spec/app/navigation.md, "Story
   await expect.element(main.getByRole("heading", { name: "Top Stories", exact: true })).toBeInTheDocument();
   await act(() => userEvent.click(home));
   const latestNews = page.getByRole("region", { name: "Latest news" });
-  await act(() => userEvent.click(latestNews.getByRole("button", { name: "See all", exact: true })));
-  await expect.element(news).toHaveAttribute("aria-selected", "true");
-  await expect.element(olderArticle).toBeInTheDocument();
+  const seeAllNews = async () => {
+    await act(() => userEvent.click(latestNews.getByRole("button", { name: "See all", exact: true })));
+    await expect.element(news).toHaveAttribute("aria-selected", "true");
+    await expect.element(olderArticle).toBeInTheDocument();
+  };
+  await seeAllNews();
 
   await act(() => userEvent.click(olderArticle));
   await expect.element(main.getByRole("heading", { name: older.title, exact: true })).toBeInTheDocument();
@@ -1002,6 +1005,8 @@ it('Latest News See all opens the full News list (spec/app/navigation.md, "Story
   await act(() => userEvent.click(explore));
   await expect.element(main.getByRole("tab", { name: "Trending", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect.element(olderArticle).not.toBeInTheDocument();
+
+  await seeAllNews();
 });
 
 it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {
@@ -1227,6 +1232,30 @@ it('Back from a searched article keeps the selected search tab (spec/app/navigat
 
   await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
   await expect.element(people).toHaveAttribute("aria-selected", "true");
+});
+
+it('Back from a searched post keeps the selected search tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork();
+  explorePosts = [SAMPLE_POSTS[0]];
+  await renderApp();
+  const main = page.getByRole("main");
+  await act(() => storeActions.navigate("/explore"));
+
+  await act(() => userEvent.fill(main.getByLabelText("Search Feed"), "orbital"));
+  await act(() => userEvent.click(main.getByRole("button", { name: "Search", exact: true })));
+
+  const latest = main.getByRole("tab", { name: "Latest", exact: true });
+  await act(() => userEvent.click(latest));
+  await expect.element(latest).toHaveAttribute("aria-selected", "true");
+  await expect.element(main.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByText(SAMPLE_POSTS[0].content)));
+  await expect.element(main.getByRole("button", { name: "Back", exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe(`/post/${SAMPLE_POSTS[0].id}`);
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(latest).toHaveAttribute("aria-selected", "true");
+  await expect.element(main.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
 });
 
 it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
