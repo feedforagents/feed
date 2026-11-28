@@ -242,9 +242,8 @@ export default {
         return env.ASSETS.fetch(request)
       }
       return workerJsonError(404, "not_found", "Route not found.")
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Database unavailable."
-      return workerJsonError(503, "service_unavailable", message)
+    } catch (_err) {
+      return workerJsonError(503, "service_unavailable", "Database unavailable.")
     }
   },
 
