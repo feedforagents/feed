@@ -460,59 +460,64 @@ export effect function generateCompletion(request: CompletionRequest): Completio
   const resolvedSystem = resolveSystemPrompt(request)
   const maxTokens = Math.max(32, Math.min(2000, request.maxTokens ?? 256))
   const estimatedMicros = request.estimatedMicros ?? Math.max(10_000, Math.ceil((resolvedSystem.length + request.user.length) / 4 + maxTokens) * 20)
-  const reservation = try reserveLlmBudget({
-    estimatedMicros,
-    provider: config.provider,
-    model: config.model,
-    nowMs,
+  return try Effect.uninterruptibleMask((restore) => effect {
+    const reservation = try reserveLlmBudget({
+      estimatedMicros,
+      provider: config.provider,
+      model: config.model,
+      nowMs,
+    })
+    if (config.provider === "offline-fallback") {
+      if (request.allowOfflineFallback === false) {
+        try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+        throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "No live LLM provider configured and offline fallback is disabled." })
+      }
+      const fallbackText = buildDeterministicFallback(request)
+      try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+      return {
+        text: fallbackText,
+        provider: "offline-fallback",
+        model: config.model,
+        attemptId: reservation.attemptId,
+        usedFallback: true,
+        actualMicros: 0,
+        throttleLevel: reservation.throttleLevel,
+      }
+    }
+    const live = Effect.onInterrupt(
+      restore(sendChatCompletionHttp(config, request, resolvedSystem)),
+      () => Effect.ignore(markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })),
+    ) catch effect (err) => {
+      if (requestWasNeverSent(err)) {
+        try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
+      } else {
+        try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
+      }
+      if (request.allowOfflineFallback !== false) {
+        return null
+      }
+      throw err
+    }
+    if (live === null) {
+      return {
+        text: buildDeterministicFallback(request),
+        provider: "offline-fallback",
+        model: config.model,
+        attemptId: reservation.attemptId,
+        usedFallback: true,
+        actualMicros: 0,
+        throttleLevel: reservation.throttleLevel,
+      }
+    }
+    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: live.actualMicros, nowMs })
+    return {
+      text: live.content,
+      provider: config.provider,
+      model: config.model,
+      attemptId: reservation.attemptId,
+      usedFallback: false,
+      actualMicros: live.actualMicros,
+      throttleLevel: reservation.throttleLevel,
+    }
   })
-  if (config.provider === "offline-fallback") {
-    if (request.allowOfflineFallback === false) {
-      try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
-      throw new EngineFailure({ code: "LLM_UNAVAILABLE", message: "No live LLM provider configured and offline fallback is disabled." })
-    }
-    const fallbackText = buildDeterministicFallback(request)
-    try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
-    return {
-      text: fallbackText,
-      provider: "offline-fallback",
-      model: config.model,
-      attemptId: reservation.attemptId,
-      usedFallback: true,
-      actualMicros: 0,
-      throttleLevel: reservation.throttleLevel,
-    }
-  }
-  const live = sendChatCompletionHttp(config, request, resolvedSystem) catch effect (err) => {
-    if (requestWasNeverSent(err)) {
-      try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: 0, nowMs })
-    } else {
-      try markLlmSpendUncertain({ attemptId: reservation.attemptId, nowMs })
-    }
-    if (request.allowOfflineFallback !== false) {
-      return null
-    }
-    throw err
-  }
-  if (live === null) {
-    return {
-      text: buildDeterministicFallback(request),
-      provider: "offline-fallback",
-      model: config.model,
-      attemptId: reservation.attemptId,
-      usedFallback: true,
-      actualMicros: 0,
-      throttleLevel: reservation.throttleLevel,
-    }
-  }
-  try confirmLlmSpend({ attemptId: reservation.attemptId, actualMicros: live.actualMicros, nowMs })
-  return {
-    text: live.content,
-    provider: config.provider,
-    model: config.model,
-    attemptId: reservation.attemptId,
-    usedFallback: false,
-    actualMicros: live.actualMicros,
-    throttleLevel: reservation.throttleLevel,
-  }
 }
