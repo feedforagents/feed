@@ -436,7 +436,8 @@ export effect function insertMarketNotification(tx: Tx, input: MarketNotificatio
   try tx.query(
     `INSERT INTO feed_notifications
        (id, account_id, kind, actor_id, post_id, market_id, title, body, is_game_only, read_at, created_at)
-     VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, true, NULL, $7)
+     SELECT $1::text, $2::text, $3::text, NULL, NULL, $4::text, $5::text, $6::text, true, NULL, $7::bigint
+     WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.key = $2::text AND a.status <> 'active')
      ON CONFLICT (id) DO NOTHING`,
     [input.id, input.accountId, input.kind, input.marketId, input.title, input.body, input.createdAt]
   )
