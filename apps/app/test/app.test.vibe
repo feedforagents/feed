@@ -1538,3 +1538,54 @@ it.effect('REST perp idempotency: same Idempotency-Key replays the open/close re
     ))
   }
 }, 180_000)
+
+it.effect('REST trade routes reject conflicting duplicate unit aliases, matching aliases still succeed (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/prediction.md, "Story: Open and trade a prediction market")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+
+    const alice = try onboardPhonePlayer("+14155550157", "alias_alice")
+
+    const buyConflictRes = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      json: { side: "yes", amountCents: 1000, amountPts: 50 }
+    })
+    const buyConflictBody = try readJson(buyConflictRes)
+    const buyAgreeRes = try callApp("/api/markets/prediction/seed-market-1/buy", {
+      cookie: alice.cookie,
+      json: { side: "yes", amountCents: 5000, amountPts: 50 }
+    })
+    const sellConflictRes = try callApp("/api/markets/prediction/seed-market-1/sell", {
+      cookie: alice.cookie,
+      json: { side: "yes", shareUnits: 100, shares: 5 }
+    })
+    const sellConflictBody = try readJson(sellConflictRes)
+    const perpConflictRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: alice.cookie,
+      json: { side: "long", collateralCents: 1000, collateralPts: 50, leverage: 2 }
+    })
+    const perpConflictBody = try readJson(perpConflictRes)
+    const perpAgreeRes = try callApp("/api/markets/perp/XTRPC/open", {
+      cookie: alice.cookie,
+      json: { side: "long", collateralCents: 1000, collateralPts: 10, leverage: 2 }
+    })
+    const perpAgreeBody = try readJson(perpAgreeRes)
+
+    try check(() => assert.deepStrictEqual(
+      {
+        buyConflict: [buyConflictRes.status, buyConflictBody.code],
+        buyAgree: buyAgreeRes.status,
+        sellConflict: [sellConflictRes.status, sellConflictBody.code],
+        perpConflict: [perpConflictRes.status, perpConflictBody.code],
+        perpAgree: [perpAgreeRes.status, perpAgreeBody.action]
+      },
+      {
+        buyConflict: [400, "conflicting_amount"],
+        buyAgree: 200,
+        sellConflict: [400, "conflicting_amount"],
+        perpConflict: [400, "conflicting_amount"],
+        perpAgree: [201, "open"]
+      }
+    ))
+  }
+}, 180_000)
