@@ -1802,6 +1802,14 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
   return true;
 }
 
+function chatRecordFromResponse(data: unknown): Record<string, unknown> {
+  return isRecord(data) ? (isRecord(data.chat) ? data.chat : data) : {};
+}
+
+function decodeResponseChat(data: unknown, viewerId: string) {
+  return decodeChats([chatRecordFromResponse(data)], viewerId)[0] ?? null;
+}
+
 export async function createGroupChat(title: string, memberHandles: ReadonlyArray<string>): Promise<boolean> {
   if (!getStoreSnapshot().viewer) return false;
   const res = await requestJson("/api/chats/group", {
@@ -1912,7 +1920,8 @@ export async function removeGroupMember(chatId: string, targetHandleOrId: string
 }
 
 export async function transferGroupOwnership(chatId: string, newOwnerHandleOrId: string): Promise<boolean> {
-  if (!getStoreSnapshot().viewer) return false;
+  const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
+  if (!viewerId) return false;
   const cleaned = newOwnerHandleOrId.trim().replace(/^@/, "");
   if (!cleaned) return false;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}/transfer`, {
@@ -1924,8 +1933,17 @@ export async function transferGroupOwnership(chatId: string, newOwnerHandleOrId:
     setErrorNotice(res.message);
     return false;
   }
+  const transferred = decodeResponseChat(res.data, viewerId);
   setStatusNotice(`Transferred group ownership to @${cleaned}.`);
   await loadChats(false, chatId);
+  if (transferred && transferred.id === chatId && getStoreSnapshot().viewer?.accountId === viewerId) {
+    const current = getStoreSnapshot().chats.find((c) => c.id === chatId);
+    if (current && current.isOwner) {
+      setStoreState({
+        chats: getStoreSnapshot().chats.map((c) => (c.id === chatId ? transferred : c)),
+      });
+    }
+  }
   return true;
 }
 
