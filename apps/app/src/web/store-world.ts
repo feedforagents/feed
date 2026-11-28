@@ -1663,6 +1663,11 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
     ...(selectedId !== s.selectedChatId ? { chatMessages: [] } : {}),
     alphaInvites: invitesRes.ok ? invitesRes.data : s.alphaInvites,
   });
+  if (!chatsRes.ok) {
+    setErrorNotice(chatsRes.message);
+  } else if (!invitesRes.ok) {
+    setErrorNotice(invitesRes.message);
+  }
   if (loadMessages && selectedId) {
     await loadChatMessages(selectedId);
   }

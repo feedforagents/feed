@@ -3,7 +3,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { loadChatMessages, selectChat, sendChatMessage } from "../src/web/store-world.ts";
+import { loadChatMessages, loadChats, selectChat, sendChatMessage } from "../src/web/store-world.ts";
 import { decodeNotifications, type AppChatSummary } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
@@ -449,4 +449,81 @@ it("keeps chat-message notifications unread when the room read request fails (sp
   const s = getStoreSnapshot();
   expect(s.notifications.every((n) => !n.item.read)).toBe(true);
   expect(s.unreadNotifications).toBe(3);
+});
+
+function stubChatsListLoad(chats: () => Response, invites: () => Response): void {
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats" && method === "GET") return Promise.resolve(chats());
+    if (url.pathname === "/api/chats/invites" && method === "GET") return Promise.resolve(invites());
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
+      return Promise.resolve(Response.json({ messages: [] }));
+    }
+    return fallbackReadOrNotFound(url, method, readPosts);
+  }, "http://localhost");
+  setStoreState({
+    chats: [],
+    selectedChatId: null,
+    chatMessages: [],
+    alphaInvites: [],
+    toasts: [],
+    errorMessage: null,
+  });
+}
+
+it("surfaces a failed chat list load when Chats is opened instead of showing an empty inbox (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  stubChatsListLoad(
+    () => Response.json({ message: "Chats exploded" }, { status: 500 }),
+    () => Response.json({ invites: [] }),
+  );
+  await loadChats();
+  const s = getStoreSnapshot();
+  expect(s.chats).toEqual([]);
+  expect(s.chatsLoading).toBe(false);
+  expect(s.toasts.map((t) => t.message)).toEqual(["Chats exploded"]);
+  expect(s.errorMessage).toBe("Chats exploded");
+});
+
+it("surfaces a failed group invite load when Chats is opened instead of silently hiding invites (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  stubChatsListLoad(
+    () => Response.json({
+      chats: [
+        {
+          id: "chat-1",
+          kind: "direct",
+          unreadCount: 0,
+          lastMessagePreview: "hello",
+          members: [{ memberId: "bob", handle: "bob", displayName: "Bob" }],
+        },
+      ],
+    }),
+    () => Response.json({ message: "Invites exploded" }, { status: 500 }),
+  );
+  await loadChats();
+  const s = getStoreSnapshot();
+  expect(s.chats.map((c) => c.id)).toEqual(["chat-1"]);
+  expect(s.toasts.map((t) => t.message)).toEqual(["Invites exploded"]);
+  expect(s.errorMessage).toBe("Invites exploded");
+});
+
+it("loads the chat list without an error notice when the load succeeds (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  stubChatsListLoad(
+    () => Response.json({
+      chats: [
+        {
+          id: "chat-1",
+          kind: "direct",
+          unreadCount: 0,
+          lastMessagePreview: "hello",
+          members: [{ memberId: "bob", handle: "bob", displayName: "Bob" }],
+        },
+      ],
+    }),
+    () => Response.json({ invites: [] }),
+  );
+  await loadChats();
+  const s = getStoreSnapshot();
+  expect(s.chats.map((c) => c.id)).toEqual(["chat-1"]);
+  expect(s.toasts).toEqual([]);
+  expect(s.errorMessage).toBeNull();
 });
