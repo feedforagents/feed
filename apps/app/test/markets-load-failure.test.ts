@@ -2,41 +2,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadMarkets } from "../src/web/store-world.ts";
-import { jsonResponse } from "./deferred-fetch.ts";
+import { installFetch, marketsResponse, unexpectedResponse } from "./deferred-fetch.ts";
 
 let marketsStatus = 200;
 
 function installMarketsFetch(): void {
   marketsStatus = 200;
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, "https://feed.fun");
-    const method = init?.method ?? "GET";
-    if (method === "GET" && url.pathname === "/api/markets") {
-      if (marketsStatus !== 200) return Promise.resolve(jsonResponse({ message: "Markets unavailable" }, marketsStatus));
-      return Promise.resolve(jsonResponse({
-        predictions: [],
-        perps: [],
-        positions: {
-          predictionPositions: [
-            {
-              marketId: "pred-a",
-              side: "yes",
-              shares: 4000,
-              costBasisCents: 2500,
-              estimatedValueCents: 2500,
-              question: "Will pred-a happen?",
-              yesPriceBps: 5000,
-              noPriceBps: 5000,
-              settledAt: null,
-            },
-          ],
-        },
-      }));
-    }
-    return Promise.resolve(jsonResponse({ message: `unexpected ${method} ${url.pathname}` }, 500));
-  };
-  vi.stubGlobal("fetch", fetchMock);
+  installFetch((url, method) =>
+    method === "GET" && url.pathname === "/api/markets"
+      ? Promise.resolve(marketsResponse(marketsStatus))
+      : unexpectedResponse(url, method));
 }
 
 function seedMarkets(): void {
