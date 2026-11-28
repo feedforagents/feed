@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadClosedPositions } from "../src/web/store-world.ts";
 import { jsonResponse } from "./deferred-fetch.ts";
-import { aliceViewer } from "./moderation-fixtures.ts";
+import { aliceViewer, stubFetchUrl } from "./moderation-fixtures.ts";
 
 const closedBody = {
   predictionPositions: [
@@ -20,20 +20,15 @@ const closedBody = {
 };
 
 function installFetch(closedStatus: number) {
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, "https://feed.fun");
-    const method = init?.method ?? "GET";
-    if (method === "GET" && url.pathname === "/api/markets/positions/closed") {
-      return Promise.resolve(
-        closedStatus === 200
-          ? jsonResponse(closedBody)
-          : jsonResponse({ message: "closed positions unavailable" }, closedStatus),
-      );
-    }
-    return Promise.resolve(jsonResponse({ message: `unexpected ${method} ${url.pathname}` }, 500));
-  };
-  vi.stubGlobal("fetch", fetchMock);
+  stubFetchUrl((url) =>
+    new URL(url, "https://feed.fun").pathname === "/api/markets/positions/closed"
+      ? Promise.resolve(
+          closedStatus === 200
+            ? jsonResponse(closedBody)
+            : jsonResponse({ message: "closed positions unavailable" }, closedStatus),
+        )
+      : Promise.resolve(jsonResponse({ message: `unexpected ${url}` }, 500)),
+  );
 }
 
 function seed() {
