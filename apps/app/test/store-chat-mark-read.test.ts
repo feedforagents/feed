@@ -3,7 +3,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { loadChatMessages, selectChat, sendChatMessage, startDirectChat } from "../src/web/store-world.ts";
+import { loadChatMessages, loadChats, selectChat, sendChatMessage, startDirectChat } from "../src/web/store-world.ts";
 import { decodeNotifications, type AppChatSummary } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
@@ -489,6 +489,40 @@ it("surfaces a failed message load when a conversation is opened instead of show
   await selectChat("chat-1");
   const s = getStoreSnapshot();
   expect(s.selectedChatId).toBe("chat-1");
+  expect(s.chatMessages).toEqual([]);
+  expect(s.toasts.map((t) => t.message)).toEqual(["Failed to load messages. Please try again."]);
+  expect(s.errorMessage).toBe("Failed to load messages. Please try again.");
+});
+it("surfaces a failed message load when the chat list loads instead of showing an empty thread (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
+      return Promise.resolve(Response.json({ message: "Load exploded" }, { status: 500 }));
+    }
+    if (url.pathname === "/api/chats" && method === "GET") {
+      return Promise.resolve(
+        Response.json({
+          chats: [
+            { id: "chat-1", kind: "direct", unreadCount: 0, lastMessagePreview: "hello", members: [{ memberId: "bob", handle: "bob", displayName: "Bob" }] },
+          ],
+        }),
+      );
+    }
+    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    return fallbackReadOrNotFound(url, method, readPosts);
+  }, "http://localhost");
+  setStoreState({
+    viewer,
+    chats: [],
+    selectedChatId: null,
+    chatMessages: [],
+    toasts: [],
+    errorMessage: null,
+  });
+  await loadChats(true);
+  const s = getStoreSnapshot();
+  expect(s.selectedChatId).toBe("chat-1");
+  expect(s.chats).toHaveLength(1);
   expect(s.chatMessages).toEqual([]);
   expect(s.toasts.map((t) => t.message)).toEqual(["Failed to load messages. Please try again."]);
   expect(s.errorMessage).toBe("Failed to load messages. Please try again.");
