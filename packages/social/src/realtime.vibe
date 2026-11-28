@@ -540,9 +540,10 @@ export effect function canDeliverRealtimeEventToViewer(
     case "market.prediction":
     case "market.clue":
     case "market.resolved":
-    case "org.posted":
     case "article.published":
       return true
+    case "org.posted":
+      return viewerId === undefined ? true : try isAuthorVisibleInStore(store, viewerId, event.organizationId)
     case "market.spot":
     case "market.perp":
       return viewerId === undefined ? true : (try traderActivityDeliveryInStore(store, viewerId, event.actorId)) === "full"

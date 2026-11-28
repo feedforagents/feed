@@ -1043,6 +1043,33 @@ it.effect(
       anonymousViewer: try realtimeEventForViewer(store, npcSpotEvent, null),
       brokenStore: try realtimeEventForViewer(brokenStore, npcSpotEvent, "bob")
     }
+    // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Muting hides an author's feed content without removing follows"
+    const orgPostedEvent: FeedRealtimeEvent = { type: "org.posted", organizationId: "openagi", ticker: "OPENAGI" }
+    const orgPostCreatedEvent: FeedRealtimeEvent = {
+      type: "post.created",
+      postId: "org-live-post",
+      authorId: "openagi",
+      authorKind: "org",
+      replyToPostId: null,
+      quotePostId: null,
+      createdAt: baseNow
+    }
+    const orgFrames = effect (viewer: string | null, viewerStore: Store.Shape = store) => [
+      (try realtimeEventForViewer(viewerStore, orgPostedEvent, viewer)) !== undefined,
+      (try realtimeEventForViewer(viewerStore, orgPostCreatedEvent, viewer)) !== undefined
+    ]
+    const orgBeforeModeration = [try orgFrames("alice"), try orgFrames("bob")]
+    try blockAccount("alice", "openagi")
+    try muteAccount("bob", "openagi")
+    const orgStream = {
+      beforeModeration: orgBeforeModeration,
+      viewerBlocksOrg: try orgFrames("alice"),
+      viewerMutesOrg: try orgFrames("bob"),
+      unrelatedGameViewer: try orgFrames("carol"),
+      socialModeViewer: try orgFrames("dave"),
+      anonymousViewer: try orgFrames(null),
+      brokenStore: try orgFrames("carol", brokenStore)
+    }
 
     try check(() => assert.deepStrictEqual({
       rateKeys: [
@@ -1103,7 +1130,8 @@ it.effect(
       ],
       perpStream,
       perpFrames,
-      spotStream
+      spotStream,
+      orgStream
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -1176,6 +1204,15 @@ it.effect(
         socialModeViewer: undefined,
         anonymousViewer: npcSpotEvent,
         brokenStore: undefined
+      },
+      orgStream: {
+        beforeModeration: [[true, true], [true, true]],
+        viewerBlocksOrg: [false, false],
+        viewerMutesOrg: [false, false],
+        unrelatedGameViewer: [true, true],
+        socialModeViewer: [true, true],
+        anonymousViewer: [true, true],
+        brokenStore: [false, false]
       }
     }))
   })
