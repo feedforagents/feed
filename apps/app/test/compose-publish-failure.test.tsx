@@ -5,12 +5,12 @@ import { act } from "react";
 import type { Root } from "react-dom/client";
 import { setStoreState } from "../src/web/store-core.ts";
 import { storeActions } from "../src/web/store.ts";
-import { composerTextarea, flush, installAppTestLifecycle, installMockNetwork, makeAuthMeResponse, makeRawPost, makeViewerSession, mountApp, openComposeDialogForTest, setControlValue } from "./app-test-helpers.tsx";
+import { composerTextarea, flush, installAppTestLifecycle, installMockNetwork, makeAuthMeResponse, makeRawPost, makeViewerSession, mountApp, openComposeDialogForTest, setControlValue, stubFetchByUrl } from "./app-test-helpers.tsx";
 
 const roots: Root[] = [];
 
 installAppTestLifecycle(roots, () => {
-  setStoreState({ toasts: [], errorMessage: null, composeOpen: false, quotePostTarget: null, viewer: null, route: "Home" });
+  setStoreState({ toasts: [], errorMessage: null, composeSession: null, viewer: null, route: "Home" });
 });
 
 function installNetwork(postStatus: number): void {
@@ -27,8 +27,15 @@ function installNetwork(postStatus: number): void {
   });
 }
 
-async function mountSignedInApp(postStatus: number): Promise<void> {
+async function mountSignedInApp(postStatus: number, publishGate?: Promise<void>): Promise<void> {
   installNetwork(postStatus);
+  if (publishGate) {
+    const fetchResponse = globalThis.fetch;
+    stubFetchByUrl(async (url, init) => {
+      if (url.pathname === "/api/posts" && init?.method === "POST") await publishGate;
+      return fetchResponse(url, init);
+    });
+  }
   await mountApp(roots);
   await flush();
   setStoreState({ viewer: makeViewerSession({ accountId: "acct-player-1", displayName: "Alice Trader" }) });
@@ -76,4 +83,31 @@ it("closes the compose dialog and clears the draft when publishing succeeds", as
   expect(document.querySelector('[role="dialog"] textarea[aria-label="Post text"]')).toBeNull();
   await openCompose();
   expect(composerTextarea().value).toBe("");
+});
+
+it.each([429, 200])("keeps a reopened composer independent of an earlier publish (HTTP %i)", async (status) => {
+  const publish = Promise.withResolvers<void>();
+  await mountSignedInApp(status, publish.promise);
+  await openCompose();
+  await typeDraft("First draft");
+  await submitCompose();
+
+  const close = dialogElement().querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+  if (!close) throw new Error("Close button not found");
+  act(() => { close.click(); });
+  await flush();
+  await openCompose();
+
+  const editableWhilePending = !composerTextarea().disabled;
+  act(() => { publish.resolve(); });
+  await flush();
+
+  const reopened = document.querySelector('[role="dialog"]');
+  expect({
+    editableWhilePending,
+    draft: reopened?.querySelector("textarea")?.value,
+    warning: reopened?.querySelector('[role="alert"]')?.textContent ?? null,
+  }).toEqual({ editableWhilePending: true, draft: "First draft", warning: null });
+  await typeDraft("Second draft");
+  expect(composerTextarea().value).toBe("Second draft");
 });

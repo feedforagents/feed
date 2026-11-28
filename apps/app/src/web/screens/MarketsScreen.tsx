@@ -62,8 +62,8 @@ function TerminalSocialFeed({
     setPosting(true);
     void storeActions
       .createPost(content, kind === "perp" ? { ticker: marketRef } : { marketId: marketRef })
-      .then((ok) => {
-        if (ok) setDraft("");
+      .then((result) => {
+        if (result.kind === "published") setDraft("");
       })
       .finally(() => {
         setPosting(false);

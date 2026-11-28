@@ -706,12 +706,12 @@ export async function loadArticle(articleId: string): Promise<void> {
 export async function createPost(
   content: string,
   options?: { readonly replyToPostId?: string; readonly quotePostId?: string; readonly marketId?: string; readonly ticker?: string },
-): Promise<boolean> {
+): Promise<{ readonly kind: "published" | "queued" } | { readonly kind: "failed"; readonly message: string }> {
   const label = options?.replyToPostId ? "reply to this post" : options?.quotePostId ? "quote this post" : "publish this post";
   const pending = options?.replyToPostId
     ? { kind: "reply" as const, postId: options.replyToPostId, content, label }
     : { kind: "post" as const, content, ...(options?.quotePostId ? { quotePostId: options.quotePostId } : {}), label };
-  if (!requireAuthOrQueue(pending)) return false;
+  if (!requireAuthOrQueue(pending)) return { kind: "queued" };
   clearNotices();
   const viewerId = getStoreSnapshot().viewer?.accountId ?? null;
   const res = await requestJson("/api/posts", {
@@ -731,7 +731,7 @@ export async function createPost(
     } else {
       setErrorNotice(res.message);
     }
-    return false;
+    return { kind: "failed", message: res.message };
   }
   if (options?.replyToPostId) {
     clearReplyFailureNotice(options.replyToPostId);
@@ -787,7 +787,7 @@ export async function createPost(
   if (thread && options?.replyToPostId === thread.post.card.id) {
     await openThread(thread.post.card.id, getStoreSnapshot().threadSort);
   }
-  return true;
+  return { kind: "published" };
 }
 
 export async function deletePost(postId: string): Promise<boolean> {

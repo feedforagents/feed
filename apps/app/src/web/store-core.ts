@@ -87,6 +87,8 @@ export interface GlobalAccountActionTarget {
 
 export type EmailVerifyStatus = "idle" | "verifying" | "needs_onboarding" | "signed_in" | "linked" | "error";
 
+export type ComposeSession = { readonly quotePost: AppPost | null };
+
 export interface StoreState {
   readonly authLoaded: boolean;
   readonly viewer: ViewerSession | null;
@@ -133,8 +135,7 @@ export interface StoreState {
   readonly pendingPhoneE164: string;
   readonly pendingOnboardingToken: string;
   readonly pendingAction: PendingAction | null;
-  readonly composeOpen: boolean;
-  readonly quotePostTarget: AppPost | null;
+  readonly composeSession: ComposeSession | null;
   readonly reportTarget: GlobalReportTarget | null;
   readonly blockTarget: GlobalAccountActionTarget | null;
   readonly muteTarget: GlobalAccountActionTarget | null;
@@ -484,8 +485,7 @@ let currentState: StoreState = {
   pendingPhoneE164: "",
   pendingOnboardingToken: "",
   pendingAction: null,
-  composeOpen: false,
-  quotePostTarget: null,
+  composeSession: null,
   reportTarget: null,
   blockTarget: null,
   muteTarget: null,
@@ -743,8 +743,7 @@ export function toSpecGatedKind(action: PendingAction["kind"]) {
 const CLOSED_DIALOGS: Partial<StoreState> = {
   joinSheetOpen: false,
   followListKind: null,
-  composeOpen: false,
-  quotePostTarget: null,
+  composeSession: null,
   reportTarget: null,
   blockTarget: null,
   muteTarget: null,
@@ -830,11 +829,11 @@ export function buildHostActionNote(hostId: AgentHostId): string {
 
 export function openComposeDialog(quotePost: AppPost | null = null): void {
   if (!ensureViewerForDialog()) return;
-  setStoreState({ ...CLOSED_DIALOGS, composeOpen: true, quotePostTarget: quotePost });
+  setStoreState({ ...CLOSED_DIALOGS, composeSession: { quotePost } });
 }
 
 export function closeComposeDialog(): void {
-  setStoreState({ composeOpen: false, quotePostTarget: null });
+  setStoreState({ composeSession: null });
 }
 
 export function openReportDialog(target: GlobalReportTarget): void {

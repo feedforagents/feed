@@ -40,9 +40,9 @@ export function HomeScreen({ mode }: HomeScreenProps) {
 
   const handlePublish = async (text: string) => {
     setComposerBusy(true);
-    const ok = await storeActions.createPost(text);
+    const result = await storeActions.createPost(text);
     setComposerBusy(false);
-    if (ok) {
+    if (result.kind === "published") {
       setComposerText("");
     }
   };
