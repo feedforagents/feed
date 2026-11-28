@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { closeThread, loadFeed, loadMoreFeed, openThread, toggleLike } from "../src/web/store-world.ts";
+import { closeThread, loadFeed, loadMoreFeed, openThread, repostPost, toggleLike } from "../src/web/store-world.ts";
 import { eventSources, installStubEventSource } from "./app-test-helpers.tsx";
 import { decodedPost, jsonPayload, postRaw, resetWorldFeedStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
@@ -12,12 +12,14 @@ const basePost = decodedPost(postRaw({ id: "post-1", likeCount: 5, likedByViewer
 let releaseFeed: ((response: Response) => void) | null = null;
 let releaseThread: ((response: Response) => void) | null = null;
 let releaseLike: ((response: Response) => void) | null = null;
+let releaseRepost: ((response: Response) => void) | null = null;
 let gateLike = false;
 
 beforeEach(() => {
   releaseFeed = null;
   releaseThread = null;
   releaseLike = null;
+  releaseRepost = null;
   gateLike = false;
   eventSources.length = 0;
   installStubEventSource(eventSources);
@@ -25,6 +27,9 @@ beforeEach(() => {
     if (url.includes("/api/posts/post-1/like")) {
       if (gateLike) return new Promise<Response>((resolve) => { releaseLike = resolve; });
       return Promise.resolve(jsonPayload({ postId: "post-1", liked: true, likeCount: 6 }));
+    }
+    if (url.includes("/api/posts/post-1/repost")) {
+      return new Promise<Response>((resolve) => { releaseRepost = resolve; });
     }
     if (url.includes("/api/posts/post-1?")) {
       return new Promise<Response>((resolve) => { releaseThread = resolve; });
@@ -169,22 +174,30 @@ it("restores the pre-click count when the like fails with no live engagement in 
   expect(getStoreSnapshot().errorMessage).toBe("Like failed");
 });
 
-function releaseStaleThread(): void {
+function releaseThreadPost(overrides: Record<string, unknown>): void {
   releaseThread?.(jsonPayload({
-    post: postRaw({ id: "post-1", likeCount: 5, likedByViewer: false }),
+    post: postRaw({ id: "post-1", ...overrides }),
     parentPost: null,
     ancestors: [],
     replies: [],
   }));
 }
 
-function startDetailLikeThenLeave(feedNextCursor: string | null = null): Promise<void> {
+function releaseStaleThread(): void {
+  releaseThreadPost({ likeCount: 5, likedByViewer: false });
+}
+
+function openDetailPost(post: typeof basePost, feedNextCursor: string | null = null): void {
   resetWorldFeedStore({ feedPosts: [], feedNextCursor });
   setStoreState({
     route: "PostDetail",
     activePostId: "post-1",
-    activeThread: { post: basePost, parentPost: null, ancestors: [], replies: [] },
+    activeThread: { post, parentPost: null, ancestors: [], replies: [] },
   });
+}
+
+function startDetailLikeThenLeave(feedNextCursor: string | null = null): Promise<void> {
+  openDetailPost(basePost, feedNextCursor);
   gateLike = true;
   const toggle = toggleLike("post-1");
   expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(true);
@@ -225,4 +238,66 @@ it("restores the pre-click like state when a like fails while the post is out of
   expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(false);
   expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(5);
   expect(getStoreSnapshot().errorMessage).toBe("Like failed");
+});
+
+it("keeps the snapshot like count when a like fails while the post is out of the store and other likes landed meanwhile (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const toggle = startDetailLikeThenLeave();
+  const reopen = openThread("post-1");
+  releaseLike?.(jsonPayload({ message: "Like failed" }, 500));
+  await toggle;
+  releaseThreadPost({ likeCount: 8, likedByViewer: false });
+  await reopen;
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(8);
+  expect(getStoreSnapshot().errorMessage).toBe("Like failed");
+});
+
+it("keeps the snapshot repost count when a repost fails while the post is out of the store and other reposts landed meanwhile (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  openDetailPost(decodedPost(postRaw({ id: "post-1", likeCount: 5, repostCount: 2 })));
+  const toggle = repostPost("post-1");
+  expect(getStoreSnapshot().activeThread?.post.card.reposted).toBe(true);
+  expect(getStoreSnapshot().activeThread?.post.card.repostCount).toBe(3);
+  closeThread();
+  const reopen = openThread("post-1");
+  releaseRepost?.(jsonPayload({ message: "Repost failed" }, 500));
+  await toggle;
+  releaseThreadPost({ likeCount: 5, repostCount: 4, repostedByViewer: false });
+  await reopen;
+  expect(getStoreSnapshot().activeThread?.post.card.reposted).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.repostCount).toBe(4);
+  expect(getStoreSnapshot().errorMessage).toBe("Repost failed");
+});
+
+it("lets a newer snapshot own like state win when a live count arrives for a post that is out of the store (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  openDetailPost(basePost);
+  reconnectRealtime();
+  await toggleLike("post-1");
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(true);
+  closeThread();
+  const reopen = openThread("post-1");
+  dispatchEngagement("bob", "like", 6);
+  releaseThreadPost({ likeCount: 5, likedByViewer: false });
+  await reopen;
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(6);
+});
+
+it("lets a newer snapshot own repost state win when a live count arrives for a post that is out of the store (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  openDetailPost(decodedPost(postRaw({ id: "post-1", likeCount: 5, repostCount: 2 })));
+  reconnectRealtime();
+  const toggle = repostPost("post-1");
+  releaseRepost?.(jsonPayload({ postId: "post-1", reposted: true, repostCount: 3 }));
+  await toggle;
+  expect(getStoreSnapshot().activeThread?.post.card.reposted).toBe(true);
+  closeThread();
+  const reopen = openThread("post-1");
+  eventSources.at(-1)?.dispatchEvent(
+    new MessageEvent("post.engagement", {
+      data: JSON.stringify({ type: "post.engagement", postId: "post-1", kind: "repost", accountId: "bob", likeCount: 5, repostCount: 3 }),
+    }),
+  );
+  releaseThreadPost({ likeCount: 5, repostCount: 2, repostedByViewer: false });
+  await reopen;
+  expect(getStoreSnapshot().activeThread?.post.card.reposted).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.repostCount).toBe(3);
 });
