@@ -41,8 +41,7 @@ async function typeReply(container: HTMLElement, text: string): Promise<void> {
   await setControlValue(replyTextarea(container), text);
 }
 
-async function openPostAWithDraft(): Promise<HTMLElement> {
-  installMockNetwork(respond);
+async function openPostA(text: string): Promise<HTMLElement> {
   const { container } = await mountApp(opened);
   await flush();
   await act(async () => {
@@ -50,7 +49,13 @@ async function openPostAWithDraft(): Promise<HTMLElement> {
   });
   await flush();
   expect(container.textContent).toContain("Post A market note");
-  await typeReply(container, "Draft written for post A");
+  await typeReply(container, text);
+  return container;
+}
+
+async function openPostAWithDraft(): Promise<HTMLElement> {
+  installMockNetwork(respond);
+  const container = await openPostA("Draft written for post A");
   expect(replyTextarea(container).value).toBe("Draft written for post A");
   return container;
 }
@@ -105,14 +110,7 @@ it('Completing a queued guest reply after sign-in clears the reply composer (spe
     }
     return undefined;
   });
-  const { container } = await mountApp(opened);
-  await flush();
-  await act(async () => {
-    await storeActions.navigate("/post/post-a");
-  });
-  await flush();
-  expect(container.textContent).toContain("Post A market note");
-  await typeReply(container, "Queued reply text");
+  const container = await openPostA("Queued reply text");
 
   const form = replyTextarea(container).closest("form");
   const submit = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
