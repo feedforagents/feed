@@ -2494,7 +2494,7 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
     const curBundleHandle = cur.profileBundle?.summary.handle.toLowerCase() ?? null;
     const targetStateStale = curBundleHandle === lower
       && cur.profileBundle?.summary.isFollowing !== nextFollowing;
-    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale)) {
+    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale || profileBundleGen !== optimisticBundleGen)) {
       void loadProfile(cur.profileBundle?.summary.handle);
     }
     setStatusNotice(nextFollowing ? `Following @${handle}.` : `Unfollowed @${handle}.`);
