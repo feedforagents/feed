@@ -224,16 +224,43 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
     throw new EngineFailure({ code: "INVALID_ARGUMENT", message: "confirmLlmSpend requires a valid attemptId and non-negative actualMicros." })
   }
   const resolvedNow = try resolveClockNow(input.nowMs)
+  const utcDay = utcDayString(resolvedNow)
   const actualMicros = Math.round(input.actualMicros)
   const store = try Store
-  try store.transaction(effect (tx: Tx) => {
+  const refused = try store.transaction(effect (tx: Tx) => {
+    try tx.query("SELECT pg_advisory_xact_lock(2525001)")
+    const open = try tx.query(
+      `SELECT reserved_micros FROM feed_llm_spend_reservations
+       WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
+      [input.attemptId.trim()],
+    )
+    const reservedMicros = open[0] === undefined ? undefined : Math.max(0, toInt(open[0].reserved_micros))
+    if (reservedMicros !== undefined && actualMicros > reservedMicros) {
+      const status = try querySpendStatusTx(tx, utcDay)
+      const headroomMicros = Math.max(0, status.budgetMicros - status.committedMicros + reservedMicros)
+      const bookedMicros = Math.min(actualMicros, headroomMicros)
+      try tx.query(
+        `UPDATE feed_llm_spend_reservations
+         SET status = 'settled', actual_micros = $2, updated_at = $3
+         WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
+        [input.attemptId.trim(), bookedMicros, resolvedNow],
+      )
+      return { reservedMicros, bookedMicros }
+    }
     try tx.query(
       `UPDATE feed_llm_spend_reservations
        SET status = 'settled', actual_micros = $2, updated_at = $3
        WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
       [input.attemptId.trim(), actualMicros, resolvedNow],
     )
+    return undefined
   })
+  if (refused !== undefined) {
+    throw new EngineFailure({
+      code: "BUDGET_EXCEEDED",
+      message: `confirmLlmSpend actual ${actualMicros} exceeds the reserved bound ${refused.reservedMicros} for attempt ${input.attemptId.trim()}; booked ${refused.bookedMicros} against the daily budget and dropped the paid answer.`,
+    })
+  }
 }
 
 export effect function markLlmSpendUncertain(input: MarkUncertainInput): void!(EngineFailure | StoreFailure)!Store {
