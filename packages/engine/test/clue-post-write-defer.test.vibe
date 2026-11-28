@@ -1,0 +1,203 @@
+// spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Clues require a matching active phase and a persisted unique clue key"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"
+import { runMarketsTick } from "../src/index.vibe"
+import { it, assert } from "@effect/vitest"
+import { TestClock } from "effect/testing"
+import { localStoreLayer } from "@repo/db/node"
+import { type Tx, toText, seedFeedWorld, migrateFeedSchema, Store } from "@repo/db"
+
+module clueWriteTestNode {
+  import http from "node:http"
+  import process from "node:process"
+
+  export interface OneShotCompletionStub {
+    readonly baseUrl: string
+    close(): Promise<void>
+  }
+
+  /** @throws {never} */
+  export function swapClueEnv(nextValues: Readonly<Record<string, string>>): Readonly<Record<string, string | undefined>> {
+    const prior: Record<string, string | undefined> = {}
+    for (const [k, v] of Object.entries(nextValues)) {
+      prior[k] = process.env[k]
+      process.env[k] = v
+    }
+    return prior
+  }
+
+  /** @throws {never} */
+  export function resetClueEnv(prior: Readonly<Record<string, string | undefined>>): void {
+    for (const [k, v] of Object.entries(prior)) {
+      if (v === undefined) {
+        Reflect.deleteProperty(process.env, k)
+      } else {
+        process.env[k] = v
+      }
+    }
+  }
+
+  /** @throws {unknown} */
+  export function serveStaticChatContent(content: string): Promise<OneShotCompletionStub> {
+    return new Promise((resolve, reject) => {
+      const payload = JSON.stringify({ choices: [{ message: { content } }] })
+      const srv = http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(payload)
+      })
+      srv.once("error", reject)
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address()
+        const port = typeof addr === "object" && addr !== null ? addr.port : 0
+        resolve({
+          baseUrl: `http://127.0.0.1:${port}`,
+          close: () => new Promise((done) => srv.close(() => done())),
+        })
+      })
+    })
+  }
+}
+import { resetClueEnv, serveStaticChatContent, swapClueEnv } from clueWriteTestNode
+
+const BASE_CLUE_ENV: Readonly<Record<string, string>> = {
+  SURPLUS_BASE_URL: "",
+  SURPLUS_API_KEY: "",
+  OPENROUTER_API_KEY: "",
+  OPENAI_API_KEY: "",
+  OLLAMA_BASE_URL: "",
+  NPC_LLM_DAILY_BUDGET_USD: "",
+  FEED_CLOCK_MODE: "simulated",
+}
+
+it.effect(
+  'Markets tick defers clues whose post write hits hourly rate limits or sanitizes empty without poisoning clue keys (spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Clues require a matching active phase and a persisted unique clue key"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP")',
+  () => scoped(effect {
+    const hour1Ms = Date.UTC(2026, 10, 28, 12, 10, 0)
+    const emptyStubMs = hour1Ms + 60_000
+    const hour2Ms = hour1Ms + 3_600_000
+    const hour1Window = Math.floor(hour1Ms / 3_600_000) * 3_600_000
+
+    try TestClock.setTime(hour1Ms)
+    try acquireRelease(
+      sync(() => swapClueEnv(BASE_CLUE_ENV)),
+      (saved) => sync(() => resetClueEnv(saved)),
+    )
+
+    provide localStoreLayer({ kind: "pglite", file: undefined }) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+      const store = try Store
+
+      try store.transaction(effect (tx: Tx) => {
+        try tx.query(
+          `UPDATE feed_prediction_markets
+           SET status = 'open', phase = 'opening', created_at = $1, expires_at = $2`,
+          [hour1Ms - 60_000, hour1Ms + 12 * 3_600_000],
+        )
+        try tx.query(
+          `UPDATE feed_prediction_markets
+           SET question = 'Will AIlon Musk host a midnight orbital stream?',
+               description = 'Solo creator timing check',
+               category = 'culture',
+               expires_at = $1
+           WHERE id = 'seed-market-1'`,
+          [hour1Ms + 6 * 3_600_000],
+        )
+        try tx.query(
+          `UPDATE feed_prediction_markets
+           SET question = 'Will Sam AIltman publish a weekend essay?',
+               description = 'Solo founder note check',
+               category = 'culture',
+               expires_at = $1
+           WHERE id = 'seed-market-2'`,
+          [hour1Ms + 7 * 3_600_000],
+        )
+        try tx.query(
+          `INSERT INTO feed_npc_market_clues (clue_key, market_id, actor_id, phase, post_id, created_at)
+           SELECT id || ':opening', id, 'sam-ailtman', 'opening', 'seed-post-1', $1
+           FROM feed_prediction_markets
+           WHERE id NOT IN ('seed-market-1', 'seed-market-2')`,
+          [hour1Ms - 30_000],
+        )
+        try tx.query(
+          `INSERT INTO feed_rate_limits (scope_key, window_start, count)
+           SELECT id || ':post', $1, 30
+           FROM feed_actors
+           WHERE id <> 'sam-ailtman'`,
+          [hour1Window],
+        )
+      })
+
+      const tick1 = try runMarketsTick(hour1Ms)
+      const afterTick1Clues = try store.transaction((tx: Tx) =>
+        tx.query(
+          `SELECT clue_key, actor_id, post_id
+           FROM feed_npc_market_clues
+           WHERE market_id IN ('seed-market-1', 'seed-market-2')
+           ORDER BY clue_key ASC`,
+        ),
+      )
+      const tick1Snapshots = try store.transaction((tx: Tx) =>
+        tx.query("SELECT market_kind FROM feed_market_price_history WHERE recorded_at = $1", [hour1Ms]),
+      )
+      const tick1Health = try store.transaction((tx: Tx) =>
+        tx.query("SELECT last_status FROM feed_tick_health WHERE job_name = 'markets-tick'"),
+      )
+
+      const emptyStub = try acquireRelease(
+        Effect.tryPromise(() => serveStaticChatContent("🚀 #clue")),
+        (srv) => Effect.ignore(Effect.tryPromise(() => srv.close())),
+      )
+      const tickEmpty = try scoped(effect {
+        try acquireRelease(
+          sync(() => swapClueEnv({ SURPLUS_BASE_URL: emptyStub.baseUrl, SURPLUS_API_KEY: "stub-key" })),
+          (saved) => sync(() => resetClueEnv(saved)),
+        )
+        return try runMarketsTick(emptyStubMs)
+      })
+      const afterEmptyClues = try store.transaction((tx: Tx) =>
+        tx.query("SELECT clue_key, post_id FROM feed_npc_market_clues WHERE clue_key = 'seed-market-1:opening'"),
+      )
+
+      const tickHour2 = try runMarketsTick(hour2Ms)
+      const afterHour2Market1 = try store.transaction((tx: Tx) =>
+        tx.query("SELECT clue_key, actor_id, post_id FROM feed_npc_market_clues WHERE clue_key = 'seed-market-1:opening'"),
+      )
+
+      try Effect.try(() => {
+        const tick1Keys = afterTick1Clues.map((r) => [
+          toText(r.clue_key),
+          toText(r.actor_id),
+          Boolean(toText(r.post_id)),
+        ])
+        assert.deepStrictEqual(
+          {
+            tick1Skipped: tick1.skipped,
+            tick1Published: tick1.cluesPublished,
+            tick1Keys,
+            tick1HasPredictionSnapshot: tick1Snapshots.some((r) => toText(r.market_kind) === "prediction"),
+            tick1Status: toText(tick1Health[0]?.last_status),
+            tickEmptyPublished: tickEmpty.cluesPublished,
+            afterEmptyMarket1Count: afterEmptyClues.length,
+            tickHour2Skipped: tickHour2.skipped,
+            afterHour2Market1: [
+              toText(afterHour2Market1[0]?.clue_key),
+              toText(afterHour2Market1[0]?.actor_id),
+              Boolean(toText(afterHour2Market1[0]?.post_id)),
+            ],
+          },
+          {
+            tick1Skipped: false,
+            tick1Published: 1,
+            tick1Keys: [["seed-market-2:opening", "sam-ailtman", true]],
+            tick1HasPredictionSnapshot: true,
+            tick1Status: "ok",
+            tickEmptyPublished: 0,
+            afterEmptyMarket1Count: 0,
+            tickHour2Skipped: false,
+            afterHour2Market1: ["seed-market-1:opening", "ailon-musk", true],
+          },
+        )
+      })
+    }
+  }),
+  60_000,
+)
