@@ -671,7 +671,7 @@ export async function submitReviewerLogin(payload: { readonly identifier: string
 
 export async function refreshViewerSurfaces(): Promise<void> {
   const s = getStoreSnapshot();
-  const tasks: Promise<void>[] = [loadFeed(), loadTrending()];
+  const tasks: Promise<unknown>[] = [loadFeed(), loadTrending()];
   if (s.route === "Explore") {
     if (s.activeArticleId) {
       tasks.push(loadArticle(s.activeArticleId));
