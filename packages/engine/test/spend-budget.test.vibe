@@ -2,31 +2,61 @@
 import { assert, it } from "@effect/vitest"
 import { migrateFeedSchema } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
-import { EngineFailure, confirmLlmSpend, getDailySpendStatus, reserveLlmBudget } from "../src/index.vibe"
+import { EngineFailure, confirmLlmSpend, getDailySpendStatus, markLlmSpendUncertain, reconcileStaleUncertainSpend, reserveLlmBudget } from "../src/index.vibe"
 
 function failureCode(err: { readonly _tag: string }): string {
   return err instanceof EngineFailure ? err.code : err._tag
 }
 
-it.effect('Confirming spend above the reserved bound is refused and books nothing (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+it.effect('A refused over-bound confirm releases the reservation: no next-day or day-31 carryover (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
   provide localStoreLayer({ kind: "pglite", file: undefined }) {
     try migrateFeedSchema()
     const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+    const day2Ms = dayMs + 86_400_000
+    const day31Ms = dayMs + 31 * 86_400_000
     const a = try reserveLlmBudget({ attemptId: "bound-a", estimatedMicros: 60_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
     try reserveLlmBudget({ attemptId: "bound-b", estimatedMicros: 40_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs + 1 })
     const before = try getDailySpendStatus(dayMs + 2)
     assert.strictEqual(before.committedMicros, 100_000_000)
     assert.strictEqual(before.budgetMicros, 100_000_000)
-    const failure = try Effect.flip(confirmLlmSpend({ attemptId: a.attemptId, actualMicros: 100_000_000, nowMs: dayMs + 3 }))
+    const failure = try Effect.flip(confirmLlmSpend({ attemptId: a.attemptId, actualMicros: 70_000_000, nowMs: dayMs + 3 }))
     assert.strictEqual(failureCode(failure), "BUDGET_EXCEEDED")
     const refused = try getDailySpendStatus(dayMs + 4)
-    assert.strictEqual(refused.committedMicros, 100_000_000)
+    assert.strictEqual(refused.committedMicros, 40_000_000)
     assert.strictEqual(refused.confirmedCents, 0)
-    assert.strictEqual(refused.activeReservations, 2)
-    try confirmLlmSpend({ attemptId: a.attemptId, actualMicros: 60_000_000, nowMs: dayMs + 5 })
+    assert.strictEqual(refused.activeReservations, 1)
+    try confirmLlmSpend({ attemptId: "bound-b", actualMicros: 40_000_000, nowMs: dayMs + 5 })
     const settled = try getDailySpendStatus(dayMs + 6)
-    assert.strictEqual(settled.committedMicros, 100_000_000)
-    assert.strictEqual(settled.confirmedCents, 6_000)
-    assert.strictEqual(settled.activeReservations, 1)
+    assert.strictEqual(settled.committedMicros, 40_000_000)
+    assert.strictEqual(settled.confirmedCents, 4_000)
+    assert.strictEqual(settled.activeReservations, 0)
+    try reconcileStaleUncertainSpend(day2Ms)
+    const day2 = try getDailySpendStatus(day2Ms)
+    assert.strictEqual(day2.carryoverReservedCents, 0)
+    assert.strictEqual(day2.committedMicros, 0)
+    assert.strictEqual(day2.activeReservations, 0)
+    const day31 = try getDailySpendStatus(day31Ms)
+    assert.strictEqual(day31.carryoverReservedCents, 0)
+    assert.strictEqual(day31.committedMicros, 0)
+  }
+}))
+
+it.effect('An over-bound confirm on an uncertain reservation is refused and releases it (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+    const day2Ms = dayMs + 86_400_000
+    const c = try reserveLlmBudget({ attemptId: "bound-c", estimatedMicros: 60_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
+    try markLlmSpendUncertain({ attemptId: c.attemptId, nowMs: dayMs + 1 })
+    const failure = try Effect.flip(confirmLlmSpend({ attemptId: c.attemptId, actualMicros: 70_000_000, nowMs: dayMs + 2 }))
+    assert.strictEqual(failureCode(failure), "BUDGET_EXCEEDED")
+    const refused = try getDailySpendStatus(dayMs + 3)
+    assert.strictEqual(refused.committedMicros, 0)
+    assert.strictEqual(refused.confirmedCents, 0)
+    assert.strictEqual(refused.activeReservations, 0)
+    assert.strictEqual(refused.uncertainReservations, 0)
+    const day2 = try getDailySpendStatus(day2Ms)
+    assert.strictEqual(day2.carryoverReservedCents, 0)
+    assert.strictEqual(day2.committedMicros, 0)
   }
 }))

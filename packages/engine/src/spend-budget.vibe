@@ -226,7 +226,7 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
   const resolvedNow = try resolveClockNow(input.nowMs)
   const actualMicros = Math.round(input.actualMicros)
   const store = try Store
-  try store.transaction(effect (tx: Tx) => {
+  const refusedBound = try store.transaction(effect (tx: Tx) => {
     const open = try tx.query(
       `SELECT reserved_micros FROM feed_llm_spend_reservations
        WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
@@ -234,10 +234,13 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
     )
     const reservedMicros = open[0] === undefined ? undefined : Math.max(0, toInt(open[0].reserved_micros))
     if (reservedMicros !== undefined && actualMicros > reservedMicros) {
-      throw new EngineFailure({
-        code: "BUDGET_EXCEEDED",
-        message: `confirmLlmSpend actual ${actualMicros} exceeds the reserved bound ${reservedMicros} for attempt ${input.attemptId.trim()}.`,
-      })
+      try tx.query(
+        `UPDATE feed_llm_spend_reservations
+         SET status = 'settled', actual_micros = 0, updated_at = $2
+         WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
+        [input.attemptId.trim(), resolvedNow],
+      )
+      return reservedMicros
     }
     try tx.query(
       `UPDATE feed_llm_spend_reservations
@@ -245,7 +248,14 @@ export effect function confirmLlmSpend(input: ConfirmSpendInput): void!(EngineFa
        WHERE attempt_id = $1 AND status IN ('reserved', 'uncertain')`,
       [input.attemptId.trim(), actualMicros, resolvedNow],
     )
+    return undefined
   })
+  if (refusedBound !== undefined) {
+    throw new EngineFailure({
+      code: "BUDGET_EXCEEDED",
+      message: `confirmLlmSpend actual ${actualMicros} exceeds the reserved bound ${refusedBound} for attempt ${input.attemptId.trim()}.`,
+    })
+  }
 }
 
 export effect function markLlmSpendUncertain(input: MarkUncertainInput): void!(EngineFailure | StoreFailure)!Store {
