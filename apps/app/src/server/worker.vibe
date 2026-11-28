@@ -242,7 +242,7 @@ export default {
         return env.ASSETS.fetch(request)
       }
       return workerJsonError(404, "not_found", "Route not found.")
-    } catch (err) {
+    } catch (_err) {
       return workerJsonError(503, "service_unavailable", "Database unavailable.")
     }
   },
