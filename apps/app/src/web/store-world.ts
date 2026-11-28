@@ -1736,8 +1736,13 @@ export async function createGroupChat(title: string, memberHandles: ReadonlyArra
   }
   const rec = isRecord(res.data) ? (isRecord(res.data.chat) ? res.data.chat : res.data) : {};
   const chatId = optStr(rec.id);
+  const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
+  const created = decodeChats([rec], viewerId)[0] ?? null;
   setStatusNotice(`Created group "${title}".`);
   await loadChats(false, chatId);
+  if (created && !getStoreSnapshot().chats.some((c) => c.id === created.id)) {
+    setStoreState({ chats: [created, ...getStoreSnapshot().chats] });
+  }
   if (chatId) await selectChat(chatId);
   return true;
 }
