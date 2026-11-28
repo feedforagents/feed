@@ -207,7 +207,61 @@ function engagementOf(card: AppPost["card"]): EngagementState {
   return { liked: card.liked, likeCount: card.likeCount, reposted: card.reposted, repostCount: card.repostCount };
 }
 
-function captureEngagement(): ReadonlyMap<string, EngagementState> {
+type CapturedEngagement = {
+  readonly states: ReadonlyMap<string, EngagementState>;
+  readonly seq: number;
+};
+
+type EngagementField<T> = { readonly value: T; readonly seq: number };
+
+type EngagementRecord = {
+  readonly viewerId: string | null;
+  readonly liked?: EngagementField<boolean>;
+  readonly likeCount?: EngagementField<number>;
+  readonly reposted?: EngagementField<boolean>;
+  readonly repostCount?: EngagementField<number>;
+};
+
+let engagementChangeSeq = 0;
+const engagementRecords = new Map<string, EngagementRecord>();
+
+function currentViewerId(): string | null {
+  return getStoreSnapshot().viewer?.accountId ?? null;
+}
+
+function engagementRecordFor(postId: string): EngagementRecord | undefined {
+  const record = engagementRecords.get(postId);
+  return record && record.viewerId === currentViewerId() ? record : undefined;
+}
+
+function updateEngagementRecord(postId: string, patch: Partial<Omit<EngagementRecord, "viewerId">>): void {
+  engagementRecords.set(postId, { ...engagementRecordFor(postId), viewerId: currentViewerId(), ...patch });
+}
+
+function recordEngagementFields(
+  postId: string,
+  fields: { readonly liked?: boolean; readonly likeCount?: number; readonly reposted?: boolean; readonly repostCount?: number },
+): void {
+  engagementChangeSeq += 1;
+  const seq = engagementChangeSeq;
+  updateEngagementRecord(postId, {
+    ...(fields.liked !== undefined ? { liked: { value: fields.liked, seq } } : {}),
+    ...(fields.likeCount !== undefined ? { likeCount: { value: fields.likeCount, seq } } : {}),
+    ...(fields.reposted !== undefined ? { reposted: { value: fields.reposted, seq } } : {}),
+    ...(fields.repostCount !== undefined ? { repostCount: { value: fields.repostCount, seq } } : {}),
+  });
+}
+
+export function recordLiveEngagementCounts(
+  postId: string,
+  counts: { readonly likeCount?: number; readonly repostCount?: number },
+): void {
+  if (!engagementRecordFor(postId)) return;
+  if (counts.likeCount === undefined && counts.repostCount === undefined) return;
+  recordEngagementFields(postId, counts);
+}
+
+function captureEngagement(): CapturedEngagement {
   const s = getStoreSnapshot();
   const captured = new Map<string, EngagementState>();
   const lists: ReadonlyArray<ReadonlyArray<AppPost>> = [
@@ -224,24 +278,37 @@ function captureEngagement(): ReadonlyMap<string, EngagementState> {
       if (!captured.has(post.card.id)) captured.set(post.card.id, engagementOf(post.card));
     }
   }
-  return captured;
+  return { states: captured, seq: engagementChangeSeq };
 }
 
 function preserveEngagementSince(
   posts: ReadonlyArray<AppPost>,
-  captured: ReadonlyMap<string, EngagementState>,
+  captured: CapturedEngagement,
 ): ReadonlyArray<AppPost> {
   return posts.map((post) => {
-    const start = captured.get(post.card.id);
+    const start = captured.states.get(post.card.id);
     const current = findPostInState(post.card.id);
-    if (!start || !current) return post;
-    const now = engagementOf(current.card);
-    if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
-      if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
-      if (repostInFlight.has(post.card.id)) markRepostServerCountLanded(post.card.id);
-      return post;
+    if (start && current) {
+      const now = engagementOf(current.card);
+      if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
+        if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
+        if (repostInFlight.has(post.card.id)) markRepostServerCountLanded(post.card.id);
+        return post;
+      }
+      return { ...post, card: { ...post.card, ...now } };
     }
-    return { ...post, card: { ...post.card, ...now } };
+    const record = engagementRecordFor(post.card.id);
+    if (!record) return post;
+    return {
+      ...post,
+      card: {
+        ...post.card,
+        ...(record.liked && record.liked.seq > captured.seq ? { liked: record.liked.value } : {}),
+        ...(record.likeCount && record.likeCount.seq > captured.seq ? { likeCount: record.likeCount.value } : {}),
+        ...(record.reposted && record.reposted.seq > captured.seq ? { reposted: record.reposted.value } : {}),
+        ...(record.repostCount && record.repostCount.seq > captured.seq ? { repostCount: record.repostCount.value } : {}),
+      },
+    };
   });
 }
 
@@ -550,6 +617,7 @@ export async function loadMoreFeed(): Promise<void> {
   const tab = s.feedTab;
   const viewerId = s.viewer?.accountId ?? null;
   const reqSeq = feedRequestSeq;
+  const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
   const hidesAtStart = captureAuthorHides();
   setStoreState({ feedLoadingMore: true });
@@ -567,7 +635,10 @@ export async function loadMoreFeed(): Promise<void> {
     setStoreState({
       feedPosts: appendUniquePosts(
         latest.feedPosts,
-        dropAuthorsHiddenSince(dropPostsDeletedSince(res.data.items, deletionsAtStart), hidesAtStart),
+        dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
       ),
       feedNextCursor: res.data.nextCursor,
       feedLoadingMore: false,
@@ -830,6 +901,7 @@ export async function toggleLike(postId: string): Promise<void> {
   likeServerCountLanded.delete(postId);
   likeOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
+  const prevRecord = engagementRecordFor(postId);
   const optimisticLiked = !currentlyLiked;
   const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
   patchPostCardAcrossStore(postId, (card) => ({
@@ -837,6 +909,8 @@ export async function toggleLike(postId: string): Promise<void> {
     liked: optimisticLiked,
     likeCount: optimisticCount,
   }));
+  recordEngagementFields(postId, { liked: optimisticLiked, likeCount: optimisticCount });
+  const optimisticSeq = engagementChangeSeq;
   try {
     const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/like`, {
       method: currentlyLiked ? "DELETE" : "POST",
@@ -849,6 +923,11 @@ export async function toggleLike(postId: string): Promise<void> {
         liked: currentlyLiked,
         ...(serverCountLanded ? {} : { likeCount: prevCount }),
       }));
+      const liveCount = engagementRecordFor(postId)?.likeCount;
+      updateEngagementRecord(postId, {
+        liked: { value: currentlyLiked, seq: prevRecord?.liked?.seq ?? 0 },
+        likeCount: liveCount && liveCount.seq > optimisticSeq ? liveCount : { value: prevCount, seq: prevRecord?.likeCount?.seq ?? 0 },
+      });
       setErrorNotice(res.message);
       return;
     }
@@ -861,6 +940,10 @@ export async function toggleLike(postId: string): Promise<void> {
       liked: serverLiked,
       ...(ownEngagementLanded ? {} : { likeCount: Math.max(0, serverCount) }),
     }));
+    recordEngagementFields(postId, {
+      liked: serverLiked,
+      ...(ownEngagementLanded ? {} : { likeCount: Math.max(0, serverCount) }),
+    });
   } finally {
     likeInFlight.delete(postId);
     likeInFlightKind.delete(postId);
@@ -879,6 +962,7 @@ export async function repostPost(postId: string): Promise<void> {
   repostServerCountLanded.delete(postId);
   repostOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.repostCount ?? 0;
+  const prevRecord = engagementRecordFor(postId);
   const optimisticReposted = !currentlyReposted;
   const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
   patchPostCardAcrossStore(postId, (card) => ({
@@ -886,6 +970,8 @@ export async function repostPost(postId: string): Promise<void> {
     reposted: optimisticReposted,
     repostCount: optimisticCount,
   }));
+  recordEngagementFields(postId, { reposted: optimisticReposted, repostCount: optimisticCount });
+  const optimisticSeq = engagementChangeSeq;
   try {
     const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/repost`, {
       method: currentlyReposted ? "DELETE" : "POST",
@@ -898,6 +984,11 @@ export async function repostPost(postId: string): Promise<void> {
         reposted: currentlyReposted,
         ...(serverCountLanded ? {} : { repostCount: prevCount }),
       }));
+      const liveCount = engagementRecordFor(postId)?.repostCount;
+      updateEngagementRecord(postId, {
+        reposted: { value: currentlyReposted, seq: prevRecord?.reposted?.seq ?? 0 },
+        repostCount: liveCount && liveCount.seq > optimisticSeq ? liveCount : { value: prevCount, seq: prevRecord?.repostCount?.seq ?? 0 },
+      });
       setErrorNotice(res.message);
       return;
     }
@@ -910,6 +1001,10 @@ export async function repostPost(postId: string): Promise<void> {
       reposted: serverReposted,
       ...(ownEngagementLanded ? {} : { repostCount: Math.max(0, serverCount) }),
     }));
+    recordEngagementFields(postId, {
+      reposted: serverReposted,
+      ...(ownEngagementLanded ? {} : { repostCount: Math.max(0, serverCount) }),
+    });
   } finally {
     repostInFlight.delete(postId);
     repostInFlightKind.delete(postId);
