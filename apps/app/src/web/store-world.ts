@@ -2257,6 +2257,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   const bundle = s.profileBundle;
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
   const loadId = profileLoadCount;
+  const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
@@ -2276,7 +2277,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
       setStoreState({
         profileBundle: {
           ...latest,
-          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(res.data.posts, deletionsAtStart)),
+          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(preserveEngagementSince(res.data.posts, engagementAtStart), deletionsAtStart)),
           postsNextCursor: res.data.postsNextCursor,
         },
         profileLoadingMore: false,
