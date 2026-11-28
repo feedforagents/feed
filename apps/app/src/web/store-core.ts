@@ -74,6 +74,12 @@ export type UiFeedTab = "latest" | "following" | "top";
 
 export type ThreadReplySort = "popular" | "newest" | "oldest";
 
+export interface PostedReplyClear {
+  readonly postId: string;
+  readonly content: string;
+  readonly seq: number;
+}
+
 export interface GlobalReportTarget {
   readonly kind: "post" | "account";
   readonly id: string;
@@ -148,6 +154,7 @@ export interface StoreState {
   readonly activeThread: PostThreadData | null;
   readonly threadSort: ThreadReplySort;
   readonly threadLoading: boolean;
+  readonly postedReplyClear: PostedReplyClear | null;
   readonly exploreQuery: string;
   readonly exploreLoading: boolean;
   readonly trendingLoading: boolean;
@@ -498,6 +505,7 @@ let currentState: StoreState = {
   activeThread: null,
   threadSort: "popular",
   threadLoading: false,
+  postedReplyClear: null,
   exploreQuery: initialLocation.exploreQuery ?? "",
   exploreLoading: false,
   trendingLoading: true,
