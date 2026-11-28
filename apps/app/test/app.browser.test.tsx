@@ -988,9 +988,12 @@ it('Latest News See all opens the full News list (spec/app/navigation.md, "Story
   await expect.element(main.getByRole("heading", { name: "Top Stories", exact: true })).toBeInTheDocument();
   await act(() => userEvent.click(home));
   const latestNews = page.getByRole("region", { name: "Latest news" });
-  await act(() => userEvent.click(latestNews.getByRole("button", { name: "See all", exact: true })));
-  await expect.element(news).toHaveAttribute("aria-selected", "true");
-  await expect.element(olderArticle).toBeInTheDocument();
+  const seeAllNews = async () => {
+    await act(() => userEvent.click(latestNews.getByRole("button", { name: "See all", exact: true })));
+    await expect.element(news).toHaveAttribute("aria-selected", "true");
+    await expect.element(olderArticle).toBeInTheDocument();
+  };
+  await seeAllNews();
 
   await act(() => userEvent.click(olderArticle));
   await expect.element(main.getByRole("heading", { name: older.title, exact: true })).toBeInTheDocument();
@@ -1002,6 +1005,8 @@ it('Latest News See all opens the full News list (spec/app/navigation.md, "Story
   await act(() => userEvent.click(explore));
   await expect.element(main.getByRole("tab", { name: "Trending", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect.element(olderArticle).not.toBeInTheDocument();
+
+  await seeAllNews();
 });
 
 it('Quick-trade BUY NO on a feed market card opens the ticket on NO (spec/markets/economy.md, "Story: Trade with fixed starting capital and rank by net profit")', async () => {

@@ -404,10 +404,10 @@ async function navigateWithNewsRequest(path: string, exploreNewsRequest: number 
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
   sendApp({ type: "navigateApp", targetRoute: parsed.route });
   recordPublicView(parsed.route);
-  if (parsed.route === "Explore" && getStoreSnapshot().route !== "Explore") {
+  if (parsed.route === "Explore" && (exploreNewsRequest !== null || getStoreSnapshot().route !== "Explore")) {
     setStoreState({
       exploreBrowseTab: exploreNewsRequest === null ? "trending" : "news",
-      exploreSearchTab: "top",
+      ...(getStoreSnapshot().route !== "Explore" ? { exploreSearchTab: "top" } : {}),
     });
   }
   applyParsedLocation(parsed, exploreNewsRequest);
