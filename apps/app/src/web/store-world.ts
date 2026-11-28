@@ -150,10 +150,19 @@ function stripHiddenAuthorRefs(p: AppPost, isHidden: (handle: string) => boolean
 function dropAuthorsHiddenSince(
   posts: ReadonlyArray<AppPost>,
   hidesAtStart: number,
+  profileOwnerHandle?: string,
 ): ReadonlyArray<AppPost> {
   if (hidesAtStart === authorHideSeq) return posts;
   const isHidden = (handle: string): boolean => wasAuthorHiddenSince(handle, hidesAtStart);
-  return posts.filter((p) => !isHidden(p.card.authorHandle)).map((p) => stripHiddenAuthorRefs(p, isHidden));
+  const owner = profileOwnerHandle?.toLowerCase();
+  const ownerHidden = owner !== undefined && isHidden(owner);
+  const repostedByOwner = (p: AppPost): boolean => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    return owner !== undefined && reposter !== undefined && reposter.toLowerCase() === owner;
+  };
+  return posts
+    .filter((p) => !isHidden(p.card.authorHandle) && !(ownerHidden && repostedByOwner(p)))
+    .map((p) => stripHiddenAuthorRefs(p, isHidden));
 }
 let exploreRequestSeq = 0;
 let exploreLoadedQuery = "";
@@ -2156,6 +2165,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const loadId = ++profileLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -2186,7 +2196,11 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     setStoreState({
       profileBundle: {
         ...fetched,
-        posts: dropPostsDeletedSince(preserveEngagementSince(fetched.posts, engagementAtStart), deletionsAtStart),
+        posts: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(fetched.posts, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+          fetched.summary.handle,
+        ),
         postsCount: Math.max(0, fetched.postsCount - droppedOwnPosts),
       },
       profileLoading: false,
@@ -2212,6 +2226,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   const loadId = ++profileRepliesLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -2227,7 +2242,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   if (res.ok) {
-    setStoreState({ profileReplies: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), profileRepliesLoading: false });
+    setStoreState({ profileReplies: dropAuthorsHiddenSince(dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), hidesAtStart), profileRepliesLoading: false });
     return;
   }
   setStoreState({ profileRepliesLoading: false });
@@ -2257,6 +2272,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
   const loadId = ++profileLikesLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileLikesLoading: true });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
@@ -2269,7 +2285,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   if (res.ok) {
-    setStoreState({ profileLikes: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), profileLikesLoading: false });
+    setStoreState({ profileLikes: dropAuthorsHiddenSince(dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), hidesAtStart), profileLikesLoading: false });
     return;
   }
   setStoreState({ profileLikesLoading: false });
@@ -2306,6 +2322,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
   const loadId = profileLoadCount;
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
@@ -2324,7 +2341,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
       setStoreState({
         profileBundle: {
           ...latest,
-          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(res.data.posts, deletionsAtStart)),
+          posts: appendUniquePosts(latest.posts, dropAuthorsHiddenSince(dropPostsDeletedSince(res.data.posts, deletionsAtStart), hidesAtStart, latest.summary.handle)),
           postsNextCursor: res.data.postsNextCursor,
         },
         profileLoadingMore: false,
