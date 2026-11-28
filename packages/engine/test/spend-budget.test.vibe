@@ -1,0 +1,32 @@
+// spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Confirming spend charges actual cost and releases unused reservation"
+import { assert, it } from "@effect/vitest"
+import { migrateFeedSchema } from "@repo/db"
+import { localStoreLayer } from "@repo/db/node"
+import { EngineFailure, confirmLlmSpend, getDailySpendStatus, reserveLlmBudget } from "../src/index.vibe"
+
+function failureCode(err: { readonly _tag: string }): string {
+  return err instanceof EngineFailure ? err.code : err._tag
+}
+
+it.effect('Confirming spend above the reserved bound is refused and books nothing (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+    const a = try reserveLlmBudget({ attemptId: "bound-a", estimatedMicros: 60_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
+    try reserveLlmBudget({ attemptId: "bound-b", estimatedMicros: 40_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs + 1 })
+    const before = try getDailySpendStatus(dayMs + 2)
+    assert.strictEqual(before.committedMicros, 100_000_000)
+    assert.strictEqual(before.budgetMicros, 100_000_000)
+    const failure = try Effect.flip(confirmLlmSpend({ attemptId: a.attemptId, actualMicros: 100_000_000, nowMs: dayMs + 3 }))
+    assert.strictEqual(failureCode(failure), "BUDGET_EXCEEDED")
+    const refused = try getDailySpendStatus(dayMs + 4)
+    assert.strictEqual(refused.committedMicros, 100_000_000)
+    assert.strictEqual(refused.confirmedCents, 0)
+    assert.strictEqual(refused.activeReservations, 2)
+    try confirmLlmSpend({ attemptId: a.attemptId, actualMicros: 60_000_000, nowMs: dayMs + 5 })
+    const settled = try getDailySpendStatus(dayMs + 6)
+    assert.strictEqual(settled.committedMicros, 100_000_000)
+    assert.strictEqual(settled.confirmedCents, 6_000)
+    assert.strictEqual(settled.activeReservations, 1)
+  }
+}))
