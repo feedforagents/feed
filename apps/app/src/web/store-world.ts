@@ -1749,6 +1749,14 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
   return true;
 }
 
+function chatRecordFromResponse(data: unknown): Record<string, unknown> {
+  return isRecord(data) ? (isRecord(data.chat) ? data.chat : data) : {};
+}
+
+function decodeResponseChat(data: unknown, viewerId: string) {
+  return decodeChats([chatRecordFromResponse(data)], viewerId)[0] ?? null;
+}
+
 export async function createGroupChat(title: string, memberHandles: ReadonlyArray<string>): Promise<boolean> {
   if (!getStoreSnapshot().viewer) return false;
   const res = await requestJson("/api/chats/group", {
@@ -1838,8 +1846,8 @@ export async function renameGroupChat(chatId: string, title: string): Promise<bo
     setErrorNotice(res.message);
     return false;
   }
-  const rec = isRecord(res.data) ? (isRecord(res.data.chat) ? res.data.chat : res.data) : {};
-  const renamed = decodeChats([rec], viewerId)[0] ?? null;
+  const rec = chatRecordFromResponse(res.data);
+  const renamed = decodeResponseChat(res.data, viewerId);
   const renamedTitle =
     renamed && renamed.id === chatId && typeof rec.title === "string" && rec.title !== "" ? renamed.title : null;
   setStatusNotice(`Renamed group to "${trimmed}".`);
