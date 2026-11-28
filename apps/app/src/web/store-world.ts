@@ -408,7 +408,11 @@ export function removePostAcrossStore(
   const bundle = cur.profileBundle;
   const removedFromProfile = bundle !== null
     && existing !== undefined
-    && existing.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase();
+    && existing.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase()
+    && (bundle.posts.some((p) => p.card.id === postId)
+      || cur.profileReplies.some((p) => p.card.id === postId)
+      || bundle.postsNextCursor !== null
+      || existing.replyToPostId !== null);
   const cleaned = cleanedPostLists(cur, cleanList);
   setStoreState({
     ...cleaned,

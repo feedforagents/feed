@@ -63,6 +63,7 @@ export function makeRawProfileBundle(input: {
   readonly createdAt: number;
   readonly postsCount: number;
   readonly posts: ReadonlyArray<Record<string, unknown>>;
+  readonly nextCursor?: string | null;
 }): Record<string, unknown> {
   return {
     profile: {
@@ -85,7 +86,7 @@ export function makeRawProfileBundle(input: {
       isParody: false,
     },
     posts: input.posts,
-    nextCursor: null,
+    nextCursor: input.nextCursor ?? null,
     positions: { predictionPositions: [], perpPositions: [] },
   };
 }

@@ -9,8 +9,8 @@ const createdAt = Date.now() - 60_000;
 const firstRaw = makeRawPost(createdAt, { id: "alice-post-1", content: "Alice first call" });
 const secondRaw = makeRawPost(createdAt, { id: "alice-post-2", content: "Alice second call" });
 
-function profileRaw(postsCount: number, posts: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> {
-  return makeRawProfileBundle({ handle: "alice", displayName: "Alice Player", createdAt, postsCount, posts });
+function profileRaw(postsCount: number, posts: ReadonlyArray<Record<string, unknown>>, nextCursor: string | null = null): Record<string, unknown> {
+  return makeRawProfileBundle({ handle: "alice", displayName: "Alice Player", createdAt, postsCount, posts, nextCursor });
 }
 
 const aliceViewer = makeViewerSession();
@@ -150,7 +150,7 @@ it('Deleting an own post from the feed drops the loaded profile header count eve
     const url = fetchPath(input);
     if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
     if (url.startsWith("/api/users/alice")) {
-      return Promise.resolve(Response.json(profileRaw(3, [secondRaw])));
+      return Promise.resolve(Response.json(profileRaw(3, [secondRaw], "more")));
     }
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
@@ -160,6 +160,34 @@ it('Deleting an own post from the feed drops the loaded profile header count eve
   setStoreState({ feedPosts: [decodedFirst] });
   expect(getStoreSnapshot().profileBundle?.postsCount).toBe(3);
   expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-2"]);
+
+  await deletePost("alice-post-1");
+
+  expect(getStoreSnapshot().feedPosts).toHaveLength(0);
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+
+  removePostAcrossStore("alice-post-1", { replyToPostId: null, parentReplyCount: null });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+});
+
+it('A profile reload that lands after the server delete keeps its count when the delete signal arrives (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const decodedFirst = decodePost(firstRaw, "alice");
+  if (decodedFirst === null) throw new Error("test fixtures must decode");
+  const thirdRaw = makeRawPost(createdAt, { id: "alice-post-3", content: "Alice third call" });
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = fetchPath(input);
+    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
+    if (url.startsWith("/api/users/alice")) {
+      return Promise.resolve(Response.json(profileRaw(2, [secondRaw, thirdRaw])));
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  });
+
+  signInAsAlice();
+  await loadProfile("alice");
+  setStoreState({ feedPosts: [decodedFirst] });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-2", "alice-post-3"]);
 
   await deletePost("alice-post-1");
 
