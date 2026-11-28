@@ -7,11 +7,11 @@ import {
   bobPostRaw,
   daveQuotingBobRaw,
   erinPostRaw,
-  jsonPayload,
+  gateFetchOn,
   postRaw,
   resetModerationStore,
   resetWorldFeedStore,
-  stubFetchUrl,
+  stubFetchOn,
 } from "./moderation-fixtures.ts";
 
 const carolPostRaw = postRaw({ id: "carol-post", content: "Carol parent note", replyCount: 3 });
@@ -34,20 +34,6 @@ const erinReplyRaw = postRaw({
 const daveReplyQuotingBobRaw = { ...daveQuotingBobRaw, replyToPostId: "carol-post" };
 const erinChildRaw = { ...erinPostRaw, id: "erin-child", replyToPostId: "bob-post" };
 
-function gateOn(match: (url: string) => boolean, payload: () => unknown) {
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  stubFetchUrl((url) => {
-    if (url.includes("/api/users/bob/mute")) return Promise.resolve(jsonPayload({ muted: true }));
-    if (match(url)) return gate.then(() => jsonPayload(payload()));
-    if (url.startsWith("/api/markets")) return Promise.resolve(jsonPayload({ predictions: [], perps: [] }));
-    return Promise.resolve(jsonPayload({}, 404));
-  });
-  return () => release();
-}
-
 function seedThread() {
   resetWorldFeedStore({ route: "PostDetail", activeThread: null, activePostId: null, threadLoading: false });
   setStoreState({ mutedAccounts: [], errorMessage: null });
@@ -61,7 +47,7 @@ afterEach(() => {
 
 it(`Muting an author keeps their replies out of a thread that lands after the mute and strips their quote from landed replies (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedThread();
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.includes("/api/posts/carol-post"),
     () => ({
       post: carolPostRaw,
@@ -82,7 +68,7 @@ it(`Muting an author keeps their replies out of a thread that lands after the mu
 
 it(`Muting the parent author drops the parent post from a thread that lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedThread();
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.includes("/api/posts/erin-child"),
     () => ({
       post: erinChildRaw,
@@ -102,7 +88,7 @@ it(`Muting the parent author drops the parent post from a thread that lands afte
 
 it(`Muting the thread author closes a thread that lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedThread();
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.includes("/api/posts/bob-post"),
     () => ({
       post: bobPostRaw,
@@ -121,18 +107,15 @@ it(`Muting the thread author closes a thread that lands after the mute (spec/soc
 
 it(`A thread that lands before any mute keeps the author's replies (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedThread();
-  stubFetchUrl((url) => {
-    if (url.includes("/api/posts/carol-post")) {
-      return Promise.resolve(jsonPayload({
-        post: carolPostRaw,
-        parentPost: null,
-        ancestors: [],
-        replies: [bobReplyRaw, erinReplyRaw],
-      }));
-    }
-    if (url.startsWith("/api/markets")) return Promise.resolve(jsonPayload({ predictions: [], perps: [] }));
-    return Promise.resolve(jsonPayload({}, 404));
-  });
+  stubFetchOn(
+    (url) => url.includes("/api/posts/carol-post"),
+    () => ({
+      post: carolPostRaw,
+      parentPost: null,
+      ancestors: [],
+      replies: [bobReplyRaw, erinReplyRaw],
+    }),
+  );
   await openThread("carol-post");
   expect(getStoreSnapshot().activeThread?.replies.map((r) => r.card.id)).toEqual(["bob-reply", "erin-reply"]);
 });
