@@ -26,6 +26,7 @@ afterEach(() => {
     followListHandle: null,
     followListItems: [],
     followListLoading: false,
+    followListError: null,
     errorMessage: null,
     toasts: [],
   });
@@ -126,5 +127,48 @@ describe("follow-list race", () => {
     expect(after.followListKind).toBeNull();
     expect(after.followListHandle).toBeNull();
     expect(after.followListItems).toEqual([]);
+  });
+
+  it('a failed load keeps the open dialog in an error state instead of the empty state (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+    const pending = installDeferredFetch();
+    const load = loadFollowList("alice", "followers");
+    pending.get("GET /api/users/alice/followers")?.resolve(
+      Response.json({ message: "Follow list unavailable due to a block" }, { status: 403 }),
+    );
+    await load;
+    const after = getStoreSnapshot();
+    expect(after.followListKind).toBe("followers");
+    expect(after.followListLoading).toBe(false);
+    expect(after.followListItems).toEqual([]);
+    expect(after.followListError).toBe("Follow list unavailable due to a block");
+  });
+
+  it('a successful empty load has no error so the empty state stays truthful (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+    const pending = installDeferredFetch();
+    const load = loadFollowList("alice", "following");
+    pending.get("GET /api/users/alice/following")?.resolve(jsonResponse({ items: [] }));
+    await load;
+    const after = getStoreSnapshot();
+    expect(after.followListKind).toBe("following");
+    expect(after.followListItems).toEqual([]);
+    expect(after.followListError).toBeNull();
+  });
+
+  it('retrying after a failure clears the error and shows the rows (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+    const pending = installDeferredFetch();
+    const first = loadFollowList("alice", "followers");
+    pending.get("GET /api/users/alice/followers")?.resolve(
+      Response.json({ message: "Follow list unavailable due to a block" }, { status: 403 }),
+    );
+    await first;
+    expect(getStoreSnapshot().followListError).toBe("Follow list unavailable due to a block");
+    const retry = loadFollowList("alice", "followers");
+    expect(getStoreSnapshot().followListError).toBeNull();
+    expect(getStoreSnapshot().followListLoading).toBe(true);
+    pending.get("GET /api/users/alice/followers")?.resolve(jsonResponse(followersRows));
+    await retry;
+    const after = getStoreSnapshot();
+    expect(after.followListError).toBeNull();
+    expect(after.followListItems.map((entry) => entry.handle)).toEqual(["dave"]);
   });
 });

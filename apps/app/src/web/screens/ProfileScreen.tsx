@@ -129,6 +129,20 @@ function FollowListDialog() {
               <Skeleton className="h-12" />
               <Skeleton className="h-12" />
             </div>
+          ) : s.followListError ? (
+            <EmptyState title="Couldn't load this list">
+              <p className="text-sm text-muted-foreground">{s.followListError}</p>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  if (s.followListHandle && s.followListKind) {
+                    void storeActions.loadFollowList(s.followListHandle, s.followListKind);
+                  }
+                }}
+              >
+                Retry
+              </Button>
+            </EmptyState>
           ) : s.followListItems.length === 0 ? (
             <EmptyState title={s.followListKind === "followers" ? "No followers yet" : "Not following anyone yet"} />
           ) : (
