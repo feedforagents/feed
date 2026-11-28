@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { App } from "../src/web/App.tsx";
-import type { ViewerSession } from "../src/web/types.ts";
+import { setStoreState } from "../src/web/store-core.ts";
+import type { AppChatSummary, ViewerSession } from "../src/web/types.ts";
 
 const environment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
@@ -32,6 +33,49 @@ export function makeViewerSession(overrides: Partial<ViewerSession> = {}): Viewe
     agentGrant: null,
     ...overrides,
   };
+}
+
+export function makeGroupMember(memberId: string, role: string) {
+  return { memberId, memberKind: "user", handle: memberId, displayName: memberId, avatarUrl: null, role };
+}
+
+export function makeSeedGroupChat(): AppChatSummary {
+  return {
+    id: "chat-1",
+    chatType: "UserGroup",
+    title: "Group Chat",
+    subtitle: "Group chat",
+    memberCount: 3,
+    unreadCount: 0,
+    lastMessagePreview: null,
+    lastMessageAt: null,
+    peerAvatarUrl: null,
+    peerHandle: null,
+    members: [
+      { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "owner" },
+      { memberId: "bob", memberKind: "user", handle: "bob", displayName: "Bob", avatarUrl: null, role: "member" },
+      { memberId: "carol", memberKind: "user", handle: "carol", displayName: "Carol", avatarUrl: null, role: "member" },
+    ],
+    isOwner: true,
+    isBlocked: false,
+  };
+}
+
+export function seedChatsRouteState(
+  viewer: ViewerSession,
+  chats: AppChatSummary[],
+  selectedChatId: string | null,
+): void {
+  setStoreState({
+    viewer,
+    route: "Chats",
+    chats,
+    selectedChatId,
+    chatMessages: [],
+    errorMessage: null,
+    statusMessage: null,
+    toasts: [],
+  });
 }
 
 export function makeRawPost(createdAt: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -103,6 +147,20 @@ export function stubFetchByUrl(
     "fetch",
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => handler(requestUrl(input, base), init)),
   );
+}
+
+export function stubGroupMutationWithChats(
+  mutationPath: string,
+  mutationMethod: string,
+  mutationResponse: () => Promise<Response>,
+  chats: () => Promise<Response>,
+): void {
+  stubFetchByUrl((url, init) => {
+    if (url.pathname === mutationPath && (init?.method ?? "GET") === mutationMethod) return mutationResponse();
+    if (url.pathname === "/api/chats") return chats();
+    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  }, "http://localhost");
 }
 
 export function installStubEventSource(target: EventTarget[] = eventSources): void {
