@@ -1277,6 +1277,7 @@ export async function loadMarketDetails(
   const viewerId = s.viewer?.accountId ?? null;
   const range = rangeOverride ?? s.marketTimeRange;
   const reqSeq = ++marketDetailsRequestSeq;
+  const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
   const hidesAtStart = captureAuthorHides();
   setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
@@ -1302,7 +1303,7 @@ export async function loadMarketDetails(
     marketHistoryLoading: false,
     marketTrades: tradesRes.ok ? tradesRes.data : [],
     marketTradesLoading: false,
-    marketSocialPosts: socialRes.ok ? dropAuthorsHiddenSince(dropPostsDeletedSince(socialRes.data.items, deletionsAtStart), hidesAtStart) : [],
+    marketSocialPosts: socialRes.ok ? dropAuthorsHiddenSince(dropPostsDeletedSince(preserveEngagementSince(socialRes.data.items, engagementAtStart), deletionsAtStart), hidesAtStart) : [],
   });
 }
 
