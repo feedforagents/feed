@@ -1900,14 +1900,15 @@ export effect function listArticles(
   return rows.map((row) => rowToArticle(row, mode))
 }
 
-export effect function listArticlesForMarket(
-  marketId: string,
+export effect function listArticlesForMarkets(
+  marketIds: ReadonlyArray<string>,
   mode: SocialPresentationMode = "game"
 ): ReadonlyArray<ArticleView>!StoreFailure!Store {
+  if (marketIds.length === 0) return []
   const store = try Store
   const rows = try store.transaction((tx) => tx.query(
-    `${ARTICLE_BASE_SQL} WHERE a.related_market_id = $1 AND ${ARTICLE_VISIBLE_SQL} ORDER BY a.published_at DESC, a.id DESC LIMIT 50`,
-    [marketId]
+    `${ARTICLE_BASE_SQL} WHERE a.related_market_id = ANY($1::text[]) AND ${ARTICLE_VISIBLE_SQL} ORDER BY a.published_at DESC, a.id DESC LIMIT 50`,
+    [marketIds]
   ))
   return rows.map((row) => rowToArticle(row, mode))
 }

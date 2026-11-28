@@ -1302,12 +1302,17 @@ it.effect(
         body: "OpenAGI perp body",
         relatedMarketId: "seed-market-1",
         isResolutionProof: false,
-        publishedAt: now
+        publishedAt: now - 1_000_000
       })
+      try seedFillerArticles(tx, 60, now)
     })
-    const relatedArticles = try getRelatedMarketArticles(201, { marketId: "OPENAGI", kind: "perp" }, authConfig)
+    const explicit = try getRelatedMarketArticles(201, { marketId: "OPENAGI", kind: "perp" }, authConfig)
+    const inferred = try getRelatedMarketArticles(202, { marketId: "OPENAGI" }, authConfig)
     try check(() => {
-      assert.strictEqual(relatedArticles.some((a) => a.id === "perp-related-article"), true)
+      assert.deepStrictEqual(
+        [explicit, inferred].map((articles) => articles.some((a) => a.id === "perp-related-article")),
+        [true, true]
+      )
     })
   })
 )

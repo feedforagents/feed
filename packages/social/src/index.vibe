@@ -7,7 +7,7 @@ export {
   getPostThread,
   likePost,
   listArticles,
-  listArticlesForMarket,
+  listArticlesForMarkets,
   listFeedPosts,
   listPostsByTag,
   listTrending,
