@@ -308,13 +308,17 @@ function stubInviteRespondWithChats(
   }, "http://localhost");
 }
 
+async function respondInviteOnNotifications(accept: boolean) {
+  setStoreState({ route: "Notifications", alphaInvites: [pendingInvite], errorMessage: null, statusMessage: null, toasts: [] });
+  await respondGroupInvite("inv-1", accept);
+  return getStoreSnapshot();
+}
+
 it("reports the failed chat list refresh after accepting a group invite (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
   stubInviteRespondWithChats("accepted", () =>
     Promise.resolve(Response.json({ message: "Chats unavailable" }, { status: 500 })),
   );
-  setStoreState({ route: "Notifications", alphaInvites: [pendingInvite], errorMessage: null, statusMessage: null, toasts: [] });
-  await respondGroupInvite("inv-1", true);
-  const s = getStoreSnapshot();
+  const s = await respondInviteOnNotifications(true);
   expect(s.statusMessage).toBe("Joined group.");
   expect(s.errorMessage).toBe("Joined group, but the chat list failed to refresh.");
   expect(s.alphaInvites).toEqual([]);
@@ -325,9 +329,7 @@ it("shows the joined group with its member count after a successful accept refre
   stubInviteRespondWithChats("accepted", () =>
     Promise.resolve(Response.json({ chats: [serverChatAfterLeave, serverJoinedChat] })),
   );
-  setStoreState({ route: "Notifications", alphaInvites: [pendingInvite], errorMessage: null, statusMessage: null, toasts: [] });
-  await respondGroupInvite("inv-1", true);
-  const s = getStoreSnapshot();
+  const s = await respondInviteOnNotifications(true);
   expect(s.errorMessage).toBeNull();
   expect(s.alphaInvites).toEqual([]);
   expect(s.chats.find((c) => c.id === "chat-9")?.memberCount).toBe(3);
@@ -337,9 +339,7 @@ it("does not report a refresh failure after declining a group invite (spec/socia
   stubInviteRespondWithChats("declined", () =>
     Promise.resolve(Response.json({ message: "Chats unavailable" }, { status: 500 })),
   );
-  setStoreState({ route: "Notifications", alphaInvites: [pendingInvite], errorMessage: null, statusMessage: null, toasts: [] });
-  await respondGroupInvite("inv-1", false);
-  const s = getStoreSnapshot();
+  const s = await respondInviteOnNotifications(false);
   expect(s.statusMessage).toBe("Invite declined.");
   expect(s.errorMessage).toBeNull();
   expect(s.alphaInvites).toEqual([]);
