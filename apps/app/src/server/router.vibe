@@ -1850,7 +1850,12 @@ effect function parsePerpOrderParams(
   if (rawSide !== "long" && rawSide !== "short") {
     return try badRequest("invalid_side", "Side must be long or short.")
   }
-  const collateralCents = numField(data, "collateralCents", "collateral_cents") ?? Math.round((numField(data, "collateralPts") ?? 0) * 100)
+  const explicitCollateralCents = numField(data, "collateralCents", "collateral_cents")
+  const collateralPts = numField(data, "collateralPts")
+  const collateralCents = explicitCollateralCents ?? Math.round((collateralPts ?? 0) * 100)
+  if (explicitCollateralCents !== undefined && collateralPts !== undefined && Math.round(collateralPts * 100) !== explicitCollateralCents) {
+    return try badRequest("conflicting_amount", "collateralPts and collateralCents disagree; provide only one or matching values.")
+  }
   const leverage = numField(data, "leverage") ?? 1
   const rawMode = strField(data, "mode")?.trim().toLowerCase()
   let mode: PerpOrderMode | undefined = undefined
@@ -1932,8 +1937,18 @@ effect function handlePredictionMarketRoute(
     const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSide = (try reqStr(data, "side", "side")).toLowerCase()
     if (rawSide !== "yes" && rawSide !== "no") return try badRequest("invalid_side", "Side must be yes or no.")
-    const amountCents = Math.round(numField(data, "amountCents", "amount_cents") ?? Math.round((numField(data, "amountPts") ?? 0) * 100))
-    const sharesInput = numField(data, "shareUnits", "share_units", "shares") ?? 0
+        const explicitAmountCents = numField(data, "amountCents", "amount_cents")
+    const amountPts = numField(data, "amountPts")
+    const amountCents = Math.round(explicitAmountCents ?? Math.round((amountPts ?? 0) * 100))
+    if (explicitAmountCents !== undefined && amountPts !== undefined && Math.round(amountPts * 100) !== explicitAmountCents) {
+      return try badRequest("conflicting_amount", "amountPts and amountCents disagree; provide only one or matching values.")
+    }
+        const explicitShareUnits = numField(data, "shareUnits", "share_units")
+    const rawShares = numField(data, "shares")
+    const sharesInput = explicitShareUnits ?? (rawShares !== undefined ? Math.round(rawShares * 100) : 0)
+    if (explicitShareUnits !== undefined && rawShares !== undefined && Math.round(rawShares * 100) !== explicitShareUnits) {
+      return try badRequest("conflicting_amount", "shares and shareUnits disagree; provide only one or matching values.")
+    }
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
     const receipt = action === "buy"
       ? try buyPredictionShares({
@@ -2182,7 +2197,11 @@ effect function handleMarketRoute(
     const { data } = try readParsedBody(request)
     const idempotencyKey = request.headers.get("idempotency-key") ?? strField(data, "idempotencyKey", "idempotency_key")
     const rawSizePts = numField(data, "sizePts", "size_pts")
-    const sizeCents = numField(data, "sizeCents", "size_cents") ?? (rawSizePts !== undefined ? Math.round(rawSizePts * 100) : undefined)
+        const explicitSizeCents = numField(data, "sizeCents", "size_cents")
+    const sizeCents = explicitSizeCents ?? (rawSizePts !== undefined ? Math.round(rawSizePts * 100) : undefined)
+    if (explicitSizeCents !== undefined && rawSizePts !== undefined && Math.round(rawSizePts * 100) !== explicitSizeCents) {
+      return try badRequest("conflicting_amount", "sizePts and sizeCents disagree; provide only one or matching values.")
+    }
     const closePct = numField(data, "closePct", "close_pct")
     const maxSlippageBps = numField(data, "maxSlippageBps", "max_slippage_bps")
     try checkAndConsumeRateLimit({ accountId: session.accountId, action: "trade", surface: "web" })
