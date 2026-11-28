@@ -179,6 +179,7 @@ let leaderboardLoadedControls: {
 } = { audience: "traders", timeframe: "ALL", scope: "players", metric: "net_profit", page: 1 };
 let pnlHistoryRequestSeq = 0;
 let pnlHistoryLoadedRange: MarketTimeRange = "ALL";
+let pnlHistoryEverLoaded = false;
 let closedPositionsLoadCount = 0;
 let economyLoadCount = 0;
 
@@ -1243,11 +1244,12 @@ export async function loadPnlHistory(rangeOverride?: MarketTimeRange): Promise<v
   if (reqSeq !== pnlHistoryRequestSeq) return;
   if (res.ok) {
     pnlHistoryLoadedRange = range;
+    pnlHistoryEverLoaded = true;
     setStoreState({ pnlHistory: res.data, pnlHistoryLoading: false });
     return;
   }
   setStoreState({ pnlHistoryLoading: false, pnlTimeRange: pnlHistoryLoadedRange });
-  if (range !== pnlHistoryLoadedRange) {
+  if (range !== pnlHistoryLoadedRange || !pnlHistoryEverLoaded) {
     setErrorNotice(res.message);
   }
 }
