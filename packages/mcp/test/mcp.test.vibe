@@ -574,6 +574,29 @@ it.effect('Serve canonical SKILL.md, well-known discovery index with matching SH
   })
 })
 
+function captureBusLayer(publishedEvents: FeedRealtimeEvent[]) {
+  return Layer.effect(RealtimeBus, effect {
+    const pubsub = try PubSub.unbounded<FeedRealtimeEvent>()
+    const shape: RealtimeBus.Shape = {
+      publish: (event) => effect {
+        publishedEvents.push(event)
+        return try PubSub.publish(pubsub, event)
+      },
+      subscribe: () => Stream.fromPubSub(pubsub)
+    }
+    return shape
+  })
+}
+
+effect function callMcpToolCapturingEvents(
+  publishedEvents: FeedRealtimeEvent[],
+  ...call: Parameters<typeof callMcpTool>
+) {
+  provide captureBusLayer(publishedEvents) {
+    return try callMcpTool(...call)
+  }
+}
+
 effect function withSeededWorld<A, E>(
   run: (authConfig: AuthRuntimeConfig) => A!E!Store
 ) {
@@ -769,18 +792,7 @@ it.effect('Enforce OAuth scopes, single-agent replacement, viaClientName attribu
 
 it.effect('Enforce MCP social delegation, canonical shared rate limits, prediction idempotencyKey replay/conflict, preview_perp validation, and market.perp realtime emission (spec/mcp/tools.md, "Inductive MCP invariants enforce D-30, Social mode filtering, dual 401 challenges, shared limits, and attribution"; spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/shared/limits.md, "Posts, DMs, and trades share one hourly budget across web and MCP"; spec/markets/prediction.md, "Story: Open and trade a prediction market"; spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () => withSeededWorld(effect (authConfig) => {
   const publishedEvents: FeedRealtimeEvent[] = []
-  const captureBusLayer = Layer.effect(RealtimeBus, effect {
-    const pubsub = try PubSub.unbounded<FeedRealtimeEvent>()
-    const shape: RealtimeBus.Shape = {
-      publish: (event) => effect {
-        publishedEvents.push(event)
-        return try PubSub.publish(pubsub, event)
-      },
-      subscribe: () => Stream.fromPubSub(pubsub)
-    }
-    return shape
-  })
-  provide captureBusLayer {
+  provide captureBusLayer(publishedEvents) {
     const alice = try onboardPhoneUser("+14155550201", "alice_parity", "Alice Parity", authConfig)
     const bob = try onboardPhoneUser("+14155550202", "bob_parity", "Bob Parity", authConfig)
     const charlie = try onboardPhoneUser("+14155550203", "charlie_parity", "Charlie Parity", authConfig)
@@ -1547,7 +1559,7 @@ const setupPerpTrader = effect (
   return { token, ticker: firstPerp?.ticker ?? "" }
 }
 
-it.effect('MCP open_perp with mode flip closes the long and opens a short (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")', () => withSeededWorld(effect (authConfig) => {
+it.effect('MCP open_perp with mode flip closes the long and opens a short, and an opposite-side close reports the closed side (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/mcp/tools.md, "Story: Call public and authenticated MCP tools under mixed auth, scope, mode, and D-30 rules")', () => withSeededWorld(effect (authConfig) => {
   const { token: aliceToken, ticker } = try setupPerpTrader(
     authConfig,
     "+14155550212",
@@ -1592,10 +1604,29 @@ it.effect('MCP open_perp with mode flip closes the long and opens a short (spec/
     authConfig,
     aliceToken
   ))
+  const publishedEvents: FeedRealtimeEvent[] = []
+  const closedShort = unwrapToolPayload(try callMcpToolCapturingEvents(
+    publishedEvents,
+    307,
+    "open_perp",
+    { ticker, side: "long", collateralPts: 5, leverage: 3 },
+    authConfig,
+    aliceToken
+  ))
+  const portfolioAfterClose = unwrapToolPayload(try callMcpTool(308, "get_portfolio", {}, authConfig, aliceToken))
   const flipFeeCents = Math.round(Number(flipped.feePts) * 100)
   const openFeeCents = Math.round(Number(openedLong.feePts) * 100)
   const freshShortFeeCents = Math.round(Number(previewFreshShort.estimatedFeePts) * 100)
   try check(() => {
+    assert.deepStrictEqual(portfolioAfterClose.perpPositions, [])
+    assert.deepStrictEqual(
+      { action: closedShort.action, closedPositionId: closedShort.closedPositionId, ticker: closedShort.ticker, side: closedShort.side },
+      { action: "close", closedPositionId: flipped.positionId, ticker, side: "short" }
+    )
+    assert.deepStrictEqual(
+      publishedEvents.map((ev) => ev.type === "market.perp" ? [ev.action, ev.positionId, ev.ticker, ev.side, ev.sizeCents] : [ev.type]),
+      [["close", flipped.positionId, ticker, "short", 1500]]
+    )
     assert.notStrictEqual(ticker, "")
     assert.strictEqual(previewFreshShort.action, "open")
     assert.strictEqual(openedLong.action, "open")
