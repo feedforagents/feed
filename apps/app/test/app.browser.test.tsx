@@ -1229,6 +1229,30 @@ it('Back from a searched article keeps the selected search tab (spec/app/navigat
   await expect.element(people).toHaveAttribute("aria-selected", "true");
 });
 
+it('Back from a searched post keeps the selected search tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  installMockNetwork();
+  explorePosts = [SAMPLE_POSTS[0]];
+  await renderApp();
+  const main = page.getByRole("main");
+  await act(() => storeActions.navigate("/explore"));
+
+  await act(() => userEvent.fill(main.getByLabelText("Search Feed"), "orbital"));
+  await act(() => userEvent.click(main.getByRole("button", { name: "Search", exact: true })));
+
+  const latest = main.getByRole("tab", { name: "Latest", exact: true });
+  await act(() => userEvent.click(latest));
+  await expect.element(latest).toHaveAttribute("aria-selected", "true");
+  await expect.element(main.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+
+  await act(() => userEvent.click(main.getByText(SAMPLE_POSTS[0].content)));
+  await expect.element(main.getByRole("button", { name: "Back", exact: true })).toBeInTheDocument();
+  expect(window.location.pathname).toBe(`/post/${SAMPLE_POSTS[0].id}`);
+
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await expect.element(latest).toHaveAttribute("aria-selected", "true");
+  await expect.element(main.getByText(SAMPLE_POSTS[0].content)).toBeInTheDocument();
+});
+
 it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   const tagged = {
     ...SAMPLE_POSTS[0],

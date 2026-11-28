@@ -88,6 +88,7 @@ import {
   subscribeStore,
   toggleWatchlistItem,
 } from "./store-core.ts";
+import type { ExploreBrowseTab, ExploreSearchTab } from "./store-core.ts";
 import {
   clearNotifications,
   closeFollowList,
@@ -403,6 +404,12 @@ async function navigateWithNewsRequest(path: string, exploreNewsRequest: number 
   sendNav({ type: "navigateTo", targetRoute: parsed.route });
   sendApp({ type: "navigateApp", targetRoute: parsed.route });
   recordPublicView(parsed.route);
+  if (parsed.route === "Explore" && getStoreSnapshot().route !== "Explore") {
+    setStoreState({
+      exploreBrowseTab: exploreNewsRequest === null ? "trending" : "news",
+      exploreSearchTab: "top",
+    });
+  }
   applyParsedLocation(parsed, exploreNewsRequest);
   await loadDataForRoute(parsed.route, url.search);
 }
@@ -435,6 +442,14 @@ export function setSettingsTab(tab: SettingsTabId): void {
   if (tab === "privacy") {
     void loadModerationLists();
   }
+}
+
+export function setExploreBrowseTab(tab: ExploreBrowseTab): void {
+  setStoreState({ exploreBrowseTab: tab });
+}
+
+export function setExploreSearchTab(tab: ExploreSearchTab): void {
+  setStoreState({ exploreSearchTab: tab });
 }
 
 export function setExploreUrlQuery(q: string): void {
@@ -780,6 +795,8 @@ export const storeActions = {
   navigateRoute,
   hasInternalBackHistory,
   setSettingsTab,
+  setExploreBrowseTab,
+  setExploreSearchTab,
   setExploreUrlQuery,
   setTheme: setThemePreference,
   cycleTheme: cycleThemePreference,

@@ -18,11 +18,9 @@ import {
 import { SearchIcon, XIcon } from "../icons.tsx";
 import { FlatPostList } from "../PostList.tsx";
 import { storeActions, useAppStore } from "../store.ts";
+import type { ExploreBrowseTab, ExploreSearchTab } from "../store-core.ts";
 import type { AppArticle } from "../types.ts";
 import { ArticleDetailScreen } from "./ArticleDetailScreen.tsx";
-
-type BrowseTab = "trending" | "news" | "people" | "orgs" | "markets";
-type SearchTab = "top" | "latest" | "people" | "orgs" | "markets";
 
 function renderArticleCards(articles: ReadonlyArray<AppArticle>, mode: UiMode) {
   return articles.map((article) => (
@@ -289,33 +287,26 @@ function ExploreMarketsList() {
 }
 
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
-  const { activeArticleId, exploreNewsRequest } = useAppStore();
-  const [browseTab, setBrowseTab] = useState<BrowseTab>(exploreNewsRequest === null ? "trending" : "news");
-  const [searchTab, setSearchTab] = useState<SearchTab>("top");
-  const [handledNewsRequest, setHandledNewsRequest] = useState(exploreNewsRequest);
-  if (exploreNewsRequest !== null && exploreNewsRequest !== handledNewsRequest) {
-    setHandledNewsRequest(exploreNewsRequest);
-    setBrowseTab("news");
-  }
+  const { activeArticleId, exploreBrowseTab, exploreSearchTab } = useAppStore();
   return activeArticleId
     ? <ArticleDetailScreen mode={mode} />
     : (
       <ExploreBrowseScreen
         mode={mode}
-        browseTab={browseTab}
-        setBrowseTab={setBrowseTab}
-        searchTab={searchTab}
-        setSearchTab={setSearchTab}
+        browseTab={exploreBrowseTab}
+        setBrowseTab={storeActions.setExploreBrowseTab}
+        searchTab={exploreSearchTab}
+        setSearchTab={storeActions.setExploreSearchTab}
       />
     );
 }
 
 function ExploreBrowseScreen({ mode, browseTab, setBrowseTab, searchTab, setSearchTab }: {
   readonly mode: UiMode;
-  readonly browseTab: BrowseTab;
-  readonly setBrowseTab: (tab: BrowseTab) => void;
-  readonly searchTab: SearchTab;
-  readonly setSearchTab: (tab: SearchTab) => void;
+  readonly browseTab: ExploreBrowseTab;
+  readonly setBrowseTab: (tab: ExploreBrowseTab) => void;
+  readonly searchTab: ExploreSearchTab;
+  readonly setSearchTab: (tab: ExploreSearchTab) => void;
 }) {
   const s = useAppStore();
   const [draftQuery, setDraftQuery] = useState(s.exploreQuery);
@@ -344,8 +335,8 @@ function ExploreBrowseScreen({ mode, browseTab, setBrowseTab, searchTab, setSear
   };
 
   const sortedLatestPosts = [...s.explore.posts].sort((a, b) => b.createdAtMs - a.createdAtMs);
-  const activeBrowseTab: BrowseTab = !isGame && browseTab === "markets" ? "trending" : browseTab;
-  const activeSearchTab: SearchTab = !isGame && searchTab === "markets" ? "top" : searchTab;
+  const activeBrowseTab: ExploreBrowseTab = !isGame && browseTab === "markets" ? "trending" : browseTab;
+  const activeSearchTab: ExploreSearchTab = !isGame && searchTab === "markets" ? "top" : searchTab;
   const peopleCount = s.explore.actors.length + s.explore.accounts.length;
   const searchOrgCount = hasSearch ? buildExploreOrgItems(s, true).length : 0;
   const matchingMarketCount = isGame && hasSearch
