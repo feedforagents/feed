@@ -7,7 +7,7 @@ import type {
   MarketTimeRange,
   PerpRebalanceOrderInput,
 } from "@repo/ui";
-import { passThrough, requestJson } from "./api.ts";
+import { passThrough, requestJson, type ApiResult } from "./api.ts";
 import {
   appendAnonymousModeParam,
   clearNotices,
@@ -1289,13 +1289,18 @@ export async function previewPerpOrder(
   setStoreState({ perpPreview: res.ok ? res.data : null });
 }
 
-let marketsLoadCount = 0;
+let latestMarketsLoad: Promise<boolean> | undefined;
 
-async function loadMarketsWithStatus(): Promise<boolean> {
-  const loadId = ++marketsLoadCount;
+function startMarketsLoad(): Promise<boolean> {
+  const load: Promise<boolean> = requestJson("/api/markets", { parse: passThrough }).then(
+    (response) => latestMarketsLoad === load && applyMarketsResponse(response),
+  );
+  latestMarketsLoad = load;
   setStoreState({ marketsLoading: true });
-  const mktRes = await requestJson("/api/markets", { parse: passThrough });
-  if (loadId !== marketsLoadCount) return true;
+  return load;
+}
+
+function applyMarketsResponse(mktRes: ApiResult<unknown>): boolean {
   const s = getStoreSnapshot();
   let predictions = s.predictions;
   let perps = s.perps;
@@ -1354,7 +1359,7 @@ async function loadMarketsWithStatus(): Promise<boolean> {
 }
 
 export async function loadMarkets(): Promise<void> {
-  await loadMarketsWithStatus();
+  await startMarketsLoad();
 }
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
@@ -1454,7 +1459,12 @@ async function executeTradeRequest({
     ...(curViewer && bal !== undefined ? { viewer: { ...curViewer, balanceCents: bal } } : {}),
   });
   setStatusNotice(formatReceiptMessage ? formatReceiptMessage(res.data) : statusMessage);
-  const refreshed = await loadMarketsWithStatus();
+  let refresh = startMarketsLoad();
+  let refreshed = await refresh;
+  while (latestMarketsLoad && refresh !== latestMarketsLoad) {
+    refresh = latestMarketsLoad;
+    refreshed = await refresh;
+  }
   if (!refreshed) {
     setErrorNotice("Trade executed, but your positions could not be refreshed.");
   }

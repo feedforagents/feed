@@ -1,9 +1,32 @@
 // spec/markets/prediction.md, "Story: Open and trade a prediction market"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { submitPredictionOrder } from "../src/web/store-world.ts";
-import { jsonResponse } from "./deferred-fetch.ts";
+import { loadMarkets, submitPredictionOrder } from "../src/web/store-world.ts";
+import { installDeferredFetchQueue, jsonResponse } from "./deferred-fetch.ts";
 import { aliceViewer } from "./moderation-fixtures.ts";
+
+function marketsResponse(status: number): Response {
+  if (status !== 200) return jsonResponse({ message: "markets unavailable" }, status);
+  return jsonResponse({
+    predictions: [],
+    perps: [],
+    positions: {
+      predictionPositions: [
+        {
+          marketId: "pred-a",
+          side: "yes",
+          shares: 4000,
+          costBasisCents: 2500,
+          estimatedValueCents: 2500,
+          question: "Will pred-a happen?",
+          yesPriceBps: 5000,
+          noPriceBps: 5000,
+          settledAt: null,
+        },
+      ],
+    },
+  });
+}
 
 function installTradeFetch(marketsStatus: number, buyStatus = 200) {
   const fetchMock: typeof fetch = (input, init) => {
@@ -18,36 +41,14 @@ function installTradeFetch(marketsStatus: number, buyStatus = 200) {
       );
     }
     if (method === "GET" && url.pathname === "/api/markets") {
-      return Promise.resolve(
-        marketsStatus === 200
-          ? jsonResponse({
-              predictions: [],
-              perps: [],
-              positions: {
-                predictionPositions: [
-                  {
-                    marketId: "pred-a",
-                    side: "yes",
-                    shares: 4000,
-                    costBasisCents: 2500,
-                    estimatedValueCents: 2500,
-                    question: "Will pred-a happen?",
-                    yesPriceBps: 5000,
-                    noPriceBps: 5000,
-                    settledAt: null,
-                  },
-                ],
-              },
-            })
-          : jsonResponse({ message: "markets unavailable" }, marketsStatus),
-      );
+      return Promise.resolve(marketsResponse(marketsStatus));
     }
     return Promise.resolve(jsonResponse({ message: `unexpected ${method} ${url.pathname}` }, 500));
   };
   vi.stubGlobal("fetch", fetchMock);
 }
 
-async function runBuy(marketsStatus: number, buyStatus = 200) {
+function seedTrade(): void {
   setStoreState({
     viewer: aliceViewer,
     positions: [],
@@ -64,6 +65,10 @@ async function runBuy(marketsStatus: number, buyStatus = 200) {
     selectedMarketKind: "prediction",
     selectedMarketId: "pred-a",
   });
+}
+
+async function runBuy(marketsStatus: number, buyStatus = 200) {
+  seedTrade();
   installTradeFetch(marketsStatus, buyStatus);
   const ok = await submitPredictionOrder("pred-a", "Buy", "yes", 25);
   return { ok, s: getStoreSnapshot() };
@@ -109,6 +114,32 @@ describe("trade refresh failure", () => {
       errorMessage: null,
       tradeError: null,
     });
+  });
+
+  it.each([
+    { latestStatus: 500, staleStatus: 200, warning: true, positionIds: [] },
+    { latestStatus: 200, staleStatus: 500, warning: false, positionIds: ["pred-a"] },
+  ])('uses the newer market refresh outcome after a successful buy (HTTP $latestStatus) (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async ({ latestStatus, staleStatus, warning, positionIds }) => {
+    seedTrade();
+    const queue = installDeferredFetchQueue();
+    const marketsKey = "GET /api/markets";
+    const trade = submitPredictionOrder("pred-a", "Buy", "yes", 25);
+    queue.resolveOldest("POST /api/markets/predictions/pred-a/buy", jsonResponse({ balanceAfterCents: 7500 }));
+    await vi.waitFor(() => expect(getStoreSnapshot().marketsLoading).toBe(true));
+
+    const newerRefresh = loadMarkets();
+    queue.resolveOldest(marketsKey, marketsResponse(staleStatus));
+    queue.resolveNewest(marketsKey, marketsResponse(latestStatus));
+    const [ok] = await Promise.all([trade, newerRefresh]);
+
+    const s = getStoreSnapshot();
+    expect({
+      ok,
+      balance: s.viewer?.balanceCents,
+      tradeError: s.tradeError,
+      positions: s.positions.map((p) => p.marketId),
+      warning: s.errorMessage?.includes("could not be refreshed") ?? false,
+    }).toEqual({ ok: true, balance: 7500, tradeError: null, positions: positionIds, warning });
   });
 
   it('keeps a failed buy a trade failure (spec/markets/prediction.md, "Story: Open and trade a prediction market")', async () => {
