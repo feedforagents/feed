@@ -64,6 +64,18 @@ function GroupManagementDialog({
   const [inviteBusy, setInviteBusy] = useState(false);
   const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<ReadonlyArray<ExploreAccountHit>>([]);
+  const [draftChatId, setDraftChatId] = useState<string | null>(null);
+  const [wasOpen, setWasOpen] = useState(false);
+
+  const chatId = chat?.id ?? null;
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open && draftChatId !== chatId) {
+      setInviteHandle("");
+      setSuggestions([]);
+      setDraftChatId(chatId);
+    }
+  }
 
   const handleQueryChange = (value: string) => {
     setInviteHandle(value);
