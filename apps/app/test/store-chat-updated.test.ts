@@ -5,35 +5,15 @@ import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import { respondGroupInvite } from "../src/web/store-world.ts";
 import type { AppAlphaInvite, AppChatSummary } from "../src/web/types.ts";
-import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
+import {
+  makeGroupMember,
+  makeSeedGroupChat,
+  makeViewerSession,
+  stubFetchByUrl,
+} from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
 
-function member(memberId: string, handle: string) {
-  return { memberId, memberKind: "user", handle, displayName: handle, avatarUrl: null, role: "member" };
-}
-
-function seedGroup(): AppChatSummary {
-  return {
-    id: "chat-1",
-    chatType: "UserGroup",
-    title: "Group Chat",
-    subtitle: "Group chat",
-    memberCount: 3,
-    unreadCount: 0,
-    lastMessagePreview: null,
-    lastMessageAt: null,
-    peerAvatarUrl: null,
-    peerHandle: null,
-    members: [
-      { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "owner" },
-      { memberId: "bob", memberKind: "user", handle: "bob", displayName: "Bob", avatarUrl: null, role: "member" },
-      { memberId: "carol", memberKind: "user", handle: "carol", displayName: "Carol", avatarUrl: null, role: "member" },
-    ],
-    isOwner: true,
-    isBlocked: false,
-  };
-}
 
 const serverChatAfterLeave = {
   id: "chat-1",
@@ -42,7 +22,7 @@ const serverChatAfterLeave = {
   createdBy: "alice",
   memberCount: 2,
   unreadCount: 0,
-  members: [member("alice", "alice"), member("bob", "bob")],
+  members: [makeGroupMember("alice", "member"), makeGroupMember("bob", "member")],
 };
 
 const serverSecondChat = {
@@ -52,11 +32,11 @@ const serverSecondChat = {
   createdBy: "alice",
   memberCount: 2,
   unreadCount: 0,
-  members: [member("alice", "alice"), member("bob", "bob")],
+  members: [makeGroupMember("alice", "member"), makeGroupMember("bob", "member")],
 };
 
 function seedSecondChat(): AppChatSummary {
-  return { ...seedGroup(), id: "chat-2", title: "Second Chat", memberCount: 2 };
+  return { ...makeSeedGroupChat(), id: "chat-2", title: "Second Chat", memberCount: 2 };
 }
 
 let removedFromOpenChat = false;
@@ -103,7 +83,7 @@ beforeEach(() => {
   setStoreState({
     viewer,
     route: "Chats",
-    chats: [seedGroup()],
+    chats: [makeSeedGroupChat()],
     selectedChatId: "chat-1",
     chatMessages: [],
   });
@@ -138,7 +118,7 @@ it("drops a member who left from the open group roster and count (spec/social/me
 it("shows the surviving chat's messages, not the removed chat's, when the viewer is removed from the open group (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
   removedFromOpenChat = true;
   setStoreState({
-    chats: [seedGroup(), seedSecondChat()],
+    chats: [makeSeedGroupChat(), seedSecondChat()],
     selectedChatId: "chat-1",
     chatMessages: [
       {
