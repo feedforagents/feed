@@ -52,6 +52,7 @@ export interface EndpointCheck {
   readonly headers?: Readonly<Record<string, string>>;
   readonly body?: string;
   readonly redirect?: RequestRedirect;
+  readonly timeoutMs?: number;
   readonly expectedStatus?: number | readonly number[];
   readonly expectedHeaders?: Readonly<Record<string, string | RegExp>>;
   readonly bodyIncludes?: readonly string[];
@@ -415,10 +416,7 @@ function validateProbeResponse(
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    const timer = globalThis.setTimeout(resolve, ms);
-    if (typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") {
-      timer.unref();
-    }
+    globalThis.setTimeout(resolve, ms);
   });
 }
 
@@ -430,13 +428,14 @@ async function probeOnce(
   defaultCommitSha: string | undefined,
 ): Promise<{ readonly ok: boolean; readonly status: number; readonly retryable: boolean; readonly error?: string }> {
   const method = check.method ?? "GET";
+  const effectiveTimeoutMs = Math.max(100, check.timeoutMs ?? timeoutMs);
   try {
     const response = await fetchFn(url, {
       method,
       headers: check.headers,
       body: check.body,
       ...(check.redirect !== undefined ? { redirect: check.redirect } : {}),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(effectiveTimeoutMs),
     });
     const bodyText = method === "HEAD" ? "" : await response.text();
     const mismatch = validateProbeResponse(check, response.status, response.headers, bodyText, defaultCommitSha);
