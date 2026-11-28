@@ -569,7 +569,8 @@ export function formatTimeLabel(ms: number): string {
   if (diffSec < 60) return `${Math.max(1, diffSec)}s`;
   if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`;
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h`;
-  return new Date(ms).toISOString().slice(0, 10);
+  const day = new Date(ms);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
 }
 
 export function formatCountdown(expiresAtMs: number): string {
