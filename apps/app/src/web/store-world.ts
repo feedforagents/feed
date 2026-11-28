@@ -1710,11 +1710,15 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
     return false;
   }
   const createdId = res.data[0]?.id ?? null;
-  if (getStoreSnapshot().route !== "Chats") {
-    pushBrowserRoute("Chats");
+  const current = getStoreSnapshot();
+  if (current.route !== "Chats") {
+    pushBrowserRoute("Chats", undefined, createdId ? `?chat=${encodeURIComponent(createdId)}` : "");
     sendNav({ type: "navigateTo", targetRoute: "Chats" });
     sendApp({ type: "navigateApp", targetRoute: "Chats" });
-    setStoreState({ route: "Chats" });
+    setStoreState({
+      route: "Chats",
+      ...(createdId && createdId !== current.selectedChatId ? { selectedChatId: createdId, chatMessages: [] } : {}),
+    });
   }
   await loadChats(false, createdId);
   if (createdId) {
