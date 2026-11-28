@@ -29,7 +29,7 @@ import {
   likePost,
   listAlphaInvites,
   listArticles,
-  listArticlesForMarket,
+  listArticlesForMarkets,
   listBlockedAccounts,
   listChats,
   listFeedPosts,
@@ -2007,7 +2007,7 @@ it.effect(
 )
 
 it.effect(
-  "listArticlesForMarket returns articles linked to a market even when they are older than the 50 newest articles (spec/social/posts.md, \"Story: Feed surface, articles, and Social mode rules\")",
+  "Articles linked to a market remain available even when older than the 50 newest articles (spec/social/posts.md, \"Story: Feed surface, articles, and Social mode rules\")",
   () => withSocialWorld(effect {
     const store = try Store
     const now = Date.now()
@@ -2022,7 +2022,7 @@ it.effect(
       ))
     }
     const unfiltered = try listArticles(50, "game")
-    const forMarket = try listArticlesForMarket("seed-market-1", "game")
+    const forMarket = try listArticlesForMarkets(["seed-market-1"], "game")
     try check(() => assert.deepStrictEqual(
       {
         buriedInUnfiltered: unfiltered.some((a) => a.id === "buried-market-article"),
