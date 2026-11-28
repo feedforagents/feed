@@ -778,16 +778,29 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
 
     const p1 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 1 #wave3alpha" } })
     const p1Body = try readJson(p1)
-    const trendingTagRes = try callApp("/api/trending/wave3alpha")
-    const trendingTag = try readJson(trendingTagRes)
+    try TestClock.adjust("2 seconds")
+    const p2 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 2 $WAVE3ALPHA" } })
+    const p2Body = try readJson(p2)
+    try TestClock.adjust("2 seconds")
+    const p3 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 3", ticker: "WAVE3ALPHA" } })
+    const p3Body = try readJson(p3)
+    const readTrendingTag = effect (tag: string) => {
+      const response = try callApp(`/api/trending/${encodeURIComponent(tag)}`)
+      const body = try readJson(response)
+      const posts = body.posts as ReadonlyArray<Record<string, unknown>>
+      return { status: response.status, postIds: posts.map((post) => post.id) }
+    }
+    const bareHashtag = try readTrendingTag("wave3alpha")
+    const explicitHashtag = try readTrendingTag("#wave3alpha")
+    const cashtag = try readTrendingTag("$WAVE3ALPHA")
     try check(() => assert.deepStrictEqual(
-      [trendingTagRes.status, (trendingTag.posts as ReadonlyArray<unknown>).length >= 1],
-      [200, true]
+      { bareHashtag, explicitHashtag, cashtag },
+      {
+        bareHashtag: { status: 200, postIds: [p1Body.id] },
+        explicitHashtag: { status: 200, postIds: [p1Body.id] },
+        cashtag: { status: 200, postIds: [p3Body.id, p2Body.id] }
+      }
     ))
-    try TestClock.adjust("2 seconds")
-    const p2 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 2" } })
-    try TestClock.adjust("2 seconds")
-    const p3 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 3" } })
     try TestClock.adjust("2 seconds")
     const r1 = try callApp("/api/posts", {
       cookie: alice.cookie,
