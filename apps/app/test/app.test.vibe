@@ -1220,6 +1220,47 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
     ))
   }
 }, 180_000)
+it.effect('REST prediction preview rejects shares + amount without an explicit action (spec/markets/prediction.md, "Story: Open and trade a prediction market")', effect () => {
+  provide appLayer() {
+    try TestClock.setTime(Date.now())
+    try seedWorld()
+
+    const alice = try onboardPhonePlayer("+14155550158", "preview_alice")
+
+    const ambiguousRes = try callApp("/api/markets/predictions/seed-market-1/preview", {
+      cookie: alice.cookie,
+      json: { side: "yes", shares: 500, amountCents: 1000 }
+    })
+    const ambiguousBody = try readJson(ambiguousRes)
+    const sharesOnlyRes = try callApp("/api/markets/predictions/seed-market-1/preview", {
+      cookie: alice.cookie,
+      json: { side: "yes", shares: 500 }
+    })
+    const amountOnlyRes = try callApp("/api/markets/predictions/seed-market-1/preview", {
+      cookie: alice.cookie,
+      json: { side: "yes", amountCents: 1000 }
+    })
+    const explicitSellRes = try callApp("/api/markets/predictions/seed-market-1/preview", {
+      cookie: alice.cookie,
+      json: { side: "yes", action: "sell", shares: 500, amountCents: 1000 }
+    })
+
+    try check(() => assert.deepStrictEqual(
+      {
+        ambiguous: [ambiguousRes.status, ambiguousBody.code],
+        sharesOnly: sharesOnlyRes.status,
+        amountOnly: amountOnlyRes.status,
+        explicitSell: explicitSellRes.status
+      },
+      {
+        ambiguous: [400, "conflicting_amount"],
+        sharesOnly: 200,
+        amountOnly: 200,
+        explicitSell: 200
+      }
+    ))
+  }
+}, 180_000)
 
 it.effect('Session cookie slides with the server session (spec/app/index.md, "Story: Browse, switch modes, and sign in through the JoinSheet")', effect () => {
   provide appLayer() {
