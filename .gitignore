@@ -28,6 +28,7 @@ build/
 .env.local
 .env.*.local
 .pglite/
+.alchemy/
 .wrangler/
 runs/
 # A failed exploration's trace, replayed by the next check (SPEC.md, "Exploring the page").

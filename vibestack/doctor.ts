@@ -199,6 +199,48 @@ function checkManifest(root: string): DoctorCheck {
   }
 }
 
+function hasAlchemyProject(root: string): boolean {
+  if (fs.existsSync(path.join(root, "alchemy.run.ts"))) return true;
+  const pkgPath = path.join(root, "package.json");
+  if (!fs.existsSync(pkgPath)) return false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+      dependencies?: Record<string, unknown>;
+      devDependencies?: Record<string, unknown>;
+    };
+    return Boolean(parsed.dependencies && "alchemy" in parsed.dependencies)
+      || Boolean(parsed.devDependencies && "alchemy" in parsed.devDependencies);
+  } catch {
+    return false;
+  }
+}
+
+export function checkAlchemy(root: string, env: Readonly<Record<string, string | undefined>> = process.env): DoctorCheck | undefined {
+  if (!hasAlchemyProject(root)) return undefined;
+  const alchemyBin = findBin("alchemy", root) ?? onPath("alchemy");
+  if (!alchemyBin) {
+    return {
+      name: "alchemy",
+      status: "warn",
+      detail: "Alchemy project detected, but `alchemy` CLI is not installed (run `pnpm install`)",
+    };
+  }
+  const hasEnvAuth = Boolean(env.CLOUDFLARE_API_TOKEN || (env.CLOUDFLARE_API_KEY && env.CLOUDFLARE_EMAIL));
+  const profilePath = path.join(os.homedir(), ".alchemy", "profiles.json");
+  const hasProfile = fs.existsSync(profilePath);
+  if (hasEnvAuth) {
+    return { name: "alchemy", status: "ok", detail: `CLI ready (${alchemyBin}), Cloudflare env auth detected` };
+  }
+  if (hasProfile) {
+    return { name: "alchemy", status: "ok", detail: `CLI ready (${alchemyBin}), profile found (${profilePath})` };
+  }
+  return {
+    name: "alchemy",
+    status: "warn",
+    detail: `CLI ready (${alchemyBin}); local \`alchemy dev\` works offline — run \`alchemy profile edit --add Cloudflare\` or set CLOUDFLARE_API_TOKEN for live deploys`,
+  };
+}
+
 export async function doctor(root: string, options: DoctorOptions = {}): Promise<DoctorReport> {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   const nodeCheck: DoctorCheck = nodeMajor >= MIN_NODE
@@ -211,6 +253,7 @@ export async function doctor(root: string, options: DoctorOptions = {}): Promise
     checkChromium(),
   ]);
 
+  const alchemyCheck = checkAlchemy(root);
   const checks: DoctorCheck[] = [
     nodeCheck,
     pnpmCheck,
@@ -219,6 +262,7 @@ export async function doctor(root: string, options: DoctorOptions = {}): Promise
     chromiumCheck,
     checkSkillLinks(root),
     checkManifest(root),
+    ...(alchemyCheck ? [alchemyCheck] : []),
   ];
   return { ok: checks.every((c) => c.status !== "fail"), checks };
 }

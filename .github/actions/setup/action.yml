@@ -10,6 +10,9 @@ inputs:
   cache-verification:
     description: Restore prior verification results. Nightly checks run fresh.
     default: "true"
+  eliza-build:
+    description: Build (or restore cached) vendored Eliza packages needed by app builds and tests.
+    default: "true"
 outputs:
   spec-cache-path:
     description: What the spec cache holds, for the step that saves it at the end of a job.
@@ -202,10 +205,40 @@ runs:
           rm -f ".turbo/cache/$hash-manifest.json"
           mv "$archive" "$meta" .turbo/cache/
         done
+    - id: eliza-cache
+      if: inputs.eliza-build == 'true'
+      shell: bash
+      env:
+        LOCK_HASH: ${{ hashFiles('.nvmrc', 'pnpm-lock.yaml') }}
+      run: |
+        [[ -d vendor/eliza/packages/core/src ]] || exit 0
+        sha=$(git rev-parse HEAD:vendor/eliza 2>/dev/null || git -C vendor/eliza rev-parse HEAD 2>/dev/null || true)
+        [[ $sha =~ ^[a-f0-9]{40}$ ]] || exit 0
+        arch=$(node -p 'process.arch')
+        printf 'key=eliza-build-v1-%s-%s-%s-%s\n' "$RUNNER_OS" "$arch" "$sha" "$LOCK_HASH" >> "$GITHUB_OUTPUT"
+    - id: restore-eliza-cache
+      if: steps.eliza-cache.outputs.key != ''
+      continue-on-error: true
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          vendor/eliza/gen
+          vendor/eliza/packages/core/gen
+          vendor/eliza/packages/core/dist
+          vendor/eliza/packages/core/.vibe
+          vendor/eliza/packages/cloud/gen
+          vendor/eliza/packages/cloud/dist
+          vendor/eliza/packages/cloud/.vibe
+          vendor/eliza/packages/agent/gen
+          vendor/eliza/packages/agent/dist
+          vendor/eliza/packages/agent/.vibe
+        key: ${{ steps.eliza-cache.outputs.key }}
     - name: Install workspace dependencies
       id: install-workspace
       shell: bash
       env:
+        ELIZA_BUILD: ${{ inputs.eliza-build }}
+        ELIZA_CACHE_HIT: ${{ steps.restore-eliza-cache.outputs.cache-hit }}
         PUBLISH_GEN_SEED: ${{ inputs.verification == 'true' && steps.gen-seed.outputs.prefix != '' }}
         REMEMBER_RESTORED_EVALUATORS: >-
           ${{ startsWith(inputs.job, 'selftest-') &&
@@ -229,7 +262,30 @@ runs:
         fi
         if [[ $PUBLISH_GEN_SEED == true ]]; then export TURBO_RUN_SUMMARY=true; fi
         pnpm install --frozen-lockfile
-        if [[ -d vendor/eliza/packages/core/src ]]; then pnpm eliza:gen; fi
+        if [[ $ELIZA_BUILD == true && $ELIZA_CACHE_HIT != true && -d vendor/eliza/packages/core/src ]]; then
+          pnpm eliza:gen
+        fi
+    - id: save-eliza-cache
+      if: >-
+        inputs.eliza-build == 'true' &&
+        steps.eliza-cache.outputs.key != '' &&
+        steps.restore-eliza-cache.outputs.cache-hit != 'true' &&
+        github.event_name == 'push'
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: |
+          vendor/eliza/gen
+          vendor/eliza/packages/core/gen
+          vendor/eliza/packages/core/dist
+          vendor/eliza/packages/core/.vibe
+          vendor/eliza/packages/cloud/gen
+          vendor/eliza/packages/cloud/dist
+          vendor/eliza/packages/cloud/.vibe
+          vendor/eliza/packages/agent/gen
+          vendor/eliza/packages/agent/dist
+          vendor/eliza/packages/agent/.vibe
+        key: ${{ steps.eliza-cache.outputs.key }}
     - id: publish-gen-seed
       if: inputs.verification == 'true' && steps.gen-seed.outputs.prefix != ''
       continue-on-error: true

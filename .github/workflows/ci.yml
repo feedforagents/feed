@@ -32,6 +32,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           job: simulate-${{ matrix.shard }}
+          eliza-build: "false"
       - name: Simulate the specs assigned to this shard
         id: precompute
         run: node vibestack/spec.ts ci precompute-simulations --shard ${{ matrix.shard }} --shards 4
@@ -64,7 +65,6 @@ jobs:
       - name: Build design tokens and Storybook stories
         run: |
           pnpm --filter @repo/design-system build
-          pnpm gen
           pnpm --filter @repo/ui gen
       - id: simulations
         continue-on-error: true
@@ -96,8 +96,10 @@ jobs:
           JS
       - id: verify-tasks
         run: node vibestack/spec.ts tasks build typecheck test test:browser check //#lint:js //#lint:css //#analyze --filter='!@elizaos/*' --continue=dependencies-successful --summarize --log-order=stream
-      - name: Verify Cloudflare Worker dry-run bundle
-        run: pnpm --filter @repo/app exec wrangler deploy --config wrangler.production.jsonc --dry-run
+      - name: Verify Cloudflare Worker in offline workerd
+        env:
+          ALCHEMY_FAST_DISTILLED: "1"
+        run: pnpm --filter @repo/app test:deploy
       - if: always() && steps.setup.outputs.spec-cache-key != ''
         uses: actions/cache/save@v6
         with:

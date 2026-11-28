@@ -1,5 +1,11 @@
 export { commands } from "./commands/index.ts";
 export {
+  buildFeedVerificationChecks,
+  verifyFeedDeployment,
+  type FeedVerificationOptions,
+  type FeedVerificationReport,
+} from "./commands/verify-live.ts";
+export {
   defineCommand,
   runCli,
   type CliContext,
