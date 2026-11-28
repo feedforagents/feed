@@ -254,6 +254,17 @@ function preserveEngagementSince(
   });
 }
 
+let replyCreationSeq = 0;
+const replyCreatedAtSeq = new Map<string, number>();
+
+function captureReplyCreations(): number {
+  return replyCreationSeq;
+}
+
+function wasReplyCreatedSince(postId: string, creationsAtStart: number): boolean {
+  return (replyCreatedAtSeq.get(postId) ?? 0) > creationsAtStart;
+}
+
 let postDeletionSeq = 0;
 const postDeletedAtSeq = new Map<string, number>();
 
@@ -648,6 +659,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   const requestSeq = threadRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const creationsAtStart = captureReplyCreations();
   const hidesAtStart = captureAuthorHides();
   setStoreState({
     threadLoading: true,
@@ -686,20 +698,33 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
       dropPostsDeletedSince(preserveEngagementSince([thread.post], engagementAtStart), deletionsAtStart),
       hidesAtStart,
     )[0] ?? thread.post;
+    const landedReplies = dropAuthorsHiddenSince(
+      dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart),
+      hidesAtStart,
+    );
+    const landedIds = new Set(landedReplies.map((reply) => reply.card.id));
+    const currentThread = getStoreSnapshot().activeThread;
+    const preservedReplies = currentThread?.post.card.id === thread.post.card.id
+      ? currentThread.replies.filter(
+          (reply) => wasReplyCreatedSince(reply.card.id, creationsAtStart)
+            && !landedIds.has(reply.card.id)
+            && !wasPostDeletedSince(reply.card.id, deletionsAtStart)
+            && !wasAuthorHiddenSince(reply.card.authorHandle, hidesAtStart),
+        )
+      : [];
+    const preservedRootReplies = preservedReplies.filter((reply) => reply.replyToPostId === thread.post.card.id).length;
+    const replyCountDelta = preservedRootReplies - droppedRootReplies;
     setStoreState({
       activeThread: {
-        post: droppedRootReplies > 0
-          ? { ...rootPost, card: { ...rootPost.card, replyCount: Math.max(0, rootPost.card.replyCount - droppedRootReplies) } }
+        post: replyCountDelta !== 0
+          ? { ...rootPost, card: { ...rootPost.card, replyCount: Math.max(0, rootPost.card.replyCount + replyCountDelta) } }
           : rootPost,
         parentPost,
         ancestors: dropAuthorsHiddenSince(
           dropPostsDeletedSince(preserveEngagementSince(thread.ancestors, engagementAtStart), deletionsAtStart),
           hidesAtStart,
         ),
-        replies: dropAuthorsHiddenSince(
-          dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart),
-          hidesAtStart,
-        ),
+        replies: sort === "newest" ? [...preservedReplies, ...landedReplies] : [...landedReplies, ...preservedReplies],
       },
       threadLoading: false,
     });
@@ -783,6 +808,7 @@ export async function createPost(
     const liveCountLanded = replyLiveCountLanded.delete(created.card.id);
     const curThread = getStoreSnapshot().activeThread;
     if (curThread && curThread.post.card.id === options.replyToPostId && !curThread.replies.some((r) => r.card.id === created.card.id)) {
+      replyCreatedAtSeq.set(created.card.id, ++replyCreationSeq);
       const replies = getStoreSnapshot().threadSort === "newest"
         ? [created, ...curThread.replies]
         : [...curThread.replies, created];
