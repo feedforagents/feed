@@ -1909,8 +1909,9 @@ export async function sendChatMessage(chatId: string, content: string): Promise<
 export async function reactToChatMessage(messageId: string, emoji: string): Promise<void> {
   const s = getStoreSnapshot();
   if (!s.viewer || !s.selectedChatId) return;
+  const chatId = s.selectedChatId;
   const res = await requestJson(
-    `/api/chats/${encodeURIComponent(s.selectedChatId)}/messages/${encodeURIComponent(messageId)}/reactions`,
+    `/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/reactions`,
     {
       method: "POST",
       body: { emoji },
@@ -1921,7 +1922,43 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
     setErrorNotice(res.message);
     return;
   }
-  await loadChatMessages(s.selectedChatId);
+  const reloaded = await loadChatMessages(chatId);
+  if (!reloaded) {
+    applyCommittedReaction(chatId, messageId, emoji, res.data);
+  }
+}
+
+function applyCommittedReaction(chatId: string, messageId: string, emoji: string, data: unknown): void {
+  const s = getStoreSnapshot();
+  if (!s.viewer || s.selectedChatId !== chatId) return;
+  const rec = isRecord(data) ? data : {};
+  if (typeof rec.added !== "boolean") return;
+  const added = rec.added;
+  const committedEmoji = optStr(rec.emoji) ?? emoji;
+  let changed = false;
+  const chatMessages = s.chatMessages.map((message) => {
+    if (message.id !== messageId) return message;
+    const existing = message.reactions.find((r) => r.emoji === committedEmoji);
+    if (added) {
+      if (existing?.reacted) return message;
+      changed = true;
+      return {
+        ...message,
+        reactions: existing
+          ? message.reactions.map((r) => (r.emoji === committedEmoji ? { ...r, count: r.count + 1, reacted: true } : r))
+          : [...message.reactions, { emoji: committedEmoji, count: 1, reacted: true }],
+      };
+    }
+    if (!existing?.reacted) return message;
+    changed = true;
+    return {
+      ...message,
+      reactions: message.reactions
+        .map((r) => (r.emoji === committedEmoji ? { ...r, count: r.count - 1, reacted: false } : r))
+        .filter((r) => r.count > 0),
+    };
+  });
+  if (changed) setStoreState({ chatMessages });
 }
 
 const respondingInviteIds = new Set<string>();
