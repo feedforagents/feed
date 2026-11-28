@@ -836,6 +836,41 @@ it.effect('RSS refresh runs once five minute indices have passed, however many s
   })
 }))
 
+it.effect('RSS refresh records a total outage and can recover before the next interval (spec/engine/worldClock.md, "RSS ingestion and parody generation have one scheduled owner at 5-minute cadence")', () => scoped(effect {
+  const firstMs = Date.UTC(2026, 10, 27, 10, 0, 0)
+  const outageMs = firstMs + 300_000
+  const retryMs = outageMs + 60_000
+  const readHealth = () => queryRows("SELECT last_status, last_success_at FROM feed_tick_health WHERE job_name = 'rss-refresh'")
+  try withSeededEngine(firstMs, effect {
+    try withStubProvider(200, "", effect (healthyUrl: string) => {
+      try withStubProvider(503, "", effect (failedUrl: string) => {
+        const runAt = (nowMs: number, urls: string) => withEnvOverrides({ FEED_RSS_URLS: urls }, runRssRefreshTick(nowMs))
+        const initial = try runAt(firstMs, healthyUrl)
+        const outage = runAt(outageMs, failedUrl) catch (error) => failureCode(error)
+        const [failedHealth] = try readHealth()
+        const recovery = try runAt(retryMs, `${failedUrl},${healthyUrl}`)
+        const [recoveredHealth] = try readHealth()
+        try check(() => assert.deepStrictEqual(
+          {
+            initial,
+            outage,
+            afterOutage: [toText(failedHealth?.last_status), toInt(failedHealth?.last_success_at)],
+            recovery,
+            afterRecovery: [toText(recoveredHealth?.last_status), toInt(recoveredHealth?.last_success_at)]
+          },
+          {
+            initial: { skipped: false, fetchedCount: 0, insertedCount: 0 },
+            outage: "RSS_FAILED",
+            afterOutage: ["error", firstMs],
+            recovery: { skipped: false, fetchedCount: 0, insertedCount: 0 },
+            afterRecovery: ["ok", retryMs]
+          }
+        ))
+      })
+    })
+  })
+}))
+
 it.effect('NPCs execute full trading and social actions, alpha invites honor blocks and cooldowns, and atomic settlement publishes clean proof articles and NEW MARKET posts (spec/engine/npcLoop.md, "Story: Drive NPC spot markets, social posts, and alpha-group invites within D-25 bounds"; spec/engine/narrativeArc.md, "Story: Advance rolling arcs and publish phase-aware clues"; spec/engine/narrativeArc.md, "Story: Prepare private proofs and settle expired markets safely"; spec/engine/worldClock.md, "Story: Schedule core world jobs and exclude retired routes")', () => scoped(effect {
   const liveNow = try TestClock.withLive(Clock.currentTimeMillis)
   try withSeededEngine(liveNow, effect {

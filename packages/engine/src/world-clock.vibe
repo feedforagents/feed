@@ -1076,18 +1076,22 @@ export effect function runRssRefreshTick(nowMs?: number): RssRefreshResult!(Engi
       for (let i = 0; i < feedCount; i += 1) {
         selectedUrls.push(configuredUrls[(bucket + i) % configuredUrls.length]!)
       }
-      const perFeedResults = try Effect.forEach(
+      const feedAttempts = try Effect.forEach(
         selectedUrls,
         (url) => effect {
           const req = HttpClientRequest.get(url)
           const response = fetchTextWithTimeout(req, "8 seconds", "RSS_FAILED", `RSS fetch failed for ${url}`) catch effect () => null
-          if (!response || response.status < 200 || response.status >= 300 || response.text.length === 0) {
-            return [] as ReadonlyArray<RssFeedHeadlineItem>
+          if (!response || response.status < 200 || response.status >= 300) {
+            return null
           }
           return extractRssHeadlinesFromXml(response.text, url)
         },
         { concurrency: 6 },
       )
+      const perFeedResults = feedAttempts.filter((items) => items !== null)
+      if (feedAttempts.length > 0 && perFeedResults.length === 0) {
+        throw new EngineFailure({ code: "RSS_FAILED", message: "All selected RSS feeds failed." })
+      }
       const perFeedBuckets = perFeedResults.filter((bucket) => bucket.length > 0)
       const interleaved = interleaveRssFeedItems(perFeedBuckets)
       let insertedCount = 0
