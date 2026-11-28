@@ -724,7 +724,7 @@ export function bootStore(): void {
       }
     }
     const route = getStoreSnapshot().route;
-    const tasks: Promise<void>[] = [loadDataForRoute(route, initialSearch)];
+    const tasks: Promise<unknown>[] = [loadDataForRoute(route, initialSearch)];
     if (route !== "Markets" && route !== "Leaderboard") {
       tasks.push(loadWorldStatus());
     }

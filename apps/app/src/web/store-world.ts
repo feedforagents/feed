@@ -1640,16 +1640,16 @@ export async function markChatRead(chatId: string): Promise<void> {
 
 let chatsLoadCount = 0;
 
-export async function loadChats(loadMessages = true, preferredChatId?: string | null): Promise<void> {
+export async function loadChats(loadMessages = true, preferredChatId?: string | null): Promise<boolean> {
   const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
-  if (!viewerId) return;
+  if (!viewerId) return false;
   const loadId = ++chatsLoadCount;
   if (loadMessages) setStoreState({ chatsLoading: true });
   const [chatsRes, invitesRes] = await Promise.all([
     requestJson("/api/chats", { parse: (raw) => decodeChats(raw, viewerId) }),
     requestJson("/api/chats/invites", { parse: decodeAlphaInvites }),
   ]);
-  if (loadId !== chatsLoadCount) return;
+  if (loadId !== chatsLoadCount) return true;
   const s = getStoreSnapshot();
   const nextChats = chatsRes.ok ? chatsRes.data : s.chats;
   const preferred = preferredChatId ?? s.selectedChatId;
@@ -1666,6 +1666,7 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
   if (loadMessages && selectedId) {
     await loadChatMessages(selectedId);
   }
+  return chatsRes.ok;
 }
 
 let chatMessagesLoadCount = 0;
@@ -1922,7 +1923,10 @@ export async function respondGroupInvite(inviteId: string, accept: boolean): Pro
         n.inviteId === inviteId ? { ...n, item: { ...n.item, read: true, invitePending: false } } : n,
       ),
     });
-    await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
+    const [refreshed] = await Promise.all([loadChats(cur.route === "Chats"), loadNotifications()]);
+    if (accept && !refreshed) {
+      setErrorNotice("Joined group, but the chat list failed to refresh.");
+    }
   } finally {
     respondingInviteIds.delete(inviteId);
   }
