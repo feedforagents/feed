@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadArticle } from "../src/web/store-world.ts";
 import type { AppArticle } from "../src/web/types.ts";
-import { stubFetchUrl } from "./moderation-fixtures.ts";
+import { expectFailureNotice, stubFetchUrl } from "./moderation-fixtures.ts";
 
 const cachedArticle: AppArticle = {
   id: "article-a",
@@ -18,9 +18,9 @@ const cachedArticle: AppArticle = {
   publishedAtMs: 1700000000000,
 };
 
-function seedCachedArticle() {
+function setArticleStoreState(articles: AppArticle[]): void {
   setStoreState({
-    explore: { trending: [], articles: [cachedArticle], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
+    explore: { trending: [], articles, posts: [], accounts: [], actors: [], organizations: [], tags: [] },
     activeArticle: null,
     activeArticleId: null,
     articleLoading: false,
@@ -29,67 +29,58 @@ function seedCachedArticle() {
   });
 }
 
-function expectFailureNotice(message: string): void {
-  const current = getStoreSnapshot();
-  expect(current.errorMessage).toBe(message);
-  expect(current.toasts.some((t) => t.tone === "destructive" && t.message === message)).toBe(true);
+function seedCachedArticle(): void {
+  setArticleStoreState([cachedArticle]);
+}
+
+async function loadArticleFailingWith(status: number, message: string): Promise<void> {
+  stubFetchUrl(() => Promise.resolve(Response.json({ message }, { status })));
+  await loadArticle("article-a");
+  expect(getStoreSnapshot().articleLoading).toBe(false);
+}
+
+function freshArticleResponse(id: string, title: string, summary: string, body: string): Promise<Response> {
+  return Promise.resolve(Response.json({
+    id,
+    title,
+    summary,
+    body,
+    authorOrgName: "Feed Wire",
+    publishedAt: 1700000000000,
+  }));
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  setStoreState({
-    explore: { trending: [], articles: [], posts: [], accounts: [], actors: [], organizations: [], tags: [] },
-    activeArticle: null,
-    activeArticleId: null,
-    articleLoading: false,
-    errorMessage: null,
-    toasts: [],
-  });
+  setArticleStoreState([]);
 });
 
-it('Opening a removed article reports not found instead of showing the cached copy (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  seedCachedArticle();
-  stubFetchUrl(() => Promise.resolve(Response.json({ message: "Article not found" }, { status: 404 })));
+it('Opening an article that is not found reports not found (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  await loadArticleFailingWith(404, "Article not found");
 
-  await loadArticle("article-a");
-
-  expect(getStoreSnapshot().articleLoading).toBe(false);
   expect(getStoreSnapshot().activeArticle).toBeNull();
   expectFailureNotice("Article not found");
 });
 
 it('A failed article refresh reports the failure while the cached copy stays readable (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   seedCachedArticle();
-  stubFetchUrl(() => Promise.resolve(Response.json({ message: "Article unavailable" }, { status: 500 })));
+  await loadArticleFailingWith(500, "Article unavailable");
 
-  await loadArticle("article-a");
-
-  expect(getStoreSnapshot().articleLoading).toBe(false);
   expect(getStoreSnapshot().activeArticle?.id).toBe("article-a");
   expectFailureNotice("Article unavailable");
 });
 
 it('A failed article load with no cached copy reports the failure (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   setStoreState({ errorMessage: null, toasts: [] });
-  stubFetchUrl(() => Promise.resolve(Response.json({ message: "Article unavailable" }, { status: 500 })));
+  await loadArticleFailingWith(500, "Article unavailable");
 
-  await loadArticle("article-a");
-
-  expect(getStoreSnapshot().articleLoading).toBe(false);
   expect(getStoreSnapshot().activeArticle).toBeNull();
   expectFailureNotice("Article unavailable");
 });
 
 it('A successful article load replaces the cached copy with no failure notice (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
   seedCachedArticle();
-  stubFetchUrl(() => Promise.resolve(Response.json({
-    id: "article-a",
-    title: "Updated headline",
-    summary: "Fresh summary",
-    body: "Fresh body",
-    authorOrgName: "Feed Wire",
-    publishedAt: 1700000000000,
-  })));
+  stubFetchUrl(() => freshArticleResponse("article-a", "Updated headline", "Fresh summary", "Fresh body"));
 
   await loadArticle("article-a");
 
@@ -107,14 +98,7 @@ it('A superseded article load that fails stays silent (spec/app/navigation.md, "
       firstCall = false;
       return new Promise<Response>((settle) => { resolveFirst = settle; });
     }
-    return Promise.resolve(Response.json({
-      id: "article-b",
-      title: "Second headline",
-      summary: "Second summary",
-      body: "Second body",
-      authorOrgName: "Feed Wire",
-      publishedAt: 1700000000000,
-    }));
+    return freshArticleResponse("article-b", "Second headline", "Second summary", "Second body");
   });
 
   const pending = loadArticle("article-a");

@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadProfileLikes, loadProfileReplies, loadProfileTrades } from "../src/web/store-world.ts";
-import { aliceViewer, makeProfileBundle, postRaw, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
+import { aliceViewer, expectFailureNotice, makeProfileBundle, postRaw, resetModerationStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
 function openBobProfile() {
   setStoreState({
@@ -17,12 +17,6 @@ function openBobProfile() {
 
 function failedResponse(message: string) {
   return Promise.resolve(Response.json({ message }, { status: 500 }));
-}
-
-function expectFailureNotice(message: string): void {
-  const current = getStoreSnapshot();
-  expect(current.errorMessage).toBe(message);
-  expect(current.toasts.some((t) => t.tone === "destructive" && t.message === message)).toBe(true);
 }
 
 afterEach(() => {

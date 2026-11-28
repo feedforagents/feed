@@ -697,8 +697,7 @@ export async function loadArticle(articleId: string): Promise<void> {
     setStoreState({ activeArticle: res.data, articleLoading: false });
     return;
   }
-  const notFound = res.ok ? true : res.status === 404;
-  setStoreState({ articleLoading: false, ...(notFound ? { activeArticle: null } : {}) });
+  setStoreState({ articleLoading: false });
   setErrorNotice(res.ok ? "Article not found" : res.message);
 }
 

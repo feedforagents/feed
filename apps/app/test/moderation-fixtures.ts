@@ -1,5 +1,5 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { decodePost, type AppPost, type ViewerSession } from "../src/web/types.ts";
 
@@ -113,6 +113,12 @@ export function stubFetchUrl(handler: (url: string) => Promise<Response>): void 
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     return handler(url);
   }));
+}
+
+export function expectFailureNotice(message: string): void {
+  const current = getStoreSnapshot();
+  expect(current.errorMessage).toBe(message);
+  expect(current.toasts.some((t) => t.tone === "destructive" && t.message === message)).toBe(true);
 }
 
 export function resetWorldFeedStore(
