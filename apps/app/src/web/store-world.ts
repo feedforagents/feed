@@ -631,6 +631,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   const requestSeq = threadRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({
     threadLoading: true,
     activePostId: postId,
@@ -650,22 +651,38 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
       setErrorNotice("Post not found");
       return;
     }
+    if (wasAuthorHiddenSince(thread.post.card.authorHandle, hidesAtStart)) {
+      setStoreState({ activeThread: null, threadLoading: false });
+      return;
+    }
     for (const reply of thread.replies) replyLiveCountLanded.delete(reply.card.id);
     const parentPost = thread.parentPost && !wasPostDeletedSince(thread.parentPost.card.id, deletionsAtStart)
-      ? dropPostsDeletedSince(preserveEngagementSince([thread.parentPost], engagementAtStart), deletionsAtStart)[0] ?? null
+      ? dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince([thread.parentPost], engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        )[0] ?? null
       : null;
     const droppedRootReplies = thread.replies.filter(
       (reply) => reply.replyToPostId === thread.post.card.id && wasPostDeletedSince(reply.card.id, deletionsAtStart),
     ).length;
-    const rootPost = dropPostsDeletedSince(preserveEngagementSince([thread.post], engagementAtStart), deletionsAtStart)[0] ?? thread.post;
+    const rootPost = dropAuthorsHiddenSince(
+      dropPostsDeletedSince(preserveEngagementSince([thread.post], engagementAtStart), deletionsAtStart),
+      hidesAtStart,
+    )[0] ?? thread.post;
     setStoreState({
       activeThread: {
         post: droppedRootReplies > 0
           ? { ...rootPost, card: { ...rootPost.card, replyCount: Math.max(0, rootPost.card.replyCount - droppedRootReplies) } }
           : rootPost,
         parentPost,
-        ancestors: dropPostsDeletedSince(preserveEngagementSince(thread.ancestors, engagementAtStart), deletionsAtStart),
-        replies: dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart),
+        ancestors: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(thread.ancestors, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
+        replies: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
       },
       threadLoading: false,
     });
