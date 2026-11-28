@@ -735,6 +735,13 @@ export async function createPost(
   }
   if (options?.replyToPostId) {
     clearReplyFailureNotice(options.replyToPostId);
+    setStoreState({
+      postedReplyClear: {
+        postId: options.replyToPostId,
+        content,
+        seq: (getStoreSnapshot().postedReplyClear?.seq ?? 0) + 1,
+      },
+    });
   }
   setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
   if (res.data && options?.replyToPostId) {
