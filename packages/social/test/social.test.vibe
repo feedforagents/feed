@@ -1031,6 +1031,9 @@ it.effect(
       quoteCents: 2500
     }
     const spotUnrelatedGameViewer = try realtimeEventForViewer(store, npcSpotEvent, "bob")
+    // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"; spec/social/moderation.md, "Muting hides an author's feed content without removing follows"
+    const npcClueEvent: FeedRealtimeEvent = { type: "market.clue", marketId: "seed-market-1", actorId: "ailon-musk", phase: "rumor" }
+    const clueBeforeModeration = try realtimeEventForViewer(store, npcClueEvent, "bob")
     try blockAccount("alice", "ailon-musk")
     try blockAccount("ailon-musk", "carol")
     try muteAccount("bob", "ailon-musk")
@@ -1069,6 +1072,15 @@ it.effect(
       socialModeViewer: try orgFrames("dave"),
       anonymousViewer: try orgFrames(null),
       brokenStore: try orgFrames("carol", brokenStore)
+    }
+    const clueStream = {
+      beforeModeration: clueBeforeModeration,
+      viewerBlocksNpc: try realtimeEventForViewer(store, npcClueEvent, "alice"),
+      npcBlocksViewer: try realtimeEventForViewer(store, npcClueEvent, "carol"),
+      viewerMutesNpc: try realtimeEventForViewer(store, npcClueEvent, "bob"),
+      socialModeViewer: try realtimeEventForViewer(store, npcClueEvent, "dave"),
+      anonymousViewer: try realtimeEventForViewer(store, npcClueEvent, null),
+      brokenStore: try realtimeEventForViewer(brokenStore, npcClueEvent, "dave")
     }
 
     try check(() => assert.deepStrictEqual({
@@ -1131,7 +1143,8 @@ it.effect(
       perpStream,
       perpFrames,
       spotStream,
-      orgStream
+      orgStream,
+      clueStream
     }, {
       rateKeys: [
         [["alice:post", 1]],
@@ -1213,6 +1226,15 @@ it.effect(
         socialModeViewer: [true, true],
         anonymousViewer: [true, true],
         brokenStore: [false, false]
+      },
+      clueStream: {
+        beforeModeration: npcClueEvent,
+        viewerBlocksNpc: undefined,
+        npcBlocksViewer: undefined,
+        viewerMutesNpc: undefined,
+        socialModeViewer: npcClueEvent,
+        anonymousViewer: npcClueEvent,
+        brokenStore: undefined
       }
     }))
   })
