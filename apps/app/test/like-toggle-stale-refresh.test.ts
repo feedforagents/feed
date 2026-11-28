@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { loadFeed, openThread, toggleLike } from "../src/web/store-world.ts";
+import { closeThread, loadFeed, loadMoreFeed, openThread, toggleLike } from "../src/web/store-world.ts";
 import { eventSources, installStubEventSource } from "./app-test-helpers.tsx";
 import { decodedPost, jsonPayload, postRaw, resetWorldFeedStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
@@ -166,5 +166,63 @@ it("restores the pre-click count when the like fails with no live engagement in 
   await toggle;
   expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(false);
   expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(5);
+  expect(getStoreSnapshot().errorMessage).toBe("Like failed");
+});
+
+function releaseStaleThread(): void {
+  releaseThread?.(jsonPayload({
+    post: postRaw({ id: "post-1", likeCount: 5, likedByViewer: false }),
+    parentPost: null,
+    ancestors: [],
+    replies: [],
+  }));
+}
+
+function startDetailLikeThenLeave(feedNextCursor: string | null = null): Promise<void> {
+  resetWorldFeedStore({ feedPosts: [], feedNextCursor });
+  setStoreState({
+    route: "PostDetail",
+    activePostId: "post-1",
+    activeThread: { post: basePost, parentPost: null, ancestors: [], replies: [] },
+  });
+  gateLike = true;
+  const toggle = toggleLike("post-1");
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(true);
+  closeThread();
+  return toggle;
+}
+
+it("keeps a like that committed while the post was out of the store when a reopened thread resolves with a pre-like snapshot (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const toggle = startDetailLikeThenLeave();
+  const reopen = openThread("post-1");
+  releaseLike?.(jsonPayload({ postId: "post-1", liked: true, likeCount: 6 }));
+  await toggle;
+  releaseStaleThread();
+  await reopen;
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(true);
+  expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(6);
+});
+
+it("keeps a like that committed while the post was out of the store when a feed page appends a pre-like snapshot (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const toggle = startDetailLikeThenLeave("cursor-1");
+  setStoreState({ route: "Home" });
+  const more = loadMoreFeed();
+  releaseLike?.(jsonPayload({ postId: "post-1", liked: true, likeCount: 6 }));
+  await toggle;
+  releaseFeed?.(jsonPayload({ items: [postRaw({ id: "post-1", likeCount: 5, likedByViewer: false })], nextCursor: null }));
+  await more;
+  expect(getStoreSnapshot().feedPosts[0]?.card.liked).toBe(true);
+  expect(getStoreSnapshot().feedPosts[0]?.card.likeCount).toBe(6);
+});
+
+it("restores the pre-click like state when a like fails while the post is out of the store and a reopened thread resolves (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const toggle = startDetailLikeThenLeave();
+  const reopen = openThread("post-1");
+  releaseLike?.(jsonPayload({ message: "Like failed" }, 500));
+  await toggle;
+  releaseStaleThread();
+  await reopen;
+  expect(getStoreSnapshot().activeThread?.post.card.liked).toBe(false);
+  expect(getStoreSnapshot().activeThread?.post.card.likeCount).toBe(5);
   expect(getStoreSnapshot().errorMessage).toBe("Like failed");
 });

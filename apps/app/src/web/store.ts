@@ -139,6 +139,7 @@ import {
   patchPostCardAcrossStore,
   previewPerpOrder,
   reactToChatMessage,
+  recordLiveEngagementCounts,
   rebalancePerpPosition,
   removeGroupMember,
   removePostAcrossStore,
@@ -509,6 +510,7 @@ function handleSseEvent(eventType: string, rawData: unknown): void {
         ...(likeCount !== undefined ? { likeCount } : {}),
         ...(repostCount !== undefined ? { repostCount } : {}),
       }));
+      recordLiveEngagementCounts(postId, { likeCount, repostCount });
     }
     return;
   }
