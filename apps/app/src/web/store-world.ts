@@ -578,13 +578,17 @@ export async function loadMoreFeed(): Promise<void> {
   setErrorNotice(res.message);
 }
 
+let trendingLoadCount = 0;
+
 export async function loadTrending(): Promise<void> {
   const s = getStoreSnapshot();
+  const loadId = ++trendingLoadCount;
   setStoreState({ trendingLoading: true });
   const [trendRes, articlesRes] = await Promise.all([
     requestJson(appendAnonymousModeParam("/api/trending", s), { parse: decodeTrendingList }),
     requestJson(appendAnonymousModeParam("/api/articles?limit=10", s), { parse: decodeArticles }),
   ]);
+  if (loadId !== trendingLoadCount) return;
   const cur = getStoreSnapshot();
   const nextTrending = trendRes.ok ? trendRes.data : cur.rightRailTrending;
   const nextArticles = articlesRes.ok && articlesRes.data.length > 0 ? articlesRes.data : cur.rightRailArticles;
