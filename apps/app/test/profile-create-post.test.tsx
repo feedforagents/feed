@@ -60,7 +60,7 @@ async function publishOnProfile(handle: string, expectedInitialCount: number) {
   setStoreState({ viewer: aliceViewer, route: "Profile", profileHandle: handle });
   await loadProfile(handle);
   expect(getStoreSnapshot().profileBundle?.postsCount).toBe(expectedInitialCount);
-  expect(await createPost("Alice fresh call")).toBe(true);
+  expect((await createPost("Alice fresh call")).kind).toBe("published");
   return getStoreSnapshot().profileBundle;
 }
 

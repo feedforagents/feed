@@ -28,9 +28,9 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
   const submitReply = async (text: string) => {
     if (!thread) return;
     setReplyBusy(true);
-    const ok = await storeActions.createPost(text, { replyToPostId: thread.post.card.id });
+    const result = await storeActions.createPost(text, { replyToPostId: thread.post.card.id });
     setReplyBusy(false);
-    if (ok) setReplyText("");
+    if (result.kind === "published") setReplyText("");
   };
 
   return (

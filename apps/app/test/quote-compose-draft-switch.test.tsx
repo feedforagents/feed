@@ -11,7 +11,7 @@ import { composerTextarea, flush, installAppTestLifecycle, installMockNetwork, m
 const opened: Root[] = [];
 
 installAppTestLifecycle(opened, () => {
-  setStoreState({ viewer: null, route: "Home", composeOpen: false, quotePostTarget: null });
+  setStoreState({ viewer: null, route: "Home", composeSession: null });
 });
 
 function respond(path: string): unknown {
