@@ -2,7 +2,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadChats } from "../src/web/store-world.ts";
-import { aliceViewer, resetModerationStore } from "./moderation-fixtures.ts";
+import { aliceViewer, makeBobChatSummary, resetModerationStore } from "./moderation-fixtures.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -57,21 +57,7 @@ it('A failed conversation list refresh keeps the loaded conversations and report
   setStoreState({
     viewer: aliceViewer,
     route: "Chats",
-    chats: [{
-      id: "chat-1",
-      chatType: "Direct",
-      title: "Bob",
-      subtitle: "@bob",
-      memberCount: 2,
-      unreadCount: 0,
-      lastMessagePreview: "hello",
-      lastMessageAt: 2,
-      peerAvatarUrl: null,
-      peerHandle: "bob",
-      members: [],
-      isOwner: false,
-      isBlocked: false,
-    }],
+    chats: [makeBobChatSummary()],
     selectedChatId: "chat-1",
     chatsLoading: false,
     errorMessage: null,

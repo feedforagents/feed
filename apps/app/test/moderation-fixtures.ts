@@ -1,7 +1,7 @@
 // spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts"
 import { vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
-import { decodePost, type AppPost, type ViewerSession } from "../src/web/types.ts";
+import { decodePost, type AppChatSummary, type AppPost, type ViewerSession } from "../src/web/types.ts";
 
 export const aliceViewer = {
   accountId: "alice",
@@ -21,6 +21,24 @@ export const aliceViewer = {
   isReviewer: false,
   agentGrant: null,
 };
+
+export function makeBobChatSummary(): AppChatSummary {
+  return {
+    id: "chat-1",
+    chatType: "Direct",
+    title: "Bob",
+    subtitle: "@bob",
+    memberCount: 2,
+    unreadCount: 0,
+    lastMessagePreview: "hello",
+    lastMessageAt: 2,
+    peerAvatarUrl: null,
+    peerHandle: "bob",
+    members: [],
+    isOwner: false,
+    isBlocked: false,
+  };
+}
 
 export function postRaw(overrides: Record<string, unknown>): Record<string, unknown> {
   return {
