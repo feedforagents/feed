@@ -36,26 +36,16 @@ describe("project CLI", () => {
 
     const structured = createRecorder();
     expect(await runCli({ argv: ["help", "--json"], commands, rootDir: templateRoot, cwd: templateRoot, io: structured.io })).toBe(0);
-    expect(parseJson(structured.out())).toEqual({
-      ok: true,
-      command: "help",
-      data: {
-        commands: [
-          {
-            name: "status",
-            summary: "Inspect workspace packages, specs, and generated outputs",
-            usage: "pnpm cli status [--package <name|path>] [--json]",
-            flags: {
-              package: {
-                kind: "string",
-                short: "p",
-                description: "Filter to one workspace package by name or relative path",
-              },
-            },
-          },
-        ],
-      },
-    });
+    const helpPayload = parseJson(structured.out()) as {
+      readonly ok: boolean;
+      readonly command: string;
+      readonly data: {
+        readonly commands: readonly { readonly name: string }[];
+      };
+    };
+    expect(helpPayload.ok).toBe(true);
+    expect(helpPayload.command).toBe("help");
+    expect(helpPayload.data.commands.map((cmd) => cmd.name)).toEqual(["status", "deploy", "verify-live"]);
 
     const single = createRecorder();
     expect(await runCli({ argv: ["status", "--help", "--json"], commands, rootDir: templateRoot, cwd: templateRoot, io: single.io })).toBe(0);
@@ -204,5 +194,94 @@ describe("project CLI", () => {
     expect(parsed.ok).toBe(true);
     expect(parsed.command).toBe("status");
     expect(parsed.data.packages.map((pkg) => pkg.name)).toContain("@repo/cli");
+  });
+
+  test("deploy rejects conflicting --dry-run and --destroy flags", async () => {
+    const recorded = createRecorder();
+    expect(await runCli({
+      argv: ["deploy", "--dry-run", "--destroy", "--json"],
+      commands,
+      rootDir: templateRoot,
+      cwd: templateRoot,
+      io: recorded.io,
+    })).toBe(2);
+    expect(parseJson(recorded.out())).toMatchObject({
+      ok: false,
+      command: "deploy",
+    });
+  });
+
+  test("verify-live checks Feed endpoints against a fake fetch transport", async () => {
+    const { verifyFeedDeployment } = await import("../src/index.ts");
+    const seen: string[] = [];
+    const fakeFetch: typeof globalThis.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const pathname = new URL(url).pathname;
+      const method = init?.method ?? "GET";
+      seen.push(`${method} ${pathname}`);
+      if (pathname === "/api/health") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, service: "feed", gameStart: "run", commit: "abc1234" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      if (pathname === "/") {
+        return Promise.resolve(new Response('<div id="root"></div>', { status: 200 }));
+      }
+      if (pathname === "/SKILL.md") {
+        return Promise.resolve(new Response("# feed.fun skill", { status: 200 }));
+      }
+      if (pathname === "/skill.md") {
+        return Promise.resolve(new Response(null, { status: 301, headers: { location: "https://staging.feed.fun/SKILL.md" } }));
+      }
+      if (pathname === "/.well-known/agent-skills/index.json") {
+        return Promise.resolve(new Response(JSON.stringify({ skills: [{ name: "feed" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      if (pathname === "/.well-known/oauth-authorization-server") {
+        return Promise.resolve(new Response(JSON.stringify({
+          authorization_endpoint: "https://staging.feed.fun/oauth/authorize",
+          token_endpoint: "https://staging.feed.fun/oauth/token",
+        }), { status: 200, headers: { "content-type": "application/json" } }));
+      }
+      if (pathname === "/api/feed") {
+        return Promise.resolve(new Response(JSON.stringify({ items: [{ id: "p1" }] }), { status: 200, headers: { "content-type": "application/json" } }));
+      }
+      if (pathname === "/api/markets") {
+        return Promise.resolve(new Response(JSON.stringify({ predictions: [{ id: "m1" }], perps: [{ ticker: "FEED" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }));
+      }
+      if (pathname === "/api/leaderboard") {
+        return Promise.resolve(new Response(JSON.stringify({ entries: [], leaderboard: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+      }
+      if (pathname === "/mcp") {
+        const bodyText = typeof init?.body === "string" ? init.body : "";
+        if (bodyText.includes("create_post")) {
+          return Promise.resolve(new Response(JSON.stringify({ error: "unauthorized" }), {
+            status: 401,
+            headers: { "www-authenticate": 'Bearer resource_metadata="https://staging.feed.fun/.well-known/oauth-protected-resource"' },
+          }));
+        }
+        return Promise.resolve(new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200 }));
+      }
+      return Promise.resolve(new Response("ok", { status: 200 }));
+    };
+
+    const report = await verifyFeedDeployment({
+      baseUrl: "https://staging.feed.fun",
+      commitSha: "abc1234",
+      cronSecret: "test-cron-secret",
+      maxAttempts: 1,
+      initialDelayMs: 0,
+      fetch: fakeFetch,
+    });
+    expect(report.ok).toBe(true);
+    expect(report.primary.probes).toHaveLength(16);
+    expect(seen).toContain("POST /api/cron/minute-tick");
+    expect(seen).toContain("POST /api/cron/npc-tick");
   });
 });

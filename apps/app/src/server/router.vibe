@@ -681,15 +681,6 @@ effect function handleOAuthRoute(
 ): (Response | undefined)!(AuthFailure | RateLimited | StoreFailure | HttpRequestError)!Store {
   const path = url.pathname
   const method = request.method.toUpperCase()
-  if (method === "OPTIONS" && (path.startsWith("/.well-known/oauth") || path.startsWith("/oauth/"))) {
-    return makeResponse(null, { status: 204, headers: PUBLIC_CORS_HEADERS })
-  }
-  if (method === "GET" && path === "/.well-known/oauth-authorization-server") {
-    return jsonResponse(oauthAuthorizationServerMetadata(origin), 200, PUBLIC_CORS_HEADERS)
-  }
-  if (method === "GET" && (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp")) {
-    return jsonResponse(oauthProtectedResourceMetadata(origin), 200, PUBLIC_CORS_HEADERS)
-  }
   if (method === "POST" && path === "/oauth/register") {
     try consumeOAuthIpBudget(request, config, "register")
     const { data } = try readParsedBody(request)
@@ -2564,15 +2555,8 @@ effect function routeOptionalResponse(
     return method === "HEAD" ? makeResponse(null, { status: 200 }) : jsonResponse(payload)
   }
 
-  if (path === "/skill.md") {
-    if (method === "OPTIONS") return makeResponse(null, { status: 204, headers: PUBLIC_CORS_HEADERS })
-    if (method === "GET" || method === "HEAD") {
-      return makeResponse(null, { status: 301, headers: { location: `${origin}/SKILL.md`, ...PUBLIC_CORS_HEADERS } })
-    }
-  }
-
-  const skillResponse = try handleSkillRoute(request, origin)
-  if (skillResponse !== undefined) return skillResponse
+  const statelessResponse = try resolveStatelessPublicRoute(request, config)
+  if (statelessResponse !== undefined) return statelessResponse
 
   if (path === "/mcp") {
     return try handleMcpRequest({ request, origin, authConfig: config.auth })
@@ -2605,6 +2589,37 @@ effect function routeOptionalResponse(
     return jsonResponse({ error: "not_found", code: "not_found", message: `Unknown route: ${path}` }, 404)
   }
   return undefined
+}
+
+export effect function resolveStatelessPublicRoute(
+  request: Request,
+  config: AppServerConfig
+): (Response | undefined)!! {
+  const url = new URL(request.url)
+  const origin = requestOrigin(request, config)
+  const path = url.pathname
+  const method = request.method.toUpperCase()
+  const run = effect {
+    if (path === "/skill.md") {
+      if (method === "OPTIONS") return makeResponse(null, { status: 204, headers: PUBLIC_CORS_HEADERS })
+      if (method === "GET" || method === "HEAD") {
+        return makeResponse(null, { status: 301, headers: { location: `${origin}/SKILL.md`, ...PUBLIC_CORS_HEADERS } })
+      }
+    }
+    const skillResponse = try handleSkillRoute(request, origin)
+    if (skillResponse !== undefined) return skillResponse
+    if (method === "OPTIONS" && (path.startsWith("/.well-known/oauth") || path.startsWith("/oauth/"))) {
+      return makeResponse(null, { status: 204, headers: PUBLIC_CORS_HEADERS })
+    }
+    if (method === "GET" && path === "/.well-known/oauth-authorization-server") {
+      return jsonResponse(oauthAuthorizationServerMetadata(origin), 200, PUBLIC_CORS_HEADERS)
+    }
+    if (method === "GET" && (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp")) {
+      return jsonResponse(oauthProtectedResourceMetadata(origin), 200, PUBLIC_CORS_HEADERS)
+    }
+    return undefined
+  }
+  return run catch (err) => mapDomainError(err)
 }
 
 export effect function resolveOptionalRouteResponse(

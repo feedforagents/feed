@@ -11,7 +11,7 @@ on:
         options: [staging, production]
         required: true
       dry_run:
-        description: Bundle and validate without uploading to Cloudflare
+        description: Plan and validate without mutating Cloudflare resources
         type: boolean
         default: false
 
@@ -21,9 +21,11 @@ concurrency:
 
 permissions:
   contents: read
+  deployments: write
 
 env:
   TURBO_TELEMETRY_DISABLED: "1"
+  ALCHEMY_FAST_DISTILLED: "1"
 
 jobs:
   deploy:
@@ -34,14 +36,22 @@ jobs:
     env:
       TARGET_ENV: ${{ inputs.environment || (github.ref == 'refs/heads/production' && 'production' || 'staging') }}
       DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_CACHE: ${{ secrets.TURBO_TOKEN != '' && 'local:rw,remote:rw' || 'local:rw' }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_RUNTIME_SECRETS: ${{ secrets.CLOUDFLARE_RUNTIME_SECRETS }}
+      ALCHEMY_STATE_STORE: ${{ vars.ALCHEMY_STATE_STORE || '' }}
+      R2_STATE_BUCKET: ${{ vars.R2_STATE_BUCKET || '' }}
+      R2_STATE_PREFIX: ${{ vars.R2_STATE_PREFIX || '' }}
+      R2_STATE_ACCESS_KEY_ID: ${{ secrets.R2_STATE_ACCESS_KEY_ID }}
+      R2_STATE_SECRET_ACCESS_KEY: ${{ secrets.R2_STATE_SECRET_ACCESS_KEY }}
       CRON_SECRET: ${{ secrets.CRON_SECRET }}
       SURPLUS_API_KEY: ${{ secrets.SURPLUS_API_KEY }}
       DATABASE_CA_CERT: ${{ secrets.DATABASE_CA_CERT }}
       PROD_DIRECT_DATABASE_URL: ${{ secrets.PROD_DIRECT_DATABASE_URL }}
       STAGING_DIRECT_DATABASE_URL: ${{ secrets.STAGING_DIRECT_DATABASE_URL }}
+      COMMIT_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -50,14 +60,32 @@ jobs:
         with:
           job: deploy-${{ env.TARGET_ENV }}
           verification: "false"
-      - name: Generate specs and build @repo/app (SPA + Worker)
+      - name: Build @repo/app (SPA + Worker) via Turborepo
+        run: pnpm exec turbo run build --filter=@repo/app... --filter='!//' --filter='!@elizaos/*'
+      - name: Verify compiled Worker in offline workerd
+        run: pnpm --filter @repo/app test:deploy
+      - name: Restore Alchemy local state cache
+        if: vars.ALCHEMY_STATE_STORE != 'cloudflare' && vars.R2_STATE_BUCKET == ''
+        uses: actions/cache/restore@v6
+        with:
+          path: .alchemy/state
+          key: alchemy-state-feed-${{ env.TARGET_ENV }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: |
+            alchemy-state-feed-${{ env.TARGET_ENV }}-
+      - name: Preflight Cloudflare auth and run Alchemy plan (dry-run)
+        if: env.DRY_RUN == 'true'
         run: |
-          pnpm gen
-          pnpm --filter '@repo/app...' --filter '!vibestack' --filter '!@elizaos/*' --if-present run build
+          if [[ -n "$CLOUDFLARE_API_TOKEN" && -n "$CLOUDFLARE_ACCOUNT_ID" ]]; then
+            pnpm exec alchemy --fast-distilled provider check-env
+            pnpm exec alchemy --fast-distilled plan --stage "$TARGET_ENV" --no-input
+          else
+            echo "::notice::Skipping live Cloudflare Alchemy plan in dry-run because CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID are not configured (offline workerd verification already passed)."
+          fi
       - name: Migrate and seed PostgreSQL database
         if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
+          trap 'rm -f "$RUNNER_TEMP/database-ca.pem"' EXIT
           if [[ "$TARGET_ENV" == "production" ]]; then
             RAW_DB_URL="$PROD_DIRECT_DATABASE_URL"
           else
@@ -112,13 +140,13 @@ jobs:
               throw new Error("Seed verification failed: expected non-empty core world tables");
             }
           '
-      - name: Deploy Worker + Assets and sync secrets to Cloudflare
+      - name: Deploy Worker, R2, Hyperdrive, Email, Crons & Domains via Alchemy
+        id: alchemy-deploy
+        if: env.DRY_RUN != 'true'
+        env:
+          ALCHEMY_SKIP_LIVE_VERIFY: "1"
         run: |
           set -euo pipefail
-          if [[ "$DRY_RUN" == "true" ]]; then
-            pnpm --filter @repo/app exec wrangler deploy --config "wrangler.${TARGET_ENV}.jsonc" --dry-run
-            exit 0
-          fi
           if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
             echo "::error::CLOUDFLARE_API_TOKEN is not set in environment cloudflare-${TARGET_ENV}"
             exit 1
@@ -127,263 +155,19 @@ jobs:
             echo "::error::CLOUDFLARE_ACCOUNT_ID is not set"
             exit 1
           fi
-          SECRETS_FILE="$RUNNER_TEMP/worker-secrets.json"
-          trap 'rm -f "$SECRETS_FILE" "$RUNNER_TEMP/database-ca.pem"' EXIT
-          SECRETS_FILE="$SECRETS_FILE" node --input-type=module -e '
-            import { createHmac } from "node:crypto";
-            import { writeFileSync } from "node:fs";
-
-            const raw = process.env.CLOUDFLARE_RUNTIME_SECRETS || "{}";
-            const parsed = JSON.parse(raw);
-            const secrets = {};
-            for (const [key, value] of Object.entries(parsed)) {
-              if (typeof value === "string" && value.trim() !== "" && key !== "DATABASE_URL" && key !== "GAME_START") {
-                secrets[key] = value;
-              }
-            }
-            for (const key of ["CRON_SECRET", "SURPLUS_API_KEY"]) {
-              const fromEnv = process.env[key]?.trim();
-              if (fromEnv && !secrets[key]) secrets[key] = fromEnv;
-            }
-            const masterKey =
-              secrets.AGENT_ENCRYPTION_KEY ||
-              secrets.STEWARD_JWT_SECRET ||
-              secrets.CRON_SECRET ||
-              "";
-            if (!secrets.AUTH_DIGEST_KEY) {
-              if (!masterKey) throw new Error("Cannot derive AUTH_DIGEST_KEY: no master secret available");
-              secrets.AUTH_DIGEST_KEY = createHmac("sha256", masterKey)
-                .update(`feed:${process.env.TARGET_ENV}:auth-digest-key:v1`)
-                .digest("hex");
-            }
-            if (!secrets.OAUTH_SIGNING_SECRET) {
-              if (!masterKey) throw new Error("Cannot derive OAUTH_SIGNING_SECRET: no master secret available");
-              secrets.OAUTH_SIGNING_SECRET = createHmac("sha256", masterKey)
-                .update(`feed:${process.env.TARGET_ENV}:oauth-signing-secret:v1`)
-                .digest("hex");
-            }
-            writeFileSync(process.env.SECRETS_FILE, JSON.stringify(secrets), { mode: 0o600 });
-            console.log("Prepared Worker secret keys:", Object.keys(secrets).sort().join(", "));
-          '
-          SECRETS_FILE="$SECRETS_FILE" node --input-type=module -e '
-            const account = process.env.CLOUDFLARE_ACCOUNT_ID;
-            const token = process.env.CLOUDFLARE_API_TOKEN;
-            const targetEnv = process.env.TARGET_ENV;
-            const bucketName = `feed-uploads-${targetEnv}`;
-            const listRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets`, {
-              headers: { Authorization: `Bearer ${token}` }
-            });
-            if (listRes.ok) {
-              const body = await listRes.json();
-              const buckets = body?.result?.buckets ?? [];
-              if (!buckets.some((b) => b.name === bucketName)) {
-                const createRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets`, {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ name: bucketName })
-                });
-                if (!createRes.ok) throw new Error(`Failed to create R2 bucket ${bucketName}: HTTP ${createRes.status}`);
-              }
-              console.log(`R2 bucket ready: ${bucketName}`);
-            }
-          '
-          pnpm --filter @repo/app exec wrangler email sending enable feed.fun || true
-          pnpm --filter @repo/app exec wrangler deploy \
-            --config "wrangler.${TARGET_ENV}.jsonc" \
-            --secrets-file "$SECRETS_FILE" \
-            --var "COMMIT_SHA:${GITHUB_SHA}"
-          node --input-type=module -e '
-            const account = process.env.CLOUDFLARE_ACCOUNT_ID;
-            const token = process.env.CLOUDFLARE_API_TOKEN;
-            const legacyCron = `feed-cron-${process.env.TARGET_ENV}`;
-            const check = await fetch(
-              `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${legacyCron}/schedules`,
-              { headers: { Authorization: `Bearer ${token}` } }
-            );
-            if (check.ok) {
-              const clear = await fetch(
-                `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${legacyCron}/schedules`,
-                {
-                  method: "PUT",
-                  headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-                  body: JSON.stringify([])
-                }
-              );
-              console.log(`Cleared legacy ${legacyCron} schedules: HTTP ${clear.status}`);
-            }
-          '
-      - name: Verify live deployment endpoints
+          pnpm exec alchemy --fast-distilled provider check-env
+          pnpm exec alchemy --fast-distilled deploy --stage "$TARGET_ENV" --adopt --yes --no-input
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+      - name: Save Alchemy local state cache
+        if: >-
+          steps.alchemy-deploy.outputs.deployed == 'true' &&
+          vars.ALCHEMY_STATE_STORE != 'cloudflare' &&
+          vars.R2_STATE_BUCKET == ''
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .alchemy/state
+          key: alchemy-state-feed-${{ env.TARGET_ENV }}-${{ github.sha }}-${{ github.run_attempt }}
+      - name: Verify live deployment endpoints via @repo/cli
         if: env.DRY_RUN != 'true'
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            const targetEnv = process.env.TARGET_ENV;
-            const expectedSha = process.env.GITHUB_SHA;
-            const cronSecret = process.env.CRON_SECRET || JSON.parse(process.env.CLOUDFLARE_RUNTIME_SECRETS || "{}").CRON_SECRET || "";
-            const primaryOrigin = targetEnv === "production" ? "https://feed.fun" : "https://staging.feed.fun";
-
-            let health = null;
-            for (let attempt = 1; attempt <= 12; attempt++) {
-              const res = await fetch(`${primaryOrigin}/api/health`, {
-                cache: "no-store",
-                signal: AbortSignal.timeout(20_000)
-              });
-              if (res.ok) {
-                const json = await res.json();
-                if (json.ok === true && json.service === "feed" && json.gameStart === "run" && json.commit === expectedSha) {
-                  health = json;
-                  break;
-                }
-                console.log(`Attempt ${attempt}: waiting for ${expectedSha}, got`, JSON.stringify(json));
-              } else {
-                console.log(`Attempt ${attempt}: /api/health returned HTTP ${res.status}`);
-              }
-              await new Promise((r) => setTimeout(r, 5000));
-            }
-            if (!health) throw new Error(`Live ${primaryOrigin}/api/health never matched commit ${expectedSha}`);
-            console.log("Verified health:", JSON.stringify(health));
-
-            async function expectStatus(path, status, check) {
-              let lastErr = null;
-              for (let attempt = 1; attempt <= 8; attempt++) {
-                try {
-                  const res = await fetch(`${primaryOrigin}${path}`, {
-                    redirect: "manual",
-                    cache: "no-store",
-                    signal: AbortSignal.timeout(20_000)
-                  });
-                  const text = await res.text();
-                  if (res.status !== status) {
-                    throw new Error(`${path}: expected HTTP ${status}, got ${res.status}: ${text.slice(0, 300)}`);
-                  }
-                  if (check) check(text, res);
-                  console.log(`OK ${path} -> HTTP ${res.status}`);
-                  return;
-                } catch (err) {
-                  lastErr = err;
-                  if (attempt < 8) {
-                    console.log(`Retry ${attempt}/8 for ${path}: ${err instanceof Error ? err.message : String(err)}`);
-                    await new Promise((r) => setTimeout(r, 3000));
-                  }
-                }
-              }
-              throw lastErr;
-            }
-
-            await expectStatus("/", 200, (html) => {
-              if (html.includes("/_next/")) throw new Error("Root page still serves legacy Next.js HTML");
-              if (!html.includes("id=\"root\"")) throw new Error("Root page missing Vite React root");
-            });
-            await expectStatus("/SKILL.md", 200, (md) => {
-              if (!md.includes("feed.fun")) throw new Error("/SKILL.md missing feed.fun content");
-            });
-            await expectStatus("/skill.md", 301, (_body, res) => {
-              const loc = res.headers.get("location") || "";
-              if (!loc.endsWith("/SKILL.md")) throw new Error(`/skill.md unexpected redirect: ${loc}`);
-            });
-            await expectStatus("/llms.txt", 200);
-            await expectStatus("/how-to-play.md", 200);
-            await expectStatus("/.well-known/agent-skills/index.json", 200, (t) => {
-              const j = JSON.parse(t);
-              if (!Array.isArray(j.skills) || j.skills.length < 1) throw new Error("Missing skills in discovery index");
-            });
-            await expectStatus("/.well-known/oauth-authorization-server", 200, (t) => {
-              const j = JSON.parse(t);
-              if (!j.authorization_endpoint || !j.token_endpoint) throw new Error("Invalid OAuth AS metadata");
-            });
-            await expectStatus("/.well-known/oauth-protected-resource", 200);
-            await expectStatus("/api/feed", 200, (t) => {
-              const j = JSON.parse(t);
-              if (!Array.isArray(j.items) || j.items.length < 1) throw new Error("/api/feed returned empty items");
-            });
-            await expectStatus("/api/markets", 200, (t) => {
-              const j = JSON.parse(t);
-              if (!Array.isArray(j.predictions) || j.predictions.length < 1) {
-                throw new Error("/api/markets returned empty predictions");
-              }
-              if (!Array.isArray(j.perps) || j.perps.length < 1) {
-                throw new Error("/api/markets returned empty perps");
-              }
-            });
-            await expectStatus("/api/leaderboard", 200, (t) => {
-              const j = JSON.parse(t);
-              if (!Array.isArray(j.entries) || !Array.isArray(j.leaderboard)) {
-                throw new Error("/api/leaderboard missing entries/leaderboard arrays");
-              }
-            });
-
-            const mcpPublic = await fetch(`${primaryOrigin}/mcp`, {
-              method: "POST",
-              headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-              body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: 1,
-                method: "tools/call",
-                params: { name: "list_markets", arguments: {} }
-              }),
-              signal: AbortSignal.timeout(20_000)
-            });
-            if (!mcpPublic.ok) throw new Error(`Public MCP list_markets failed: HTTP ${mcpPublic.status}`);
-            console.log("OK POST /mcp (public list_markets) -> HTTP 200");
-
-            const mcpProtected = await fetch(`${primaryOrigin}/mcp`, {
-              method: "POST",
-              headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-              body: JSON.stringify({
-                jsonrpc: "2.0",
-                id: 2,
-                method: "tools/call",
-                params: { name: "create_post", arguments: { content: "unauth probe" } }
-              }),
-              signal: AbortSignal.timeout(20_000)
-            });
-            if (mcpProtected.status !== 401 || !mcpProtected.headers.get("www-authenticate")) {
-              throw new Error(`Protected MCP expected 401 with WWW-Authenticate, got ${mcpProtected.status}`);
-            }
-            console.log("OK POST /mcp (protected create_post) -> HTTP 401 with WWW-Authenticate");
-
-            if (cronSecret) {
-              const cronRes = await fetch(`${primaryOrigin}/api/cron/minute-tick`, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${cronSecret}` },
-                signal: AbortSignal.timeout(30_000)
-              });
-              const cronText = await cronRes.text();
-              if (!cronRes.ok) throw new Error(`POST /api/cron/minute-tick failed: HTTP ${cronRes.status}: ${cronText}`);
-              console.log("OK POST /api/cron/minute-tick -> HTTP 200", cronText.slice(0, 200));
-
-              const npcRes = await fetch(`${primaryOrigin}/api/cron/npc-tick`, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${cronSecret}` },
-                signal: AbortSignal.timeout(90_000)
-              });
-              const npcText = await npcRes.text();
-              if (!npcRes.ok) throw new Error(`POST /api/cron/npc-tick failed: HTTP ${npcRes.status}: ${npcText}`);
-              console.log("OK POST /api/cron/npc-tick -> HTTP 200", npcText.slice(0, 300));
-            }
-
-            if (targetEnv === "production") {
-              let wwwOk = false;
-              let lastWww = "";
-              for (let attempt = 1; attempt <= 8; attempt++) {
-                const wwwRes = await fetch("https://www.feed.fun/api/health", {
-                  cache: "no-store",
-                  signal: AbortSignal.timeout(20_000)
-                });
-                const text = await wwwRes.text();
-                lastWww = `HTTP ${wwwRes.status} ${text.slice(0, 300)}`;
-                try {
-                  const wwwJson = JSON.parse(text);
-                  if (wwwRes.ok && wwwJson.commit === expectedSha) {
-                    wwwOk = true;
-                    break;
-                  }
-                } catch {}
-                if (attempt < 8) await new Promise((r) => setTimeout(r, 3000));
-              }
-              if (!wwwOk) {
-                throw new Error(`https://www.feed.fun/api/health mismatch: ${lastWww}`);
-              }
-              console.log("OK https://www.feed.fun/api/health -> commit verified");
-            }
-          '
+        run: pnpm cli verify-live --stage "$TARGET_ENV" --commit "$GITHUB_SHA" --json

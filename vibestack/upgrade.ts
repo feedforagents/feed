@@ -24,6 +24,8 @@ const GITIGNORE_ENTRIES = [
   ".vibe/",
   ".cache/",
   ".turbo/",
+  ".alchemy/",
+  ".wrangler/",
   "test/__traces__/",
   ...GENERATED_AGENT_IGNORES,
 ];

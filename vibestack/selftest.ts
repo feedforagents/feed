@@ -37,7 +37,7 @@ import { acceptContracts, acceptReviews, NODE, check, checkVerifiedSource, dangl
 const project = path.join(import.meta.dirname, "..");
 isolatedInstalls();
 const harnessSkillPaths = [".claude/skills", ".codex/skills", ".cursor/skills", ".droid/skills", ".factory/skills", ".gemini/skills", ".grok/skills", ".grokbot/skills", ".muse/skills", ".t3/skills"];
-const scaffoldedIgnores = ["gen/", ".spec-cache/", ".studio/", "dist/", ".vibe/", ".cache/", ".turbo/", "test/__traces__/", "/.claude/", "/CLAUDE.md", ...harnessSkillPaths.filter((alias) => !alias.startsWith(".claude/")).map((alias) => `/${alias}`)];
+const scaffoldedIgnores = ["gen/", ".spec-cache/", ".studio/", "dist/", ".vibe/", ".cache/", ".turbo/", ".alchemy/", ".wrangler/", "test/__traces__/", "/.claude/", "/CLAUDE.md", ...harnessSkillPaths.filter((alias) => !alias.startsWith(".claude/")).map((alias) => `/${alias}`)];
 const EXAMPLES = "vibestack/examples";
 const EXAMPLE = path.join(project, EXAMPLES, "order");
 const read = (file: string, from = project): string => fs.readFileSync(path.join(from, file), "utf8");
@@ -1413,33 +1413,46 @@ export effect function independent() {
     const paired = await exec(process.execPath, ["--import", "vibelang/register", "--input-type=module", "-e", 'import assert from "node:assert/strict"; import { Effect } from "effect"; import { independent } from "./src/pair.vibe"; assert.deepEqual(await Effect.runPromise(independent()), [1, 0]);'], first);
     assert.equal(paired.status, 0, paired.stdout + paired.stderr);
     const isolated = scratch({ "package.json": PACKAGE["package.json"], "spec/index.md": ruleSpec(`type Item = { n: int }
-type State = { item: Item }
+type State = { item: Item, kept: Item }
 type Result = { state: State, out: List[Item] }
-pure val initial: State = { item: { n: 0 } }
+pure val initial: State = { item: { n: 0 }, kept: { n: 10 } }
 pure val entryValues = Set({ n: 0 }, { n: 2 })
 pure def canSetItem(s: State, entry: Item): bool = entry.n >= 0
-pure def setItem(s: State, entry: Item): Result = { state: { item: entry }, out: List(entry) }`), "src/probe.vibe": `import { Machine, machine } from "../gen/index.effect.vibe"
+pure def setItem(s: State, entry: Item): Result = { state: { ...s, item: entry }, out: List(entry) }`), "src/probe.vibe": `import { Machine, machine } from "../gen/index.effect.vibe"
+function refuses(act: () => void): boolean {
+  try { act(); return false } catch (error) { return error instanceof TypeError }
+}
 export effect function probe() {
-  const start = { item: { n: 0 } }
+  const start = { item: { n: 0 }, kept: { n: 10 } }
   provide machine(start) {
     start.item.n = 42
     const held = try Machine
     const first = try held.get()
+    const again = try held.get()
     const before = first.item.n
-    first.item.n = 43
+    const frozenGet = refuses(() => { first.item.n = 43 })
     const event = { type: "setItem" as const, entry: { n: 2 } }
     const after = try held.send(event)
-    after.state.item.n = 44
-    after.out[0].n = 45
+    const frozenState = refuses(() => { after.state.item.n = 44 })
+    const frozenOut = refuses(() => { after.out[0].n = 45 })
     event.entry.n = 46
-    try Stream.runHead(Stream.map(held.changes, (state) => { state.item.n = 47; return state }))
-    held.send({ type: "setItem", entry: { n: -1 } }) catch (error) => { error.state.item.n = 48 }
-    return [before, (try held.get()).item.n]
+    const fromChanges = try Stream.runHead(held.changes)
+    const changed = fromChanges._tag === "Some" ? fromChanges.value : undefined
+    const frozenChange = changed !== undefined && refuses(() => { changed.item.n = 47 })
+    const frozenError = held.send({ type: "setItem", entry: { n: -1 } }) catch (error) => refuses(() => { error.state.item.n = 48 })
+    return {
+      before,
+      after: (try held.get()).item.n,
+      sameGet: first === again,
+      sharedBranch: after.state.kept === first.kept,
+      sameChange: changed === after.state,
+      frozen: frozenGet && frozenState && frozenOut && frozenChange && frozenError,
+    }
   }
 }
 ` });
     await genAll(isolated);
-    const protectedState = await exec(process.execPath, ["--import", "vibelang/register", "--input-type=module", "-e", 'import assert from "node:assert/strict"; import { Effect } from "effect"; import { probe } from "./src/probe.vibe"; assert.deepEqual(await Effect.runPromise(probe()), [0, 2]);'], isolated);
+    const protectedState = await exec(process.execPath, ["--import", "vibelang/register", "--input-type=module", "-e", 'import assert from "node:assert/strict"; import { Effect } from "effect"; import { probe } from "./src/probe.vibe"; assert.deepEqual(await Effect.runPromise(probe()), { before: 0, after: 2, sameGet: true, sharedBranch: true, sameChange: true, frozen: true });'], isolated);
     assert.equal(protectedState.status, 0, protectedState.stdout + protectedState.stderr);
   });
 
@@ -2065,7 +2078,7 @@ function eachCheck() {
     const claude = path.join(root, "CLAUDE.md");
     const expected = `mine\n\n<!-- vibestack:start -->\n${read("AGENTS.md").trim()}\n<!-- vibestack:end -->\n`;
     assert.equal(fs.readFileSync(agents, "utf8"), expected);
-    const typeReference = "vibestack/reference/typereferences.md";
+    const typeReference = ".agents/skills/typescript-best-practices/references/typereferences.md";
     assert.ok(expected.includes(`](${typeReference})`));
     assert.equal(read(typeReference, root), read(typeReference));
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).scripts, { check: "mine", dev: "spec studio", gen: "spec gen", accept: "spec accept", build: "vibelang", test: "vitest run", postinstall: "spec init" });
@@ -2223,7 +2236,7 @@ function eachCheck() {
     const scripts = { dev: "spec studio", check: "spec check", gen: "spec gen", accept: "spec accept", build: "vibelang", test: "vitest run", postinstall: "spec init" };
 
     const fresh = scratch({ "package.json": '{"name":"fresh"}' });
-    assert.deepEqual([...new Set(init(fresh).filter((file) => !/^\.[^/]+\/skills(?:\/|$)/.test(file)))].sort(), ["SPEC.md", "vibestack/reference/typereferences.md", ".agents/claude-settings.json", ".claude/settings.json", "AGENTS.md (Vibestack instructions)", "CLAUDE.md (symlink to AGENTS.md)",
+    assert.deepEqual([...new Set(init(fresh).filter((file) => !/^\.[^/]+\/skills(?:\/|$)/.test(file)))].sort(), ["SPEC.md", ".agents/claude-settings.json", ".claude/settings.json", "AGENTS.md (Vibestack instructions)", "CLAUDE.md (symlink to AGENTS.md)",
       "tsconfig.json", "vitest.config.ts", "spec/index.md", ".gitignore", "package.json scripts: dev, check, gen, accept, build, test", "package.json postinstall: spec init",
       `package.json VibeLang toolchain: ${[...runtime, ...tooling].join(", ")} (run your package manager's install)`, "package.json packageManager: pnpm@10.24.0", "package.json engines.node: >=26", 'package.json "type": "module"'].sort());
     assert.deepEqual(json(fresh, "tsconfig.json"), {
@@ -3229,7 +3242,7 @@ function eachCheck() {
     const scaffold = scratch({});
     const initialized = await runCli(path.join(installed, "dist/spec.js"), scaffold, "init");
     assert.equal(initialized.status, 0, initialized.stdout + initialized.stderr);
-    for (const file of [".agents/skills/LICENSE.pstack", ".agents/skills/architect/references/runner-prompt.md", ".agents/skills/typescript-best-practices/references/patterns.md", "vibestack/reference/typereferences.md"]) {
+    for (const file of [".agents/skills/LICENSE.pstack", ".agents/skills/architect/references/runner-prompt.md", ".agents/skills/typescript-best-practices/references/patterns.md", ".agents/skills/typescript-best-practices/references/typereferences.md"]) {
       assert.equal(read(file, scaffold), read(file));
     }
     for (const alias of harnessSkillPaths) assert.equal(fs.realpathSync(path.join(scaffold, alias)), path.join(scaffold, ".agents/skills"));

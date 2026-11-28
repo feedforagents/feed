@@ -5,7 +5,9 @@ export default {
   "ignore": [
     "vibestack/examples/**",
     "**/test/fixtures/**",
-    "vendor/**"
+    "vendor/**",
+    "**/.alchemy/**",
+    "**/.wrangler/**"
   ],
   "ignoreExportsUsedInFile": true,
   "ignoreIssues": {
@@ -14,6 +16,8 @@ export default {
   "workspaces": {
     ".": {
       "entry": [
+        "alchemy.run.ts",
+        "vibestack/alchemy.ts",
         "vibestack/design/cli.ts",
         "vibestack/stories/cli.ts",
         "vibestack/remote-cache.ts",
@@ -22,6 +26,7 @@ export default {
         "vibestack/testing/test/fixture/*/src/*.{schema,contract}.{ts,vibe}"
       ],
       "project": [
+        "alchemy.run.ts",
         "vibestack/**/*.{ts,tsx,vibe,vibex}",
         "!vibestack/studio/**"
       ],
@@ -30,6 +35,7 @@ export default {
         "@vitest/browser",
         "@repo/design-system",
         "@cloudflare/workers-types",
+        "@alchemy.run/test",
         "wrangler"
       ]
     },
@@ -94,12 +100,15 @@ export default {
         "src/web/main.tsx",
         "src/server/main.vibe",
         "src/server/worker.vibe",
+        "deploy/**/*.test.ts",
+        "deploy/vitest.config.ts",
         "test/**/*.test.{ts,tsx,vibe}",
         "test/drivers/*.ts",
         "src/**/*.{schema,contract}.{ts,vibe}"
       ],
       "project": [
         "src/**/*.{ts,tsx,vibe,vibex,css}",
+        "deploy/**/*.{ts,tsx}",
         "test/**/*.{ts,tsx,vibe,vibex}"
       ],
       "ignoreDependencies": [
