@@ -1796,6 +1796,10 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
     });
   }
   await loadChats(false, createdId);
+  const created = res.data[0] ?? null;
+  if (created && getStoreSnapshot().viewer?.accountId === viewerId && !getStoreSnapshot().chats.some((c) => c.id === created.id)) {
+    setStoreState({ chats: [created, ...getStoreSnapshot().chats] });
+  }
   if (createdId) {
     await selectChat(createdId);
   }
