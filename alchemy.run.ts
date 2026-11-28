@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import path from "node:path";
 import * as Cloudflare from "@alchemy.run/cloudflare";
 import * as Alchemy from "alchemy";
+import * as Output from "alchemy/Output";
 import { makeBucketState } from "alchemy/State/BucketState";
 import { State, StateStoreError } from "alchemy/State/State";
 import * as Effect from "effect/Effect";
@@ -50,6 +51,31 @@ const LOCAL_DEV_HYPERDRIVE_ORIGIN = {
   user: "feed",
   password: Redacted.make("feed_dev_password"),
 };
+
+const HYPERDRIVE_LOOKUP_TYPE_ID = Symbol.for("alchemy/Cloudflare/Hyperdrive/ConnectionLookup");
+
+function hyperdriveById(
+  id: string,
+  props: {
+    readonly hyperdriveId: string;
+    readonly accountId?: string;
+    readonly dev?: Cloudflare.Hyperdrive.DevOrigin;
+  },
+): Cloudflare.Hyperdrive.ConnectionLookup {
+  const ref: unknown = {
+    [HYPERDRIVE_LOOKUP_TYPE_ID]: true,
+    Type: "Cloudflare.Hyperdrive",
+    LogicalId: id,
+    hyperdriveId: Output.asOutput(props.hyperdriveId),
+    name: Output.asOutput(id),
+    accountId: Output.asOutput(props.accountId ?? ""),
+    dev: Output.asOutput<Cloudflare.Hyperdrive.DevOrigin | undefined>(props.dev),
+  };
+  if (!Cloudflare.Hyperdrive.isConnectionLookup(ref)) {
+    throw new Error(`Invalid Hyperdrive lookup reference for ${id}`);
+  }
+  return ref;
+}
 
 interface FeedStageConfig {
   readonly workerName?: string;
@@ -319,8 +345,9 @@ export default Alchemy.Stack(
       ...managedSecrets,
     };
     if (cfg.hyperdriveId) {
-      workerEnv.HYPERDRIVE = Cloudflare.Hyperdrive.lookup("FeedHyperdrive", {
+      workerEnv.HYPERDRIVE = hyperdriveById("FeedHyperdrive", {
         hyperdriveId: cfg.hyperdriveId,
+        accountId: process.env.CLOUDFLARE_ACCOUNT_ID?.trim(),
         dev: LOCAL_DEV_HYPERDRIVE_ORIGIN,
       });
     } else if (process.env.DATABASE_URL?.trim()) {
