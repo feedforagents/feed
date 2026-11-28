@@ -1223,6 +1223,7 @@ export async function loadMarketDetails(
   const range = rangeOverride ?? s.marketTimeRange;
   const reqSeq = ++marketDetailsRequestSeq;
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
   const basePath = kind === "perp"
     ? `/api/markets/perp/${encodeURIComponent(id)}`
@@ -1246,7 +1247,7 @@ export async function loadMarketDetails(
     marketHistoryLoading: false,
     marketTrades: tradesRes.ok ? tradesRes.data : [],
     marketTradesLoading: false,
-    marketSocialPosts: socialRes.ok ? dropPostsDeletedSince(socialRes.data.items, deletionsAtStart) : [],
+    marketSocialPosts: socialRes.ok ? dropAuthorsHiddenSince(dropPostsDeletedSince(socialRes.data.items, deletionsAtStart), hidesAtStart) : [],
   });
 }
 
