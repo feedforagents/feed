@@ -143,6 +143,33 @@ it('Deleting an own reply from the profile replies tab drops the header post cou
   expect(getStoreSnapshot().profileBundle?.postsCount).toBe(1);
 });
 
+it('Deleting an own post from the feed drops the loaded profile header count even when the post is outside the loaded profile page (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  const decodedFirst = decodePost(firstRaw, "alice");
+  if (decodedFirst === null) throw new Error("test fixtures must decode");
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = fetchPath(input);
+    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
+    if (url.startsWith("/api/users/alice")) {
+      return Promise.resolve(Response.json(profileRaw(3, [secondRaw])));
+    }
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  });
+
+  signInAsAlice();
+  await loadProfile("alice");
+  setStoreState({ feedPosts: [decodedFirst] });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(3);
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-2"]);
+
+  await deletePost("alice-post-1");
+
+  expect(getStoreSnapshot().feedPosts).toHaveLength(0);
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+
+  removePostAcrossStore("alice-post-1", { replyToPostId: null, parentReplyCount: null });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+});
+
 it('Deleting an own post turns its quote embeds unavailable in the same lists (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
   const quotingRaw = makeRawPost(createdAt, {
     id: "carol-quote-1",
