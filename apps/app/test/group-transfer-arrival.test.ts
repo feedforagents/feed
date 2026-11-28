@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { transferGroupOwnership } from "../src/web/store-world.ts";
+import type { AppChatSummary } from "../src/web/types.ts";
 import {
   makeGroupMember,
   makeSeedGroupChat,
@@ -108,7 +109,7 @@ it("keeps the original owner in the member list when the transfer itself fails (
 
 it("keeps the new account's owner controls when the viewer switches accounts during the transfer (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
   const bobViewer = makeViewerSession({ accountId: "bob", handle: "bob", displayName: "Bob" });
-  const bobSeed = {
+  const bobSeed: AppChatSummary = {
     ...makeSeedGroupChat(),
     members: makeSeedGroupChat().members.map((m) => ({ ...m, role: m.memberId === "bob" ? "owner" : "member" })),
   };
