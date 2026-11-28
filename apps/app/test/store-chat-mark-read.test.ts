@@ -5,7 +5,7 @@ import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import { loadChatMessages, selectChat, sendChatMessage, startDirectChat } from "../src/web/store-world.ts";
 import { decodeNotifications, type AppChatSummary } from "../src/web/types.ts";
-import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
+import { makeRawDirectChat, makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
 
@@ -136,16 +136,7 @@ it("does not mark read when the room loads with no messages (spec/social/messagi
 });
 
 it("arrives on the direct thread when a DM is started from a profile (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
-  const directChat = {
-    id: "chat-2",
-    kind: "direct",
-    title: "Bob",
-    unreadCount: 0,
-    members: [
-      { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "member" },
-      { memberId: "bob", memberKind: "user", handle: "bob", displayName: "Bob", avatarUrl: null, role: "member" },
-    ],
-  };
+  const directChat = makeRawDirectChat("chat-2", "bob", "Bob");
   stubFetchByUrl((url, init) => {
     const method = init?.method ?? "GET";
     if (url.pathname === "/api/chats/direct" && method === "POST") {

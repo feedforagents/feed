@@ -3,66 +3,40 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { startDirectChat } from "../src/web/store-world.ts";
-import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
+import { makeRawDirectChat, makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
 
-const directChat = {
-  id: "chat-2",
-  kind: "direct",
-  title: "Bob",
-  unreadCount: 0,
-  members: [
-    { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "member" },
-    { memberId: "bob", memberKind: "user", handle: "bob", displayName: "Bob", avatarUrl: null, role: "member" },
-  ],
-};
-
-const carolChat = {
-  id: "chat-9",
-  kind: "direct",
-  title: "Carol",
-  unreadCount: 0,
-  members: [
-    { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "member" },
-    { memberId: "carol", memberKind: "user", handle: "carol", displayName: "Carol", avatarUrl: null, role: "member" },
-  ],
-};
+const directChat = makeRawDirectChat("chat-2", "bob", "Bob");
+const carolChat = makeRawDirectChat("chat-9", "carol", "Carol");
 
 function stubDirectWithChats(chats: () => Promise<Response>, directStatus = 201): void {
-  stubFetchByUrl((url, init) => {
-    const method = init?.method ?? "GET";
-    if (url.pathname === "/api/chats/direct" && method === "POST") {
-      return Promise.resolve(
-        directStatus === 201
-          ? Response.json({ chat: directChat }, { status: 201 })
-          : Response.json({ message: "Direct chat failed" }, { status: directStatus }),
-      );
+  const threadHello = {
+    id: "m2",
+    senderId: "bob",
+    senderKind: "user",
+    senderHandle: "bob",
+    senderDisplayName: "Bob",
+    content: "thread hello",
+    createdAt: 3,
+    reactions: [],
+  };
+  const routes: Record<string, () => Promise<Response>> = {
+    "/api/chats": chats,
+    "/api/chats/invites": () => Promise.resolve(Response.json({ invites: [] })),
+    "/api/chats/chat-2/messages": () => Promise.resolve(Response.json({ messages: [threadHello] })),
+  };
+  stubFetchByUrl(async (url, init) => {
+    if (url.pathname === "/api/chats/direct" && init?.method === "POST") {
+      return directStatus === 201
+        ? Response.json({ chat: directChat }, { status: 201 })
+        : Response.json({ message: "Direct chat failed" }, { status: directStatus });
     }
-    if (url.pathname === "/api/chats") return chats();
-    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
-    if (url.pathname === "/api/chats/chat-2/messages") {
-      return Promise.resolve(
-        Response.json({
-          messages: [
-            {
-              id: "m2",
-              senderId: "bob",
-              senderKind: "user",
-              senderHandle: "bob",
-              senderDisplayName: "Bob",
-              content: "thread hello",
-              createdAt: 3,
-              reactions: [],
-            },
-          ],
-        }),
-      );
-    }
-    if (url.pathname.endsWith("/read") && method === "POST") {
-      return Promise.resolve(Response.json({ unreadCount: 0 }));
-    }
-    return Promise.resolve(Response.json({}, { status: 404 }));
+    const route = routes[url.pathname];
+    if (route) return route();
+    return url.pathname.endsWith("/read")
+      ? Response.json({ unreadCount: 0 })
+      : Response.json({}, { status: 404 });
   }, "http://localhost");
 }
 
@@ -78,18 +52,19 @@ function expectDirectOnArrival(opened: boolean) {
   return { s, chat };
 }
 
+const emptyChatRoute = {
+  route: "Chats" as const,
+  chats: [],
+  selectedChatId: null,
+  chatMessages: [],
+  errorMessage: null,
+  statusMessage: null,
+  toasts: [],
+};
+
 beforeEach(() => {
   window.history.replaceState(null, "", "/chats");
-  setStoreState({
-    viewer,
-    route: "Chats",
-    chats: [],
-    selectedChatId: null,
-    chatMessages: [],
-    errorMessage: null,
-    statusMessage: null,
-    toasts: [],
-  });
+  setStoreState({ viewer, ...emptyChatRoute });
 });
 
 afterEach(() => {

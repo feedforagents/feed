@@ -57,6 +57,24 @@ export function makeRawPost(createdAt: number, overrides: Record<string, unknown
   };
 }
 
+export function makeRawDirectChat(id: string, peerId: string, peerName: string): Record<string, unknown> {
+  const member = (memberId: string, displayName: string) => ({
+    memberId,
+    memberKind: "user",
+    handle: memberId,
+    displayName,
+    avatarUrl: null,
+    role: "member",
+  });
+  return {
+    id,
+    kind: "direct",
+    title: peerName,
+    unreadCount: 0,
+    members: [member("alice", "Alice"), member(peerId, peerName)],
+  };
+}
+
 export function makeRawProfileBundle(input: {
   readonly handle: string;
   readonly displayName: string;
