@@ -621,10 +621,17 @@ export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
 }
 
 let threadRequestSeq = 0;
+let threadLoadedSort: ThreadReplySort | null = null;
+let threadLoadedPostId: string | null = null;
 
 export async function openThread(postId: string, sortOverride?: ThreadReplySort): Promise<void> {
   const s = getStoreSnapshot();
   const prevSort = s.threadSort;
+  const displayedSortAtStart: ThreadReplySort | null = s.activeThread?.post.card.id !== postId
+    ? null
+    : s.threadLoading
+      ? (threadLoadedPostId === postId ? threadLoadedSort : null)
+      : s.threadSort;
   const sort = sortOverride ?? s.threadSort;
   const viewerId = s.viewer?.accountId ?? null;
   threadRequestSeq += 1;
@@ -646,7 +653,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   if (res.ok && res.data) {
     const thread = res.data;
     if (wasPostDeletedSince(thread.post.card.id, deletionsAtStart)) {
-      setStoreState({ threadLoading: false, threadSort: prevSort });
+      setStoreState({ threadLoading: false, threadSort: displayedSortAtStart ?? prevSort });
       setErrorNotice("Post not found");
       return;
     }
@@ -669,14 +676,18 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
       },
       threadLoading: false,
     });
+    threadLoadedSort = sort;
+    threadLoadedPostId = postId;
     return;
   }
-  setStoreState({ threadLoading: false, threadSort: prevSort });
+  setStoreState({ threadLoading: false, threadSort: displayedSortAtStart ?? prevSort });
   setErrorNotice(res.ok ? "Post not found" : res.message);
 }
 
 export function closeThread(): void {
   threadRequestSeq += 1;
+  threadLoadedSort = null;
+  threadLoadedPostId = null;
   setStoreState({ activeThread: null, activePostId: null, threadLoading: false });
 }
 
