@@ -213,6 +213,7 @@ export interface StoreState {
   readonly followListHandle: string | null;
   readonly followListItems: ReadonlyArray<AppFollowListEntry>;
   readonly followListLoading: boolean;
+  readonly followListError: string | null;
   readonly blockedAccounts: ReadonlyArray<AppModerationEntry>;
   readonly mutedAccounts: ReadonlyArray<AppModerationEntry>;
   readonly moderationLoading: boolean;
@@ -564,6 +565,7 @@ let currentState: StoreState = {
   followListHandle: null,
   followListItems: [],
   followListLoading: false,
+  followListError: null,
   blockedAccounts: [],
   mutedAccounts: [],
   moderationLoading: false,
@@ -743,6 +745,7 @@ export function toSpecGatedKind(action: PendingAction["kind"]) {
 const CLOSED_DIALOGS: Partial<StoreState> = {
   joinSheetOpen: false,
   followListKind: null,
+  followListError: null,
   composeOpen: false,
   quotePostTarget: null,
   reportTarget: null,

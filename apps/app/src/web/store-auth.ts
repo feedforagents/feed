@@ -938,6 +938,8 @@ function clearAccountState(): void {
     followListKind: null,
     followListHandle: null,
     followListItems: [],
+    followListLoading: false,
+    followListError: null,
     emailVerifyStatus: "idle",
     emailVerifyError: null,
     emailVerifyRedirectTo: null,

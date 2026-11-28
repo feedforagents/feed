@@ -2295,6 +2295,7 @@ export async function loadFollowList(handle: string, kind: "followers" | "follow
     followListKind: kind,
     followListItems: [],
     followListLoading: true,
+    followListError: null,
   });
   const res = await requestJson(`/api/users/${encodeURIComponent(handle)}/${kind}`, {
     parse: decodeFollowList,
@@ -2304,13 +2305,13 @@ export async function loadFollowList(handle: string, kind: "followers" | "follow
     setStoreState({ followListItems: res.data, followListLoading: false });
     return;
   }
-  setStoreState({ followListLoading: false });
+  setStoreState({ followListLoading: false, followListError: res.message });
   setErrorNotice(res.message);
 }
 
 export function closeFollowList(): void {
   followListLoadCount += 1;
-  setStoreState({ followListKind: null, followListHandle: null, followListItems: [], followListLoading: false });
+  setStoreState({ followListKind: null, followListHandle: null, followListItems: [], followListLoading: false, followListError: null });
 }
 
 export async function loadModerationLists(): Promise<void> {
