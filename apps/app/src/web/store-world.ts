@@ -1910,6 +1910,7 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
   const s = getStoreSnapshot();
   if (!s.viewer || !s.selectedChatId) return;
   const chatId = s.selectedChatId;
+  const viewerId = s.viewer.accountId;
   const res = await requestJson(
     `/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/reactions`,
     {
@@ -1924,13 +1925,13 @@ export async function reactToChatMessage(messageId: string, emoji: string): Prom
   }
   const reloaded = await loadChatMessages(chatId);
   if (!reloaded) {
-    applyCommittedReaction(chatId, messageId, emoji, res.data);
+    applyCommittedReaction(chatId, viewerId, messageId, emoji, res.data);
   }
 }
 
-function applyCommittedReaction(chatId: string, messageId: string, emoji: string, data: unknown): void {
+function applyCommittedReaction(chatId: string, viewerId: string, messageId: string, emoji: string, data: unknown): void {
   const s = getStoreSnapshot();
-  if (!s.viewer || s.selectedChatId !== chatId) return;
+  if (s.viewer?.accountId !== viewerId || s.selectedChatId !== chatId) return;
   const rec = isRecord(data) ? data : {};
   if (typeof rec.added !== "boolean") return;
   const added = rec.added;
@@ -1938,22 +1939,23 @@ function applyCommittedReaction(chatId: string, messageId: string, emoji: string
   let changed = false;
   const chatMessages = s.chatMessages.map((message) => {
     if (message.id !== messageId) return message;
-    const existing = message.reactions.find((r) => r.emoji === committedEmoji);
+    const reactions = message.reactions ?? [];
+    const existing = reactions.find((r) => r.emoji === committedEmoji);
     if (added) {
       if (existing?.reacted) return message;
       changed = true;
       return {
         ...message,
         reactions: existing
-          ? message.reactions.map((r) => (r.emoji === committedEmoji ? { ...r, count: r.count + 1, reacted: true } : r))
-          : [...message.reactions, { emoji: committedEmoji, count: 1, reacted: true }],
+          ? reactions.map((r) => (r.emoji === committedEmoji ? { ...r, count: r.count + 1, reacted: true } : r))
+          : [...reactions, { emoji: committedEmoji, count: 1, reacted: true }],
       };
     }
     if (!existing?.reacted) return message;
     changed = true;
     return {
       ...message,
-      reactions: message.reactions
+      reactions: reactions
         .map((r) => (r.emoji === committedEmoji ? { ...r, count: r.count - 1, reacted: false } : r))
         .filter((r) => r.count > 0),
     };

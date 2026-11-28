@@ -3,28 +3,10 @@
 import { beforeEach, expect, it } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reactToChatMessage } from "../src/web/store-world.ts";
-import type { AppChatSummary } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
+import { makeBobChatSummary } from "./moderation-fixtures.ts";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
-
-function seedChat(): AppChatSummary {
-  return {
-    id: "chat-1",
-    chatType: "Direct",
-    title: "Bob",
-    subtitle: "@bob",
-    memberCount: 2,
-    unreadCount: 0,
-    lastMessagePreview: "hello",
-    lastMessageAt: 2,
-    peerAvatarUrl: null,
-    peerHandle: "bob",
-    members: [],
-    isOwner: false,
-    isBlocked: false,
-  };
-}
 
 type ReactionSeed = { emoji: string; count: number; reacted: boolean };
 
@@ -51,21 +33,22 @@ beforeEach(() => {
     Response.json({ messageId: "m1", chatId: "chat-1", accountId: "alice", emoji: "👍", added: true });
   messagesGetResult = () => Response.json({ message: "Reload exploded" }, { status: 500 });
   stubFetchByUrl((url, init) => {
-    const method = init?.method ?? "GET";
-    if (url.pathname === "/api/chats/chat-1/messages/m1/reactions" && method === "POST") {
-      return Promise.resolve(reactionPostResult());
+    switch (`${init?.method ?? "GET"} ${url.pathname}`) {
+      case "POST /api/chats/chat-1/messages/m1/reactions":
+        return Promise.resolve(reactionPostResult());
+      case "GET /api/chats/chat-1/messages":
+        return Promise.resolve(messagesGetResult());
+      default:
+        return Promise.resolve(
+          url.pathname.endsWith("/read")
+            ? Response.json({ unreadCount: 0 })
+            : Response.json({}, { status: 404 }),
+        );
     }
-    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
-      return Promise.resolve(messagesGetResult());
-    }
-    if (url.pathname.endsWith("/read") && method === "POST") {
-      return Promise.resolve(Response.json({ unreadCount: 0 }));
-    }
-    return Promise.resolve(Response.json({}, { status: 404 }));
   }, "http://localhost");
   setStoreState({
     viewer,
-    chats: [seedChat()],
+    chats: [makeBobChatSummary()],
     selectedChatId: "chat-1",
     chatMessages: [seedMessage([])],
     toasts: [],
@@ -116,6 +99,22 @@ it("uses the reloaded thread when the reload succeeds after a reaction (spec/soc
   await reactToChatMessage("m1", "👍");
   const s = getStoreSnapshot();
   expect(s.chatMessages[0]?.reactions).toEqual([{ emoji: "👍", count: 3, reacted: true }]);
+});
+
+it("does not show the previous account's reaction after an account switch during the reaction (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  reactionPostResult = () => {
+    setStoreState({
+      viewer: makeViewerSession({ accountId: "bob", handle: "bob", displayName: "Bob" }),
+      chats: [makeBobChatSummary()],
+      selectedChatId: "chat-1",
+      chatMessages: [seedMessage([])],
+    });
+    return Response.json({ messageId: "m1", chatId: "chat-1", accountId: "alice", emoji: "👍", added: true });
+  };
+  await reactToChatMessage("m1", "👍");
+  const s = getStoreSnapshot();
+  expect(s.viewer?.accountId).toBe("bob");
+  expect(s.chatMessages[0]?.reactions).toEqual([]);
 });
 
 it("keeps the thread unchanged and reports the failure when the reaction itself is refused (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
