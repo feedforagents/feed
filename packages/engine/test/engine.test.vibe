@@ -1056,11 +1056,37 @@ it.effect('NPCs execute full trading and social actions, alpha invites honor blo
     })
   })
 }), 180_000)
-it.live('A provider that stalls mid-body times out within one 25 s deadline and keeps the reservation uncertain (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
-  const provider = try acquireRelease(
+effect function acquireStalledProvider() {
+  return try acquireRelease(
     tryPromise({ try: () => startStalledProvider(), catch: (cause) => new EngineFailure({ code: "LLM_UNAVAILABLE", message: "stalled provider did not start", cause }) }),
     (stub) => sync(() => stub.close()),
   )
+}
+
+it.effect('An outer completion timeout leaves the reservation eligible for reconciliation (spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
+  const nowMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+  const provider = try acquireStalledProvider()
+  try withSeededEngine(nowMs, withEnvOverrides({ SURPLUS_BASE_URL: provider.url }, effect {
+    const completion = fork Effect.flip(Effect.timeout(
+      generateCompletion({ user: "Hello", estimatedMicros: 5_000, nowMs }),
+      "20 seconds",
+    ))
+    try promise(() => provider.requested)
+    try TestClock.adjust("20 seconds")
+    const failure = join completion
+    const [reservation] = try queryRows("SELECT status, actual_micros FROM feed_llm_spend_reservations")
+    const budget = try getDailySpendStatus(nowMs)
+    const beforeGrace = try reconcileStaleUncertainSpend(nowMs + 20_000)
+    const afterGrace = try reconcileStaleUncertainSpend(nowMs + 20_000 + UNCERTAIN_RESERVATION_TTL_MS)
+    try check(() => assert.deepStrictEqual(
+      [failure._tag, toText(reservation?.status), reservation?.actual_micros, budget.committedMicros, beforeGrace, afterGrace],
+      ["TimeoutError", "uncertain", null, 5_000, { reconciledCount: 0, releasedMicros: 0 }, { reconciledCount: 1, releasedMicros: 5_000 }],
+    ))
+  }))
+}))
+
+it.live('A provider that stalls mid-body times out within one 25 s deadline and keeps the reservation uncertain (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation"; spec/engine/spendBudget.md, "Timeouts and worker restarts mark open reservations uncertain without releasing funds")', () => scoped(effect {
+  const provider = try acquireStalledProvider()
   try withEnvOverrides({ ...OFFLINE_ENGINE_ENV, SURPLUS_BASE_URL: provider.url }, scoped(effect {
     provide localStoreLayer({ kind: "pglite", file: undefined }) {
       try migrateFeedSchema()
