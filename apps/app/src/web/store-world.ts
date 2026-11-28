@@ -598,6 +598,10 @@ export async function loadTrending(): Promise<void> {
       ...(articlesRes.ok && articlesRes.data.length > 0 ? { articles: articlesRes.data } : {}),
     },
   });
+  const failed = !trendRes.ok ? trendRes : !articlesRes.ok ? articlesRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
