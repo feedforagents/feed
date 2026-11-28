@@ -11,7 +11,7 @@
     "build:web": "vite build --outDir dist/web",
     "build:worker": "vibelang -p tsconfig.worker.json",
     "build": "pnpm run build:web && pnpm run build:worker",
-    "typecheck": "vibelang --noEmit -p .",
+    "typecheck": "vibelang --noEmit -p . && tsc --noEmit -p deploy/tsconfig.json",
     "test": "vitest run",
     "test:browser": "vitest run --project browser",
     "test:deploy": "ALCHEMY_FAST_DISTILLED=1 vitest run --config deploy/vitest.config.ts",

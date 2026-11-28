@@ -141,44 +141,53 @@ function resolveStageConfig(target: StageTarget): FeedStageConfig {
 }
 
 function resolveStateLayer() {
-  if (process.env.ALCHEMY_STATE_STORE === "cloudflare") {
-    return Cloudflare.state({
-      ...(process.env.CLOUDFLARE_ACCOUNT_ID ? { accountId: process.env.CLOUDFLARE_ACCOUNT_ID } : {}),
-    });
-  }
-  const bucket = process.env.R2_STATE_BUCKET?.trim();
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
-  const accessKeyId = process.env.R2_STATE_ACCESS_KEY_ID?.trim();
-  const secretAccessKey = process.env.R2_STATE_SECRET_ACCESS_KEY?.trim();
-  if (bucket && accountId && accessKeyId && secretAccessKey) {
-    const objects = makeR2BucketObjects<StateStoreError>(
-      { kind: "s3", accountId, bucket, accessKeyId, secretAccessKey },
-      {
-        tryPromise: Effect.tryPromise,
-        makeError: ({ message, cause, status }) =>
-          new StateStoreError({
-            message,
-            ...(cause ? { cause } : {}),
-            ...(status !== undefined ? { http: { status } } : {}),
+  return Layer.unwrap(
+    Effect.gen(function* () {
+      const stageName = yield* Alchemy.Stage;
+      const stageTarget = resolveStage({ stage: stageName, cwd: import.meta.dirname });
+      if (stageTarget.kind === "dev" || stageTarget.kind === "test") {
+        return Alchemy.localState();
+      }
+      if (process.env.ALCHEMY_STATE_STORE === "cloudflare") {
+        return Cloudflare.state({
+          ...(process.env.CLOUDFLARE_ACCOUNT_ID ? { accountId: process.env.CLOUDFLARE_ACCOUNT_ID } : {}),
+        });
+      }
+      const bucket = process.env.R2_STATE_BUCKET?.trim();
+      const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim();
+      const accessKeyId = process.env.R2_STATE_ACCESS_KEY_ID?.trim();
+      const secretAccessKey = process.env.R2_STATE_SECRET_ACCESS_KEY?.trim();
+      if (bucket && accountId && accessKeyId && secretAccessKey) {
+        const objects = makeR2BucketObjects<StateStoreError>(
+          { kind: "s3", accountId, bucket, accessKeyId, secretAccessKey },
+          {
+            tryPromise: Effect.tryPromise,
+            makeError: ({ message, cause, status }) =>
+              new StateStoreError({
+                message,
+                ...(cause ? { cause } : {}),
+                ...(status !== undefined ? { http: { status } } : {}),
+              }),
+          },
+        );
+        return Layer.effect(
+          State,
+          Effect.gen(function* () {
+            const context = yield* Effect.context();
+            const scope = yield* Effect.scope;
+            const make = makeBucketState({
+              id: "r2",
+              label: "Cloudflare R2",
+              prefix: process.env.R2_STATE_PREFIX ?? `alchemy/feed/${stageTarget.stage}/`,
+              objects: Effect.succeed(objects),
+            }).pipe(Scope.provide(scope), Effect.provideContext(context));
+            return yield* Effect.cached(make);
           }),
-      },
-    );
-    return Layer.effect(
-      State,
-      Effect.gen(function* () {
-        const context = yield* Effect.context();
-        const scope = yield* Effect.scope;
-        const make = makeBucketState({
-          id: "r2",
-          label: "Cloudflare R2",
-          prefix: process.env.R2_STATE_PREFIX ?? "alchemy/feed/",
-          objects: Effect.succeed(objects),
-        }).pipe(Scope.provide(scope), Effect.provideContext(context));
-        return yield* Effect.cached(make);
-      }),
-    );
-  }
-  return Alchemy.localState();
+        );
+      }
+      return Alchemy.localState();
+    }),
+  );
 }
 
 function collectManagedRuntimeSecrets(
@@ -241,16 +250,19 @@ function resolveCronSecret(): string | undefined {
 const VerifyFeedDeploy = Alchemy.Action(
   "VerifyFeedDeploy",
   (input: {
+    readonly workerName: string;
+    readonly workerUrl: string | undefined;
     readonly url: string | undefined;
     readonly assetHash: string;
     readonly commitSha: string | undefined;
     readonly secondaryUrls: readonly string[];
   }) =>
     Effect.tryPromise(async () => {
-      if (!input.url) throw new Error("Deployed Feed worker did not return a URL");
+      const targetUrl = input.url ?? input.workerUrl;
+      if (!targetUrl) throw new Error(`Deployed Feed worker ${input.workerName} did not return a URL`);
       const cronSecret = resolveCronSecret();
       return verifyFeedDeployment({
-        baseUrl: input.url,
+        baseUrl: targetUrl,
         secondaryUrls: input.secondaryUrls,
         assetHash: input.assetHash,
         ...(input.commitSha ? { commitSha: input.commitSha } : {}),
@@ -288,20 +300,40 @@ export default Alchemy.Stack(
 
     const email = yield* Cloudflare.Email.SendEmail("Email");
 
-    const hyperdriveBinding = cfg.hyperdriveId
-      ? {
-          HYPERDRIVE: Cloudflare.Hyperdrive.lookup("FeedHyperdrive", {
-            hyperdriveId: cfg.hyperdriveId,
-            dev: LOCAL_DEV_HYPERDRIVE_ORIGIN,
-          }),
-        }
-      : process.env.DATABASE_URL?.trim()
-        ? { DATABASE_URL: process.env.DATABASE_URL.trim() }
-        : {};
-
     const commitSha = process.env.COMMIT_SHA?.trim() || process.env.GITHUB_SHA?.trim() || undefined;
     const managedSecrets = collectManagedRuntimeSecrets(cfg.deploymentEnv);
     const assets = hashAssetDirectory(webDistDir);
+
+    const workerEnv: Cloudflare.WorkerBindingProps = {
+      UPLOADS: uploads,
+      EMAIL: email,
+      DEPLOYMENT_ENV: cfg.deploymentEnv,
+      SMS_MODE: cfg.smsMode,
+      EMAIL_MODE: cfg.emailMode,
+      EMAIL_FROM: cfg.emailFrom,
+      SURPLUS_BASE_URL: "https://api.surplusintelligence.ai/v1",
+      SURPLUS_MODEL: "gpt-4o-mini",
+      NPC_LLM_DAILY_BUDGET_USD: "100",
+      NPC_MAX_STEPS_PER_TICK: "4",
+      GAME_START: "run",
+      ...managedSecrets,
+    };
+    if (cfg.hyperdriveId) {
+      workerEnv.HYPERDRIVE = Cloudflare.Hyperdrive.lookup("FeedHyperdrive", {
+        hyperdriveId: cfg.hyperdriveId,
+        dev: LOCAL_DEV_HYPERDRIVE_ORIGIN,
+      });
+    } else if (process.env.DATABASE_URL?.trim()) {
+      workerEnv.DATABASE_URL = process.env.DATABASE_URL.trim();
+    }
+    if (cfg.publicUrl) {
+      workerEnv.PUBLIC_APP_URL = cfg.publicUrl;
+      workerEnv.PUBLIC_API_URL = cfg.publicUrl;
+      workerEnv.EMAIL_PUBLIC_ORIGIN = cfg.publicUrl;
+    }
+    if (commitSha) {
+      workerEnv.COMMIT_SHA = commitSha;
+    }
 
     const web = yield* Cloudflare.Worker("FeedWeb", {
       ...(cfg.workerName ? { name: cfg.workerName } : {}),
@@ -325,28 +357,14 @@ export default Alchemy.Stack(
         notFoundHandling: "single-page-application",
         runWorkerFirst: [...FEED_WORKER_FIRST_ROUTES],
       },
-      env: {
-        UPLOADS: uploads,
-        EMAIL: email,
-        ...hyperdriveBinding,
-        DEPLOYMENT_ENV: cfg.deploymentEnv,
-        ...(cfg.publicUrl ? { PUBLIC_APP_URL: cfg.publicUrl, PUBLIC_API_URL: cfg.publicUrl, EMAIL_PUBLIC_ORIGIN: cfg.publicUrl } : {}),
-        SMS_MODE: cfg.smsMode,
-        EMAIL_MODE: cfg.emailMode,
-        EMAIL_FROM: cfg.emailFrom,
-        SURPLUS_BASE_URL: "https://api.surplusintelligence.ai/v1",
-        SURPLUS_MODEL: "gpt-4o-mini",
-        NPC_LLM_DAILY_BUDGET_USD: "100",
-        NPC_MAX_STEPS_PER_TICK: "4",
-        GAME_START: "run",
-        ...(commitSha ? { COMMIT_SHA: commitSha } : {}),
-        ...managedSecrets,
-      },
+      env: workerEnv,
     }).pipe(Alchemy.AdoptPolicy.adopt(true), Alchemy.RemovalPolicy.retain());
 
     const shouldVerifyLive = cfg.runLiveVerify && process.env.ALCHEMY_SKIP_LIVE_VERIFY !== "1";
     const verification = shouldVerifyLive
       ? yield* VerifyFeedDeploy({
+          workerName: web.workerName,
+          workerUrl: web.url,
           url: cfg.publicUrl ?? web.url,
           assetHash: assets.hash,
           commitSha,

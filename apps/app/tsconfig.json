@@ -21,7 +21,6 @@
   },
   "include": [
     "src",
-    "deploy",
     "test",
     "gen/*.ts",
     "gen/*.vibe",

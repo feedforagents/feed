@@ -16,6 +16,7 @@ Vibestack uses **Alchemy v2** (`alchemy@2.0.0-beta.85` + `@alchemy.run/cloudflar
 - **Allow `workerd` build scripts** in `pnpm-workspace.yaml` (`allowBuilds: { workerd: true }`).
 - **Ignore local state directories**: keep `.alchemy/` and `.wrangler/` out of Git, ESLint, Stylelint, and Turborepo task inputs (`vibestack init` and `vibestack upgrade` add them automatically).
 - **Never commit secrets or pass them through cached Turbo tasks.** Put `CLOUDFLARE_*` and `ALCHEMY_*` only in `passThroughEnv` on `cache: false` deploy tasks.
+- **Isolate Alchemy TypeScript projects from ESLint `projectService`.** Never include `deploy/` or `alchemy.run.ts` (which import `@alchemy.run/cloudflare` -> `@distilled.cloud/cloudflare`) in an app's main `tsconfig.json`; keep them in a dedicated `deploy/tsconfig.json` checked by `typecheck` (`tsc --noEmit -p deploy/tsconfig.json`) and in ESLint's `untyped` list (`vibestackConfig` adds `"**/alchemy.run.ts"` and `"**/deploy/**"` by default) so `pnpm lint:js` stays fast and never OOMs.
 
 ## Toolchain alignment
 
@@ -30,7 +31,7 @@ Vibestack uses **Alchemy v2** (`alchemy@2.0.0-beta.85` + `@alchemy.run/cloudflar
 | Single-writer spec-backed `Machine` | **SQLite Durable Object** (`Cloudflare.Workers.DurableObject` / Worker export): serialize transitions in DO storage, validate stored state with `decodeState` on wake, persist before answering |
 | React + Vite 8 + VibeLang SPA (local dev) | `Cloudflare.Website.Vite("App", { rootDir, assets: { notFoundHandling: "single-page-application" } })` — composes with `vibelang-vite`, `@vitejs/plugin-react`, and `@tailwindcss/vite` |
 | Prebuilt Turbo SPA / Worker (CI, zero double-build) | `Cloudflare.Worker` with `bundle: false` (prebuilt ESM) and `assets: { ...hashAssetDirectory(distDir), notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*"] }` |
-| Existing external Postgres pool | `Cloudflare.Hyperdrive.Connection` with `.pipe(Alchemy.AdoptPolicy.adopt(true))` (or `Resource.ref` in `beta.85`; `Hyperdrive.Connection.lookup` is `beta.86+`), supplying `dev` origin for local `alchemy dev` since Cloudflare never returns origin passwords |
+| Existing external Postgres pool | `Cloudflare.Hyperdrive.lookup` (read-only data source in `2.0.0-beta.85`) or `Cloudflare.Hyperdrive.Connection` with `.pipe(Alchemy.AdoptPolicy.adopt(true))`, supplying `dev` origin for local `alchemy dev` since Cloudflare never returns origin passwords |
 | Post-deploy verification gate | `Alchemy.Action` calling `verifyDeploymentEndpoints` from `vibestack/alchemy`, returning a typed `DeploymentReceipt` |
 | Operational deploy lever | `pnpm cli deploy [--stage <name>] [--dry-run] [--verify] [--destroy] [--json]` (`packages/cli/src/commands/deploy.ts`) |
 

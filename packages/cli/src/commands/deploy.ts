@@ -128,7 +128,7 @@ export const deployCommand = defineCommand({
     const result = spawnSync(alchemyBin, args, {
       cwd: ctx.rootDir,
       encoding: "utf8",
-      env: { ...process.env, ALCHEMY_FAST_DISTILLED: "1" },
+      env: { ...process.env, ALCHEMY_FAST_DISTILLED: "1", ALCHEMY_STAGE: target.stage },
       stdio: captureOutput ? ["ignore", "pipe", "pipe"] : "inherit",
     });
 

@@ -1300,7 +1300,7 @@ export function vibestackConfig(options: VibestackConfigOptions): FlatConfig[] {
   const tsx = options.tsx ?? ["packages/ui/**/*.{ts,tsx}", "apps/**/*.{ts,tsx}"]
   const own = options.own ?? ["apps/**", "packages/**"]
   const uiPackage = options.uiPackage ?? "packages/ui"
-  const untyped = options.untyped ?? ["*.{js,ts}", "**/.storybook/**", ...(design ? [`${design}/**`] : [])]
+  const untyped = options.untyped ?? ["*.{js,ts}", "**/alchemy.run.ts", "**/deploy/**", "**/.storybook/**", ...(design ? [`${design}/**`] : [])]
   const commented = options.commented ?? {}
   const scheduled = options.scheduled ?? {}
   const jsPlugin = plugins.js as any

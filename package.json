@@ -38,7 +38,7 @@
     "typecheck": "vibelang --noEmit -p tsconfig.json",
     "typecheck:all": "node vibestack/spec.ts tasks typecheck --filter='!@elizaos/*'",
     "lint": "node vibestack/spec.ts tasks //#lint:js //#lint:css",
-    "lint:js": "eslint . --max-warnings 0",
+    "lint:js": "NODE_OPTIONS=--max-old-space-size=6144 eslint . --max-warnings 0",
     "lint:css": "stylelint \"**/*.css\" --allow-empty-input",
     "analyze": "knip && madge --circular vibestack packages apps && jscpd .",
     "quick": "node vibestack/spec.ts tasks typecheck test //#lint:js //#lint:css --filter='!@elizaos/*'",

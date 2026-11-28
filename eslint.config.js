@@ -32,7 +32,7 @@ const imports = {
   ],
 }
 const noReact = { patterns: [...imports.patterns, { regex: "^react(?:-dom)?(?:/|$)", message: `Tool and domain code does not import React: ${monorepo}.` }] }
-const untyped = ["*.{js,ts}", "**/vitest.config.ts", "**/.storybook/**", "packages/design-system/**", "vibestack/design/test/**", "vibestack/stories/test/**"]
+const untyped = ["*.{js,ts}", "**/alchemy.run.ts", "**/vitest.config.ts", "**/deploy/**", "**/.storybook/**", "packages/design-system/**", "vibestack/design/test/**", "vibestack/stories/test/**"]
 const tsx = ["packages/ui/**/*.{ts,tsx}", "apps/**/*.{ts,tsx}", "vibestack/studio/src/page/**/*.{ts,tsx}"]
 const design = "packages/design-system"
 const writing = 'AGENTS.md, "Writing code"'
