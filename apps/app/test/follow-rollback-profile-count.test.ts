@@ -71,6 +71,23 @@ function profileResponse(handle: string, displayName: string, followersCount: nu
   });
 }
 
+async function followAcrossOwnReload(serverFollowingCount: (profileGets: number) => number) {
+  openProfile(aliceBundle(), "alice");
+  const follow = pendingResponse();
+  let profileGets = 0;
+  stubFetchUrl((url) => {
+    if (url.includes("/follow")) return follow.promise;
+    profileGets += 1;
+    return Promise.resolve(profileResponse("alice", "Alice Player", 2, serverFollowingCount(profileGets), false));
+  });
+  const pending = toggleFollow("bob", false);
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+
+  await loadProfile("alice");
+  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
+  return { follow, pending, profileGets: () => profileGets };
+}
+
 function orgProfileResponse(followersCount: number, viewerFollows: boolean) {
   return Response.json({
     profile: {
@@ -151,18 +168,23 @@ it('A failed follow from the own profile rolls the own Following count back (spe
 });
 
 it('A failed follow rolled back after the own profile reloads leaves the own Following count unchanged (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
-  openProfile(aliceBundle(), "alice");
-  const follow = pendingResponse();
-  stubFetchUrl((url) => url.includes("/follow") ? follow.promise : Promise.resolve(profileResponse("alice", "Alice Player", 2, 4, false)));
-  const pending = toggleFollow("bob", false);
-  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
-
-  await loadProfile("alice");
-  expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
+  const { follow, pending } = await followAcrossOwnReload(() => 4);
   await failFollow(follow, pending);
 
   expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(4);
   expect(getStoreSnapshot().errorMessage).toBe("Follow failed");
+});
+
+it('A follow that succeeds after the own profile reloads resyncs the own Following count (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
+  const { follow, pending, profileGets } = await followAcrossOwnReload((gets) => gets === 1 ? 4 : 5);
+  follow.resolve(Response.json({ following: true }));
+  await pending;
+
+  await vi.waitFor(() => {
+    expect(getStoreSnapshot().profileBundle?.summary.followingCount).toBe(5);
+    expect(profileGets()).toBe(2);
+  });
+  expect(getStoreSnapshot().profileBundle?.summary.followersCount).toBe(2);
 });
 
 it('A failed unfollow rolled back after the own profile reloads leaves the own Following count unchanged (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")', async () => {
