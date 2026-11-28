@@ -1627,6 +1627,9 @@ export effect function openPerpPosition(input: OpenPerpInput): OpenPerpReceipt!(
 }
 
 export effect function closePerpPosition(input: ClosePerpInput): ClosePerpReceipt!(MarketFailure | StoreFailure)!Store {
+  if (input.sizeCents !== undefined && input.closePct !== undefined) {
+    throw marketFail("INVALID_AMOUNT", "provide only one of sizeCents/sizePts/closePct")
+  }
   const viaClientName = normalizeViaClient(input.viaClientName)
   const idempotencyKey = try normalizeIdempotencyKey(input.idempotencyKey)
   const fingerprint = `close:${input.positionId}:${input.sizeCents ?? ""}:${input.closePct ?? ""}`
