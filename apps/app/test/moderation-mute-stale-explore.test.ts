@@ -6,10 +6,10 @@ import {
   aliceViewer,
   bobPostRaw,
   erinPostRaw,
-  jsonPayload,
+  gateFetchOn,
   makeExploreSearchPayload,
   resetModerationStore,
-  stubFetchUrl,
+  stubFetchOn,
 } from "./moderation-fixtures.ts";
 
 const exploreIds = () => getStoreSnapshot().explore.posts.map((p) => p.card.id);
@@ -26,20 +26,6 @@ function seedExplore() {
   });
 }
 
-function gateOn(match: (url: string) => boolean, payload: () => unknown) {
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  stubFetchUrl((url) => {
-    if (url.includes("/api/users/bob/mute")) return Promise.resolve(jsonPayload({ muted: true }));
-    if (match(url)) return gate.then(() => jsonPayload(payload()));
-    if (url.startsWith("/api/markets")) return Promise.resolve(jsonPayload({ predictions: [], perps: [] }));
-    return Promise.resolve(jsonPayload({}, 404));
-  });
-  return () => release();
-}
-
 afterEach(() => {
   vi.unstubAllGlobals();
   resetModerationStore();
@@ -48,7 +34,7 @@ afterEach(() => {
 
 it(`Muting an author keeps their posts and account out of Explore when an in-flight search lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedExplore();
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.startsWith("/api/explore"),
     () => ({
       trending: [],
@@ -83,7 +69,7 @@ it(`Muting an author keeps their posts and account out of Explore when an in-fli
 
 it(`Muting an author keeps their posts out of Explore when an in-flight trending tag page lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedExplore();
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.startsWith("/api/trending/"),
     () => ({ items: [bobPostRaw, erinPostRaw], nextCursor: null }),
   );
@@ -100,13 +86,10 @@ it(`Muting an author keeps their posts out of Explore when an in-flight trending
 
 it(`An explore search that lands before any mute keeps the author's posts (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedExplore();
-  stubFetchUrl((url) => {
-    if (url.startsWith("/api/explore")) {
-      return Promise.resolve(jsonPayload(makeExploreSearchPayload(bobPostRaw, "bob")));
-    }
-    if (url.startsWith("/api/markets")) return Promise.resolve(jsonPayload({ predictions: [], perps: [] }));
-    return Promise.resolve(jsonPayload({}, 404));
-  });
+  stubFetchOn(
+    (url) => url.startsWith("/api/explore"),
+    () => makeExploreSearchPayload(bobPostRaw, "bob"),
+  );
   await loadExplore("bob");
   expect(exploreIds()).toEqual(["bob-post"]);
 });

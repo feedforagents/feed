@@ -115,6 +115,29 @@ export function stubFetchUrl(handler: (url: string) => Promise<Response>): void 
   }));
 }
 
+function stubFetchWithMute(respond: (url: string) => Promise<Response> | Response | null): void {
+  stubFetchUrl(async (url) => {
+    if (url.includes("/api/users/bob/mute")) return jsonPayload({ muted: true });
+    const hit = respond(url);
+    if (hit) return hit;
+    if (url.startsWith("/api/markets")) return jsonPayload({ predictions: [], perps: [] });
+    return jsonPayload({}, 404);
+  });
+}
+
+export function gateFetchOn(match: (url: string) => boolean, payload: () => unknown): () => void {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  stubFetchWithMute((url) => (match(url) ? gate.then(() => jsonPayload(payload())) : null));
+  return () => release();
+}
+
+export function stubFetchOn(match: (url: string) => boolean, payload: () => unknown): void {
+  stubFetchWithMute((url) => (match(url) ? Promise.resolve(jsonPayload(payload())) : null));
+}
+
 export function resetWorldFeedStore(
   overrides: Parameters<typeof setStoreState>[0],
 ): void {
