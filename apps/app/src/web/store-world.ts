@@ -248,6 +248,11 @@ function preserveEngagementSince(
 let postDeletionSeq = 0;
 const postDeletedAtSeq = new Map<string, number>();
 
+let postDeleteOrderSeq = 0;
+const postDeleteInitiatedAtSeq = new Map<string, number>();
+let profileCountHandle: string | null = null;
+let profileCountLandedAtSeq = 0;
+
 function capturePostDeletions(): number {
   return postDeletionSeq;
 }
@@ -406,13 +411,17 @@ export function removePostAcrossStore(
   const cleanList = (list: ReadonlyArray<AppPost>) =>
     list.filter((p) => p.card.id !== postId).map((p) => adjustParent(tombstoneQuote(p)));
   const bundle = cur.profileBundle;
+  const initiatedAtSeq = postDeleteInitiatedAtSeq.get(postId);
+  const countPredatesDelete = bundle !== null
+    && initiatedAtSeq !== undefined
+    && profileCountHandle === bundle.summary.handle.toLowerCase()
+    && initiatedAtSeq > profileCountLandedAtSeq;
   const removedFromProfile = bundle !== null
     && existing !== undefined
     && existing.card.authorHandle.toLowerCase() === bundle.summary.handle.toLowerCase()
     && (bundle.posts.some((p) => p.card.id === postId)
       || cur.profileReplies.some((p) => p.card.id === postId)
-      || bundle.postsNextCursor !== null
-      || existing.replyToPostId !== null);
+      || (countPredatesDelete && (bundle.postsNextCursor !== null || existing.replyToPostId !== null)));
   const cleaned = cleanedPostLists(cur, cleanList);
   setStoreState({
     ...cleaned,
@@ -795,11 +804,14 @@ export async function createPost(
 
 export async function deletePost(postId: string): Promise<boolean> {
   if (!getStoreSnapshot().viewer) return false;
+  postDeleteOrderSeq += 1;
+  postDeleteInitiatedAtSeq.set(postId, postDeleteOrderSeq);
   const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}`, {
     method: "DELETE",
     parse: passThrough,
   });
   if (!res.ok) {
+    postDeleteInitiatedAtSeq.delete(postId);
     setErrorNotice(res.message);
     return false;
   }
@@ -2134,6 +2146,8 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
       (post) => wasPostDeletedSince(post.card.id, deletionsAtStart)
         && post.card.authorHandle.toLowerCase() === fetched.summary.handle.toLowerCase(),
     ).length;
+    profileCountHandle = fetched.summary.handle.toLowerCase();
+    profileCountLandedAtSeq = postDeleteOrderSeq;
     setStoreState({
       profileBundle: {
         ...fetched,

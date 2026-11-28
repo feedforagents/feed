@@ -8,6 +8,12 @@ import { makeRawPost, makeRawProfileBundle, makeViewerSession } from "./app-test
 const createdAt = Date.now() - 60_000;
 const firstRaw = makeRawPost(createdAt, { id: "alice-post-1", content: "Alice first call" });
 const secondRaw = makeRawPost(createdAt, { id: "alice-post-2", content: "Alice second call" });
+const thirdRaw = makeRawPost(createdAt, { id: "alice-post-3", content: "Alice third call" });
+const replyRaw = makeRawPost(createdAt, { id: "alice-reply-1", content: "Alice reply note", replyToPostId: "carol-post-9" });
+const bobAuthor = { authorId: "bob", authorHandle: "bob", authorDisplayName: "Bob Trader" };
+const bobFirstRaw = makeRawPost(createdAt, { id: "bob-post-1", content: "Bob first call", ...bobAuthor });
+const bobSecondRaw = makeRawPost(createdAt, { id: "bob-post-2", content: "Bob second call", ...bobAuthor });
+const bobThirdRaw = makeRawPost(createdAt, { id: "bob-post-3", content: "Bob third call", ...bobAuthor });
 
 function profileRaw(postsCount: number, posts: ReadonlyArray<Record<string, unknown>>, nextCursor: string | null = null): Record<string, unknown> {
   return makeRawProfileBundle({ handle: "alice", displayName: "Alice Player", createdAt, postsCount, posts, nextCursor });
@@ -33,6 +39,69 @@ function deletePostResponse(postId: string, replyToPostId: string | null = null,
 
 function isDeletePost(input: RequestInfo | URL, init: RequestInit | undefined, postId: string): boolean {
   return fetchPath(input).includes(`/api/posts/${postId}`) && (init?.method ?? "GET") === "DELETE";
+}
+
+function decodedPost(raw: Record<string, unknown>, viewerHandle = "alice") {
+  const decoded = decodePost(raw, viewerHandle);
+  if (decoded === null) throw new Error("test fixtures must decode");
+  return decoded;
+}
+
+type FeedDeleteCase = {
+  readonly feedRaw: Record<string, unknown>;
+  readonly postId: string;
+  readonly profile: Record<string, unknown>;
+  readonly replyToPostId?: string | null;
+  readonly parentReplyCount?: number | null;
+  readonly countAfterLoad: number;
+  readonly countAfterDelete: number;
+};
+
+function stubDeleteAndProfileFetch(testCase: FeedDeleteCase, deleteFetch: () => Promise<Response>): void {
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    if (isDeletePost(input, init, testCase.postId)) return deleteFetch();
+    if (fetchPath(input).startsWith("/api/users/alice")) return Promise.resolve(Response.json(testCase.profile));
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  });
+}
+
+function expectFeedClearedWithCount(count: number): void {
+  expect(getStoreSnapshot().feedPosts).toHaveLength(0);
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(count);
+}
+
+function expectDeleteSettled(testCase: FeedDeleteCase): void {
+  expectFeedClearedWithCount(testCase.countAfterDelete);
+  removePostAcrossStore(testCase.postId, { replyToPostId: testCase.replyToPostId ?? null, parentReplyCount: testCase.parentReplyCount ?? null });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(testCase.countAfterDelete);
+}
+
+async function deleteFeedPostAgainstLoadedProfile(testCase: FeedDeleteCase): Promise<void> {
+  stubDeleteAndProfileFetch(testCase, () => deletePostResponse(testCase.postId, testCase.replyToPostId ?? null, testCase.parentReplyCount ?? null));
+  signInAsAlice();
+  await loadProfile("alice");
+  setStoreState({ feedPosts: [decodedPost(testCase.feedRaw)] });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(testCase.countAfterLoad);
+
+  await deletePost(testCase.postId);
+
+  expectDeleteSettled(testCase);
+}
+
+async function deleteFeedPostWithReloadDuringRoundTrip(testCase: FeedDeleteCase): Promise<void> {
+  const deleteGate: { release: ((response: Response) => void) | null } = { release: null };
+  stubDeleteAndProfileFetch(testCase, () => new Promise<Response>((resolve) => { deleteGate.release = resolve; }));
+  signInAsAlice();
+  setStoreState({ feedPosts: [decodedPost(testCase.feedRaw)] });
+
+  const pendingDelete = deletePost(testCase.postId);
+  await loadProfile("alice");
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(testCase.countAfterLoad);
+
+  deleteGate.release?.(await deletePostResponse(testCase.postId, testCase.replyToPostId ?? null, testCase.parentReplyCount ?? null));
+  await pendingDelete;
+
+  expectDeleteSettled(testCase);
 }
 
 afterEach(() => {
@@ -105,11 +174,6 @@ it('Removing another author\'s reposted post from the profile list leaves the he
 });
 
 it('Deleting an own reply from the profile replies tab drops the header post count with the reply list (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
-  const replyRaw = makeRawPost(createdAt, {
-    id: "alice-reply-1",
-    content: "Alice reply note",
-    replyToPostId: "carol-post-9",
-  });
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
     const method = init?.method ?? "GET";
@@ -144,58 +208,85 @@ it('Deleting an own reply from the profile replies tab drops the header post cou
 });
 
 it('Deleting an own post from the feed drops the loaded profile header count even when the post is outside the loaded profile page (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
-  const decodedFirst = decodePost(firstRaw, "alice");
-  if (decodedFirst === null) throw new Error("test fixtures must decode");
-  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = fetchPath(input);
-    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
-    if (url.startsWith("/api/users/alice")) {
-      return Promise.resolve(Response.json(profileRaw(3, [secondRaw], "more")));
-    }
-    return Promise.resolve(Response.json({}, { status: 404 }));
+  await deleteFeedPostAgainstLoadedProfile({
+    feedRaw: firstRaw,
+    postId: "alice-post-1",
+    profile: profileRaw(3, [secondRaw], "more"),
+    countAfterLoad: 3,
+    countAfterDelete: 2,
   });
-
-  signInAsAlice();
-  await loadProfile("alice");
-  setStoreState({ feedPosts: [decodedFirst] });
-  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(3);
   expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-2"]);
-
-  await deletePost("alice-post-1");
-
-  expect(getStoreSnapshot().feedPosts).toHaveLength(0);
-  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
-
-  removePostAcrossStore("alice-post-1", { replyToPostId: null, parentReplyCount: null });
-  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
 });
 
 it('A profile reload that lands after the server delete keeps its count when the delete signal arrives (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
-  const decodedFirst = decodePost(firstRaw, "alice");
-  if (decodedFirst === null) throw new Error("test fixtures must decode");
-  const thirdRaw = makeRawPost(createdAt, { id: "alice-post-3", content: "Alice third call" });
-  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = fetchPath(input);
-    if (isDeletePost(input, init, "alice-post-1")) return deletePostResponse("alice-post-1");
-    if (url.startsWith("/api/users/alice")) {
-      return Promise.resolve(Response.json(profileRaw(2, [secondRaw, thirdRaw])));
+  await deleteFeedPostAgainstLoadedProfile({
+    feedRaw: firstRaw,
+    postId: "alice-post-1",
+    profile: profileRaw(2, [secondRaw, thirdRaw]),
+    countAfterLoad: 2,
+    countAfterDelete: 2,
+  });
+  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-2", "alice-post-3"]);
+});
+
+it('Deleting an own reply outside the loaded profile lists drops the header count once on a complete page (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  await deleteFeedPostAgainstLoadedProfile({
+    feedRaw: replyRaw,
+    postId: "alice-reply-1",
+    profile: profileRaw(2, [firstRaw]),
+    replyToPostId: "carol-post-9",
+    parentReplyCount: 0,
+    countAfterLoad: 2,
+    countAfterDelete: 1,
+  });
+});
+
+it('A profile reload during the delete round trip keeps its count when more profile pages remain (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  await deleteFeedPostWithReloadDuringRoundTrip({
+    feedRaw: firstRaw,
+    postId: "alice-post-1",
+    profile: profileRaw(2, [secondRaw, thirdRaw], "more"),
+    countAfterLoad: 2,
+    countAfterDelete: 2,
+  });
+});
+
+it('A profile reload during a reply delete round trip keeps its count on a complete page (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  await deleteFeedPostWithReloadDuringRoundTrip({
+    feedRaw: replyRaw,
+    postId: "alice-reply-1",
+    profile: profileRaw(2, [firstRaw]),
+    replyToPostId: "carol-post-9",
+    parentReplyCount: 0,
+    countAfterLoad: 2,
+    countAfterDelete: 2,
+  });
+});
+
+it('A live delete event for a post outside the loaded profile page keeps a count loaded after the server delete (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    if (fetchPath(input).startsWith("/api/users/bob")) {
+      return Promise.resolve(Response.json(makeRawProfileBundle({
+        handle: "bob",
+        displayName: "Bob Trader",
+        createdAt,
+        postsCount: 4,
+        posts: [bobSecondRaw, bobThirdRaw],
+        nextCursor: "more",
+      })));
     }
     return Promise.resolve(Response.json({}, { status: 404 }));
   });
 
   signInAsAlice();
-  await loadProfile("alice");
-  setStoreState({ feedPosts: [decodedFirst] });
-  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
-  expect(getStoreSnapshot().profileBundle?.posts.map((p) => p.card.id)).toEqual(["alice-post-2", "alice-post-3"]);
+  setStoreState({ profileHandle: "bob" });
+  await loadProfile("bob");
+  setStoreState({ feedPosts: [decodedPost(bobFirstRaw)] });
+  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(4);
 
-  await deletePost("alice-post-1");
+  removePostAcrossStore("bob-post-1", { replyToPostId: null, parentReplyCount: null });
 
-  expect(getStoreSnapshot().feedPosts).toHaveLength(0);
-  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
-
-  removePostAcrossStore("alice-post-1", { replyToPostId: null, parentReplyCount: null });
-  expect(getStoreSnapshot().profileBundle?.postsCount).toBe(2);
+  expectFeedClearedWithCount(4);
 });
 
 it('Deleting an own post turns its quote embeds unavailable in the same lists (spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
