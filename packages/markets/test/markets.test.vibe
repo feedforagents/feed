@@ -1802,6 +1802,37 @@ it.effect('Perp open/close idempotency: same key replays the receipt, different 
   })
 })
 
+it.effect('Perp close rejects a request that gives both a size and closePct (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', () => effect {
+  try TestClock.setTime(Date.UTC(2026, 10, 19, 12, 0, 0))
+  try runWithSeededDb(effect {
+    try createVerifiedAccount("user-alice", "alice", 500_000)
+    const open = try openPerpPosition({
+      ownerId: "user-alice",
+      ownerKind: "user",
+      ticker: "XTRPC",
+      side: "long",
+      collateralCents: 2_000,
+      leverage: 10
+    })
+    const conflictCode = try marketErrorCode(closePerpPosition({
+      ownerId: "user-alice",
+      positionId: open.positionId,
+      sizeCents: 5_000,
+      closePct: 50
+    }))
+    const stillOpen = try listPerpPositions("user-alice")
+    const partial = try closePerpPosition({
+      ownerId: "user-alice",
+      positionId: open.positionId,
+      closePct: 40
+    })
+    try check(() => assert.deepStrictEqual(
+      { conflictCode, stillOpenCount: stillOpen.length, partialRemaining: partial.remainingSizeCents },
+      { conflictCode: "INVALID_AMOUNT", stillOpenCount: 1, partialRemaining: 12000 }
+    ))
+  })
+})
+
 it.effect("prediction, perp, and NPC spot write helpers stamp explicit nowMs timestamps", effect () => {
   provide localStoreLayer({ kind: "pglite", file: undefined }) {
     try migrateFeedSchema()
