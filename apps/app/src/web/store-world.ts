@@ -1304,6 +1304,10 @@ export async function loadMarketDetails(
     marketTradesLoading: false,
     marketSocialPosts: socialRes.ok ? dropAuthorsHiddenSince(dropPostsDeletedSince(socialRes.data.items, deletionsAtStart), hidesAtStart) : [],
   });
+  const failed = !histRes.ok ? histRes : !tradesRes.ok ? tradesRes : !socialRes.ok ? socialRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function setMarketTimeRange(range: MarketTimeRange): Promise<void> {
