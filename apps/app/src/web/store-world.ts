@@ -329,6 +329,29 @@ function preserveFollowSince(
   };
 }
 
+function preserveModerationSince(
+  fetched: AppProfileBundle,
+  hidesAtStart: number,
+): AppProfileBundle {
+  const ownerLower = fetched.summary.handle.toLowerCase();
+  const withoutOwnerReposts = fetched.posts.filter((p) => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    return reposter === undefined || reposter.toLowerCase() !== ownerLower;
+  });
+  const local = getStoreSnapshot().profileBundle;
+  const fetchedKeys = profileIdentityKeys(fetched);
+  const localMatches = local !== null && profileIdentityKeys(local).some((key) => fetchedKeys.includes(key));
+  return {
+    ...fetched,
+    posts: dropAuthorsHiddenSince(withoutOwnerReposts, hidesAtStart),
+    postsCount: 0,
+    postsNextCursor: null,
+    summary: localMatches && local
+      ? { ...fetched.summary, isBlocked: local.summary.isBlocked, isMuted: local.summary.isMuted }
+      : fetched.summary,
+  };
+}
+
 export function patchPostCardAcrossStore(postId: string, updater: (card: AppPost["card"]) => AppPost["card"]): void {
   const patchPost = (post: AppPost): AppPost =>
     post.card.id === postId ? { ...post, card: updater(post.card) } : post;
@@ -449,8 +472,12 @@ function filterAuthorOutOfFeeds(handle: string): void {
         list.filter((p) => !isBlockedHandle(p.card.authorHandle) && !isBlockedReposter(p)).map(cleanPost)
     : cleanList;
   const thread = cur.activeThread;
+  const cleaned = cleanedPostLists(cur, cleanList, cleanProfileList);
   setStoreState({
-    ...cleanedPostLists(cur, cleanList, cleanProfileList),
+    ...cleaned,
+    profileBundle: cleaned.profileBundle && profileOwnerBlocked
+      ? { ...cleaned.profileBundle, postsCount: 0, postsNextCursor: null }
+      : cleaned.profileBundle,
     explore: {
       ...cur.explore,
       posts: cleanList(cur.explore.posts),
@@ -2108,6 +2135,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const loadId = ++profileLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -2135,11 +2163,13 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
       (post) => wasPostDeletedSince(post.card.id, deletionsAtStart)
         && post.card.authorHandle.toLowerCase() === fetched.summary.handle.toLowerCase(),
     ).length;
+    const ownerHiddenSince = wasAuthorHiddenSince(fetched.summary.handle, hidesAtStart);
+    const moderated = ownerHiddenSince ? preserveModerationSince(fetched, hidesAtStart) : fetched;
     setStoreState({
       profileBundle: {
-        ...fetched,
-        posts: dropPostsDeletedSince(preserveEngagementSince(fetched.posts, engagementAtStart), deletionsAtStart),
-        postsCount: Math.max(0, fetched.postsCount - droppedOwnPosts),
+        ...moderated,
+        posts: dropPostsDeletedSince(preserveEngagementSince(moderated.posts, engagementAtStart), deletionsAtStart),
+        postsCount: ownerHiddenSince ? 0 : Math.max(0, fetched.postsCount - droppedOwnPosts),
       },
       profileLoading: false,
     });
@@ -2258,6 +2288,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
   const loadId = profileLoadCount;
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
@@ -2273,11 +2304,21 @@ export async function loadMoreProfilePosts(): Promise<void> {
   if (res.ok && res.data) {
     const latest = getStoreSnapshot().profileBundle;
     if (latest && latest.id === res.data.id) {
+      const ownerHiddenSince = wasAuthorHiddenSince(latest.summary.handle, hidesAtStart);
+      const incoming = ownerHiddenSince
+        ? dropAuthorsHiddenSince(
+            res.data.posts.filter((p) => {
+              const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+              return reposter === undefined || reposter.toLowerCase() !== latest.summary.handle.toLowerCase();
+            }),
+            hidesAtStart,
+          )
+        : res.data.posts;
       setStoreState({
         profileBundle: {
           ...latest,
-          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(res.data.posts, deletionsAtStart)),
-          postsNextCursor: res.data.postsNextCursor,
+          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(incoming, deletionsAtStart)),
+          postsNextCursor: ownerHiddenSince ? null : res.data.postsNextCursor,
         },
         profileLoadingMore: false,
       });
