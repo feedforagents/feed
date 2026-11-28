@@ -212,13 +212,24 @@ describe("project CLI", () => {
   });
 
   test("verify-live checks Feed endpoints against a fake fetch transport", async () => {
-    const { verifyFeedDeployment } = await import("../src/index.ts");
+    const { buildFeedVerificationChecks, verifyFeedDeployment } = await import("../src/index.ts");
+    const checks = buildFeedVerificationChecks({ cronSecret: "test-cron-secret" });
+    expect(checks.find((check) => check.path === "/api/cron/npc-tick")?.timeoutMs).toBe(90_000);
+
     const seen: string[] = [];
+    let npcTickAttempts = 0;
     const fakeFetch: typeof globalThis.fetch = (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const pathname = new URL(url).pathname;
       const method = init?.method ?? "GET";
       seen.push(`${method} ${pathname}`);
+      if (pathname === "/api/cron/npc-tick") {
+        npcTickAttempts += 1;
+        if (npcTickAttempts === 1) {
+          return Promise.resolve(new Response("busy", { status: 503 }));
+        }
+        return Promise.resolve(new Response("ok", { status: 200 }));
+      }
       if (pathname === "/api/health") {
         return Promise.resolve(new Response(JSON.stringify({ ok: true, service: "feed", gameStart: "run", commit: "abc1234" }), {
           status: 200,
@@ -275,12 +286,13 @@ describe("project CLI", () => {
       baseUrl: "https://staging.feed.fun",
       commitSha: "abc1234",
       cronSecret: "test-cron-secret",
-      maxAttempts: 1,
-      initialDelayMs: 0,
+      maxAttempts: 2,
+      initialDelayMs: 15,
       fetch: fakeFetch,
     });
     expect(report.ok).toBe(true);
     expect(report.primary.probes).toHaveLength(16);
+    expect(report.primary.probes.find((probe) => probe.url.endsWith("/api/cron/npc-tick"))?.attempts).toBe(2);
     expect(seen).toContain("POST /api/cron/minute-tick");
     expect(seen).toContain("POST /api/cron/npc-tick");
   });
