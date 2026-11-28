@@ -9,11 +9,11 @@ import {
   carolRepostedByBobRaw,
   decodedPost,
   erinPostRaw,
-  jsonPayload,
+  gateFetchOn,
   makeProfileBundle,
   postRaw,
   resetModerationStore,
-  stubFetchUrl,
+  stubFetchOn,
 } from "./moderation-fixtures.ts";
 
 const createdAt = Date.now() - 60_000;
@@ -51,20 +51,6 @@ const erinReplyRaw = postRaw({
   replyToPostId: "carol-post",
 });
 
-function gateOn(match: (url: string) => boolean, payload: () => unknown) {
-  let release: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  stubFetchUrl((url) => {
-    if (url.includes("/api/users/bob/mute")) return Promise.resolve(jsonPayload({ muted: true }));
-    if (match(url)) return gate.then(() => jsonPayload(payload()));
-    if (url.startsWith("/api/markets")) return Promise.resolve(jsonPayload({ predictions: [], perps: [] }));
-    return Promise.resolve(jsonPayload({}, 404));
-  });
-  return () => release();
-}
-
 function seedProfile(handle: string) {
   setStoreState({
     viewer: aliceViewer,
@@ -79,6 +65,44 @@ function seedProfile(handle: string) {
   });
 }
 
+function bobProfileBundle(posts: ReadonlyArray<Record<string, unknown>>) {
+  return makeRawProfileBundle({
+    handle: "bob",
+    displayName: "Bob Trader",
+    createdAt,
+    postsCount: 2,
+    posts,
+  });
+}
+
+async function muteBobWhileInFlight(
+  match: (url: string) => boolean,
+  payload: () => unknown,
+  startRequest: () => Promise<void>,
+): Promise<void> {
+  const release = gateFetchOn(match, payload);
+  const inFlight = startRequest();
+  await toggleMute("bob", false);
+  release();
+  await inFlight;
+}
+
+function expectProfilePosts(ids: ReadonlyArray<string>, loading: boolean): void {
+  const bundle = getStoreSnapshot().profileBundle;
+  expect({ posts: bundle?.posts.map((p) => p.card.id), loading: getStoreSnapshot().profileLoading }).toEqual({
+    posts: ids,
+    loading,
+  });
+}
+
+function expectProfilePostsLoadingMore(ids: ReadonlyArray<string>, loadingMore: boolean): void {
+  const s = getStoreSnapshot();
+  expect({ posts: s.profileBundle?.posts.map((p) => p.card.id), loadingMore: s.profileLoadingMore }).toEqual({
+    posts: ids,
+    loadingMore,
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   resetModerationStore();
@@ -87,32 +111,28 @@ afterEach(() => {
 
 it(`Muting a profile owner keeps their posts out of the profile when an in-flight profile load lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedProfile("bob");
-  const release = gateOn(
+  await muteBobWhileInFlight(
     (url) => url.includes("/api/users/bob") && !url.includes("cursor"),
-    () =>
-      makeRawProfileBundle({
-        handle: "bob",
-        displayName: "Bob Trader",
-        createdAt,
-        postsCount: 2,
-        posts: [bobPostRaw, bobSecondRaw],
-      }),
+    () => bobProfileBundle([bobPostRaw, bobSecondRaw]),
+    () => loadProfile("bob"),
   );
-  const inFlight = loadProfile("bob");
-  await toggleMute("bob", false);
-  release();
-  await inFlight;
-  const bundle = getStoreSnapshot().profileBundle;
-  expect({ posts: bundle?.posts.map((p) => p.card.id), loading: getStoreSnapshot().profileLoading }).toEqual({
-    posts: [],
-    loading: false,
-  });
+  expectProfilePosts([], false);
+});
+
+it(`Muting a profile owner drops a post they reposted when an in-flight profile load lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
+  seedProfile("bob");
+  await muteBobWhileInFlight(
+    (url) => url.includes("/api/users/bob") && !url.includes("cursor"),
+    () => bobProfileBundle([carolRepostedByBobRaw, erinPostRaw]),
+    () => loadProfile("bob"),
+  );
+  expectProfilePosts(["erin-post"], false);
 });
 
 it(`Muting an author strips their quote from profile replies that land after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedProfile("erin");
   setStoreState({ profileBundle: { ...makeProfileBundle("erin", "Erin Fox", 0, 0, false) } });
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.includes("filter=replies"),
     () => ({ items: [erinReplyQuotingBobRaw, erinReplyRaw], nextCursor: null }),
   );
@@ -128,7 +148,7 @@ it(`Muting an author strips their quote from profile replies that land after the
 it(`Muting an author keeps their posts out of profile likes that land after the mute and strips their repost credit (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedProfile("erin");
   setStoreState({ profileBundle: { ...makeProfileBundle("erin", "Erin Fox", 0, 0, false) } });
-  const release = gateOn(
+  const release = gateFetchOn(
     (url) => url.includes("/api/users/erin/likes"),
     () => ({ items: [bobPostRaw, carolRepostedByBobRaw, erinPostRaw], nextCursor: null }),
   );
@@ -151,38 +171,38 @@ it(`Muting a profile owner keeps the next page out when an in-flight load-more l
       postsNextCursor: "cursor-2",
     },
   });
-  const release = gateOn(
+  await muteBobWhileInFlight(
     (url) => url.includes("/api/users/bob") && url.includes("cursor="),
-    () =>
-      makeRawProfileBundle({
-        handle: "bob",
-        displayName: "Bob Trader",
-        createdAt,
-        postsCount: 2,
-        posts: [bobSecondRaw],
-      }),
+    () => bobProfileBundle([bobSecondRaw]),
+    () => loadMoreProfilePosts(),
   );
-  const inFlight = loadMoreProfilePosts();
-  await toggleMute("bob", false);
-  release();
-  await inFlight;
-  const s = getStoreSnapshot();
-  expect({ posts: s.profileBundle?.posts.map((p) => p.card.id), loadingMore: s.profileLoadingMore }).toEqual({
-    posts: [],
-    loadingMore: false,
+  expectProfilePostsLoadingMore([], false);
+});
+
+it(`Muting a profile owner drops a post they reposted when an in-flight load-more lands after the mute (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
+  seedProfile("bob");
+  setStoreState({
+    profileBundle: {
+      ...makeProfileBundle("bob", "Bob Trader", 0, 0, false),
+      posts: [decodedPost(erinPostRaw)],
+      postsNextCursor: "cursor-2",
+    },
   });
+  await muteBobWhileInFlight(
+    (url) => url.includes("/api/users/bob") && url.includes("cursor="),
+    () => bobProfileBundle([carolRepostedByBobRaw, bobSecondRaw]),
+    () => loadMoreProfilePosts(),
+  );
+  expectProfilePostsLoadingMore(["erin-post"], false);
 });
 
 it(`Profile likes that land before any mute keep the author's posts (spec/social/moderation.md, "Muting hides an author's feed content without removing follows")`, async () => {
   seedProfile("erin");
   setStoreState({ profileBundle: { ...makeProfileBundle("erin", "Erin Fox", 0, 0, false) } });
-  stubFetchUrl((url) => {
-    if (url.includes("/api/users/erin/likes")) {
-      return Promise.resolve(jsonPayload({ items: [bobPostRaw, erinPostRaw], nextCursor: null }));
-    }
-    if (url.startsWith("/api/markets")) return Promise.resolve(jsonPayload({ predictions: [], perps: [] }));
-    return Promise.resolve(jsonPayload({}, 404));
-  });
+  stubFetchOn(
+    (url) => url.includes("/api/users/erin/likes"),
+    () => ({ items: [bobPostRaw, erinPostRaw], nextCursor: null }),
+  );
   await loadProfileLikes("erin");
   expect(getStoreSnapshot().profileLikes.map((p) => p.card.id)).toEqual(["bob-post", "erin-post"]);
 });

@@ -150,10 +150,19 @@ function stripHiddenAuthorRefs(p: AppPost, isHidden: (handle: string) => boolean
 function dropAuthorsHiddenSince(
   posts: ReadonlyArray<AppPost>,
   hidesAtStart: number,
+  profileOwnerHandle?: string,
 ): ReadonlyArray<AppPost> {
   if (hidesAtStart === authorHideSeq) return posts;
   const isHidden = (handle: string): boolean => wasAuthorHiddenSince(handle, hidesAtStart);
-  return posts.filter((p) => !isHidden(p.card.authorHandle)).map((p) => stripHiddenAuthorRefs(p, isHidden));
+  const owner = profileOwnerHandle?.toLowerCase();
+  const ownerHidden = owner !== undefined && isHidden(owner);
+  const repostedByOwner = (p: AppPost): boolean => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    return owner !== undefined && reposter !== undefined && reposter.toLowerCase() === owner;
+  };
+  return posts
+    .filter((p) => !isHidden(p.card.authorHandle) && !(ownerHidden && repostedByOwner(p)))
+    .map((p) => stripHiddenAuthorRefs(p, isHidden));
 }
 let exploreRequestSeq = 0;
 let exploreLoadedQuery = "";
@@ -2138,6 +2147,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
         posts: dropAuthorsHiddenSince(
           dropPostsDeletedSince(preserveEngagementSince(fetched.posts, engagementAtStart), deletionsAtStart),
           hidesAtStart,
+          fetched.summary.handle,
         ),
         postsCount: Math.max(0, fetched.postsCount - droppedOwnPosts),
       },
@@ -2279,7 +2289,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
       setStoreState({
         profileBundle: {
           ...latest,
-          posts: appendUniquePosts(latest.posts, dropAuthorsHiddenSince(dropPostsDeletedSince(res.data.posts, deletionsAtStart), hidesAtStart)),
+          posts: appendUniquePosts(latest.posts, dropAuthorsHiddenSince(dropPostsDeletedSince(res.data.posts, deletionsAtStart), hidesAtStart, latest.summary.handle)),
           postsNextCursor: res.data.postsNextCursor,
         },
         profileLoadingMore: false,
