@@ -1736,7 +1736,10 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
     setErrorNotice(chatsRes.message);
   }
   if (loadMessages && selectedId) {
-    await loadChatMessages(selectedId);
+    const loaded = await loadChatMessages(selectedId);
+    if (!loaded && getStoreSnapshot().selectedChatId === selectedId) {
+      setErrorNotice("Failed to load messages. Please try again.");
+    }
   }
 }
 
