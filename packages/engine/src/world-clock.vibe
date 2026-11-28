@@ -1148,7 +1148,8 @@ export effect function fastForwardSimulatedHours(hours: number): FastForwardResu
     const baseMs = Math.max(wallNow, prevTickAt)
     const nextMs = baseMs + deltaMs
     const prevDay = Math.max(1, safeNonNegInt(rows[0]?.current_day, 1))
-    const { nextDay, nextHour } = advanceDayHour(prevDay, baseMs, nextMs)
+    const prevDayAt = prevTickAt > 0 ? prevTickAt : baseMs
+    const { nextDay, nextHour } = advanceDayHour(prevDay, prevDayAt, nextMs)
     try tx.query(
       `UPDATE feed_world_state
        SET current_day = $1, current_hour = $2, last_tick_at = $3, updated_at = $3

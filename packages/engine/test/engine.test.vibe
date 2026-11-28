@@ -322,6 +322,18 @@ it.effect('Minute ticks advance time without LLM reservations and simulated fast
       assert.isTrue(toInt(healthAfterJump.pending_count) > 0)
       assert.isNotNull(healthAfterJump.oldest_pending_at)
     })
+
+    const utcMidnight = Date.UTC(2026, 10, 25)
+    try TestClock.setTime(utcMidnight - 10 * 60_000)
+    try runMinuteTick()
+    try TestClock.adjust("20 minutes")
+    const delayedJump = try fastForwardSimulatedHours(1)
+    try runMinuteTick()
+    const statusAfterDelayedJump = try getEngineAdminStatus()
+    try check(() => assert.deepStrictEqual(
+      [delayedJump.previousMs, delayedJump.currentMs, delayedJump.currentDay, delayedJump.currentHour, statusAfterDelayedJump.currentDay],
+      [utcMidnight + 10 * 60_000, utcMidnight + 70 * 60_000, 3, 1, 3],
+    ))
   })
 }))
 
