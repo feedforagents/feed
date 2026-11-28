@@ -1305,11 +1305,21 @@ export async function previewPerpOrder(
   setStoreState({ perpPreview: res.ok ? res.data : null });
 }
 
-let latestMarketsLoad: Promise<boolean> | undefined;
+type MarketsLoadOutcome = {
+  readonly ok: boolean;
+  readonly superseded?: boolean;
+  readonly message?: string;
+};
 
-function startMarketsLoad(): Promise<boolean> {
-  const load: Promise<boolean> = requestJson("/api/markets", { parse: passThrough }).then(
-    (response) => latestMarketsLoad === load && applyMarketsResponse(response),
+let latestMarketsLoad: Promise<MarketsLoadOutcome> | undefined;
+
+function startMarketsLoad(): Promise<MarketsLoadOutcome> {
+  const load: Promise<MarketsLoadOutcome> = requestJson("/api/markets", { parse: passThrough }).then(
+    (response) => {
+      if (latestMarketsLoad !== load) return { ok: false, superseded: true };
+      const ok = applyMarketsResponse(response);
+      return ok ? { ok: true } : { ok: false, message: response.ok ? "Markets unavailable" : response.message };
+    },
   );
   latestMarketsLoad = load;
   setStoreState({ marketsLoading: true });
@@ -1375,7 +1385,10 @@ function applyMarketsResponse(mktRes: ApiResult<unknown>): boolean {
 }
 
 export async function loadMarkets(): Promise<void> {
-  await startMarketsLoad();
+  const outcome = await startMarketsLoad();
+  if (!outcome.ok && !outcome.superseded) {
+    setErrorNotice(outcome.message ?? "Markets unavailable");
+  }
 }
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
@@ -1476,10 +1489,10 @@ async function executeTradeRequest({
   });
   setStatusNotice(formatReceiptMessage ? formatReceiptMessage(res.data) : statusMessage);
   let refresh = startMarketsLoad();
-  let refreshed = await refresh;
+  let refreshed = (await refresh).ok;
   while (latestMarketsLoad && refresh !== latestMarketsLoad) {
     refresh = latestMarketsLoad;
-    refreshed = await refresh;
+    refreshed = (await refresh).ok;
   }
   if (!refreshed) {
     setErrorNotice("Trade executed, but your positions could not be refreshed.");

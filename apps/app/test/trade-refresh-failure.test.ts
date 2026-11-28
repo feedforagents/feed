@@ -2,37 +2,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { loadMarkets, submitPredictionOrder } from "../src/web/store-world.ts";
-import { installDeferredFetchQueue, jsonResponse } from "./deferred-fetch.ts";
+import { installDeferredFetchQueue, installFetch, jsonResponse, marketsResponse, unexpectedResponse } from "./deferred-fetch.ts";
 import { aliceViewer } from "./moderation-fixtures.ts";
 
-function marketsResponse(status: number): Response {
-  if (status !== 200) return jsonResponse({ message: "markets unavailable" }, status);
-  return jsonResponse({
-    predictions: [],
-    perps: [],
-    positions: {
-      predictionPositions: [
-        {
-          marketId: "pred-a",
-          side: "yes",
-          shares: 4000,
-          costBasisCents: 2500,
-          estimatedValueCents: 2500,
-          question: "Will pred-a happen?",
-          yesPriceBps: 5000,
-          noPriceBps: 5000,
-          settledAt: null,
-        },
-      ],
-    },
-  });
-}
-
 function installTradeFetch(marketsStatus: number, buyStatus = 200) {
-  const fetchMock: typeof fetch = (input, init) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(raw, "https://feed.fun");
-    const method = init?.method ?? "GET";
+  installFetch((url, method) => {
     if (method === "POST" && url.pathname === "/api/markets/predictions/pred-a/buy") {
       return Promise.resolve(
         buyStatus === 200
@@ -43,9 +17,8 @@ function installTradeFetch(marketsStatus: number, buyStatus = 200) {
     if (method === "GET" && url.pathname === "/api/markets") {
       return Promise.resolve(marketsResponse(marketsStatus));
     }
-    return Promise.resolve(jsonResponse({ message: `unexpected ${method} ${url.pathname}` }, 500));
-  };
-  vi.stubGlobal("fetch", fetchMock);
+    return unexpectedResponse(url, method);
+  });
 }
 
 function seedTrade(): void {
