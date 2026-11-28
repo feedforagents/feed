@@ -1216,6 +1216,7 @@ export async function loadEconomy(): Promise<void> {
     return;
   }
   setStoreState({ economyLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadWorldStatus(): Promise<void> {
