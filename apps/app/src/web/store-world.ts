@@ -236,11 +236,7 @@ function preserveEngagementSince(
     const current = findPostInState(post.card.id);
     if (!start || !current) return post;
     const now = engagementOf(current.card);
-    if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) {
-      if (likeInFlight.has(post.card.id)) markLikeServerCountLanded(post.card.id);
-      if (repostInFlight.has(post.card.id)) markRepostServerCountLanded(post.card.id);
-      return post;
-    }
+    if (now.liked === start.liked && now.likeCount === start.likeCount && now.reposted === start.reposted && now.repostCount === start.repostCount) return post;
     return { ...post, card: { ...post.card, ...now } };
   });
 }
@@ -745,15 +741,8 @@ export async function createPost(
       const replies = getStoreSnapshot().threadSort === "newest"
         ? [created, ...curThread.replies]
         : [...curThread.replies, created];
-      setStoreState({
-        activeThread: {
-          ...curThread,
-          post: liveCountLanded
-            ? curThread.post
-            : { ...curThread.post, card: { ...curThread.post.card, replyCount: curThread.post.card.replyCount + 1 } },
-          replies,
-        },
-      });
+      setStoreState({ activeThread: { ...curThread, replies } });
+      if (!liveCountLanded) patchPostCardAcrossStore(curThread.post.card.id, (card) => ({ ...card, replyCount: card.replyCount + 1 }));
     }
   }
   const cur = getStoreSnapshot();
@@ -824,11 +813,12 @@ export async function toggleLike(postId: string): Promise<void> {
   likeOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.likeCount ?? 0;
   const optimisticLiked = !currentlyLiked;
-  const optimisticCount = Math.max(0, prevCount + (optimisticLiked ? 1 : -1));
+  const delta = optimisticLiked ? 1 : -1;
+  const optimisticCount = Math.max(0, prevCount + delta);
   patchPostCardAcrossStore(postId, (card) => ({
     ...card,
     liked: optimisticLiked,
-    likeCount: optimisticCount,
+    likeCount: Math.max(0, card.likeCount + delta),
   }));
   try {
     const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/like`, {
@@ -837,10 +827,10 @@ export async function toggleLike(postId: string): Promise<void> {
     });
     if (!res.ok) {
       const serverCountLanded = likeServerCountLanded.has(postId);
-      patchPostCardAcrossStore(postId, (card) => ({
+      patchPostCardAcrossStore(postId, (card) => card.liked === currentlyLiked ? card : ({
         ...card,
         liked: currentlyLiked,
-        ...(serverCountLanded ? {} : { likeCount: prevCount }),
+        ...(serverCountLanded ? {} : { likeCount: Math.max(0, card.likeCount - delta) }),
       }));
       setErrorNotice(res.message);
       return;
@@ -873,11 +863,12 @@ export async function repostPost(postId: string): Promise<void> {
   repostOwnEngagementLanded.delete(postId);
   const prevCount = existing?.card.repostCount ?? 0;
   const optimisticReposted = !currentlyReposted;
-  const optimisticCount = Math.max(0, prevCount + (optimisticReposted ? 1 : -1));
+  const delta = optimisticReposted ? 1 : -1;
+  const optimisticCount = Math.max(0, prevCount + delta);
   patchPostCardAcrossStore(postId, (card) => ({
     ...card,
     reposted: optimisticReposted,
-    repostCount: optimisticCount,
+    repostCount: Math.max(0, card.repostCount + delta),
   }));
   try {
     const res = await requestJson(`/api/posts/${encodeURIComponent(postId)}/repost`, {
@@ -886,10 +877,10 @@ export async function repostPost(postId: string): Promise<void> {
     });
     if (!res.ok) {
       const serverCountLanded = repostServerCountLanded.has(postId);
-      patchPostCardAcrossStore(postId, (card) => ({
+      patchPostCardAcrossStore(postId, (card) => card.reposted === currentlyReposted ? card : ({
         ...card,
         reposted: currentlyReposted,
-        ...(serverCountLanded ? {} : { repostCount: prevCount }),
+        ...(serverCountLanded ? {} : { repostCount: Math.max(0, card.repostCount - delta) }),
       }));
       setErrorNotice(res.message);
       return;

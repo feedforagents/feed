@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getStoreSnapshot } from "../src/web/store-core.ts";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { createPost } from "../src/web/store-world.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
 import { decodedPost, jsonPayload, postRaw, resetWorldFeedStore } from "./moderation-fixtures.ts";
@@ -11,6 +11,7 @@ const existingReply = decodedPost(postRaw({ id: "reply-existing", replyToPostId:
 const createdRaw = postRaw({ id: "reply-new", replyToPostId: "post-1", content: "Fresh reply" });
 
 let threadFails = true;
+let feedFails = false;
 
 class StubEventSource extends EventTarget {
   static latest: StubEventSource | null = null;
@@ -23,6 +24,7 @@ class StubEventSource extends EventTarget {
 
 beforeEach(() => {
   threadFails = true;
+  feedFails = false;
   vi.stubGlobal("EventSource", StubEventSource);
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -43,6 +45,7 @@ beforeEach(() => {
       }));
     }
     if (url.includes("/api/feed")) {
+      if (feedFails) return Promise.resolve(jsonPayload({ message: "Feed failed" }, 500));
       return Promise.resolve(jsonPayload({ items: [], nextCursor: null }));
     }
     return Promise.resolve(jsonPayload({}));
@@ -96,4 +99,12 @@ it("does not double-count a posted reply whose live count already landed when th
 it("keeps the server thread when the follow-up refresh succeeds (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", async () => {
   threadFails = false;
   await expectReplyShownOnce();
+});
+
+it("shows the new reply count in every copy of the parent when the thread and feed refreshes both fail (spec/social/posts.md, \"Story: Create and delete posts with unified replies and attribution\")", async () => {
+  feedFails = true;
+  setStoreState({ profileReplies: [threadPost], profileLikes: [threadPost] });
+  await expectReplyShownOnce();
+  const s = getStoreSnapshot();
+  expect([s.feedPosts[0]?.card.replyCount, s.profileReplies[0]?.card.replyCount, s.profileLikes[0]?.card.replyCount]).toEqual([2, 2, 2]);
 });

@@ -1,25 +1,26 @@
 // @vitest-environment happy-dom
 // spec/social/posts.md, "Story: Like, repost, follow, and block enforcement"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getStoreSnapshot } from "../src/web/store-core.ts";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { repostPost } from "../src/web/store-world.ts";
+import { loadFeed, repostPost } from "../src/web/store-world.ts";
 import { eventSources, installStubEventSource } from "./app-test-helpers.tsx";
 import { decodedPost, jsonPayload, postRaw, resetWorldFeedStore, stubFetchUrl } from "./moderation-fixtures.ts";
 
 const basePost = decodedPost(postRaw({ id: "post-1", repostCount: 3, repostedByViewer: false }));
 
 let releaseRepost: ((response: Response) => void) | null = null;
+let releaseFeed: ((response: Response) => void) | null = null;
 
 beforeEach(() => {
   releaseRepost = null;
   eventSources.length = 0;
   installStubEventSource(eventSources);
-  stubFetchUrl((url) =>
-    url.includes("/api/posts/post-1/repost")
-      ? new Promise<Response>((resolve) => { releaseRepost = resolve; })
-      : Promise.resolve(jsonPayload({})),
-  );
+  stubFetchUrl((url) => {
+    if (url.includes("/api/posts/post-1/repost")) return new Promise<Response>((resolve) => { releaseRepost = resolve; });
+    if (url.includes("/api/feed")) return new Promise<Response>((resolve) => { releaseFeed = resolve; });
+    return Promise.resolve(jsonPayload({}));
+  });
   resetWorldFeedStore({ feedPosts: [basePost], errorMessage: null });
 });
 
@@ -110,4 +111,18 @@ it("shows the server repost count when a live repost lands before the unrepost c
   await toggle;
   expect(getStoreSnapshot().feedPosts[0]?.card.reposted).toBe(false);
   expect(getStoreSnapshot().feedPosts[0]?.card.repostCount).toBe(5);
+});
+
+it("keeps each copy's server repost count when a feed refresh lands and the repost then fails (spec/social/posts.md, \"Story: Like, repost, follow, and block enforcement\")", async () => {
+  const detailPost = decodedPost(postRaw({ id: "post-1", repostCount: 5, repostedByViewer: false }));
+  setStoreState({ route: "PostDetail", activePostId: "post-1", activeThread: { post: detailPost, parentPost: null, ancestors: [], replies: [] } });
+  const repostCopies = () => [getStoreSnapshot().feedPosts[0], getStoreSnapshot().activeThread?.post].map((p) => [p?.card.reposted, p?.card.repostCount]);
+  const toggle = repostPost("post-1");
+  expect(repostCopies()).toEqual([[true, 4], [true, 6]]);
+  const refresh = loadFeed();
+  releaseFeed?.(jsonPayload({ items: [postRaw({ id: "post-1", repostCount: 5, repostedByViewer: false })], nextCursor: null }));
+  await refresh;
+  releaseRepost?.(jsonPayload({ message: "Repost failed" }, 500));
+  await toggle;
+  expect(repostCopies()).toEqual([[false, 5], [false, 5]]);
 });
