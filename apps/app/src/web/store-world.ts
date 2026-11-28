@@ -1211,6 +1211,7 @@ export async function loadClosedPositions(): Promise<void> {
     return;
   }
   setStoreState({ closedPositionsLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadMarketDetails(
