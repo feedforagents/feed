@@ -85,6 +85,10 @@ export function decodedPost(raw: Record<string, unknown>): AppPost {
   return post;
 }
 
+export const threadPost = decodedPost(postRaw({ id: "post-1", replyCount: 1 }));
+export const existingReply = decodedPost(postRaw({ id: "reply-existing", replyToPostId: "post-1" }));
+export const createdReplyRaw = postRaw({ id: "reply-new", replyToPostId: "post-1", content: "Fresh reply" });
+
 export function resetModerationStore(): void {
   setStoreState({
     viewer: null,
@@ -108,11 +112,15 @@ export function jsonPayload(payload: unknown, status = 200): Response {
   });
 }
 
-export function stubFetchUrl(handler: (url: string) => Promise<Response>): void {
-  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+export function stubFetch(handler: (url: string, method: string) => Promise<Response>): void {
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    return handler(url);
+    return handler(url, init?.method ?? "GET");
   }));
+}
+
+export function stubFetchUrl(handler: (url: string) => Promise<Response>): void {
+  stubFetch((url) => handler(url));
 }
 
 export function resetWorldFeedStore(
@@ -132,6 +140,17 @@ export function resetWorldFeedStore(
     activeThread: null,
     activePostId: null,
     ...overrides,
+  });
+}
+
+export function resetReplyThreadStore(): void {
+  resetWorldFeedStore({
+    route: "PostDetail",
+    feedPosts: [threadPost],
+    activeThread: { post: threadPost, parentPost: null, ancestors: [], replies: [existingReply] },
+    activePostId: "post-1",
+    threadSort: "oldest",
+    threadLoading: false,
   });
 }
 

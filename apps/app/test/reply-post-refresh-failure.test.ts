@@ -4,11 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { createPost } from "../src/web/store-world.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { decodedPost, jsonPayload, postRaw, resetWorldFeedStore } from "./moderation-fixtures.ts";
-
-const threadPost = decodedPost(postRaw({ id: "post-1", replyCount: 1 }));
-const existingReply = decodedPost(postRaw({ id: "reply-existing", replyToPostId: "post-1" }));
-const createdRaw = postRaw({ id: "reply-new", replyToPostId: "post-1", content: "Fresh reply" });
+import { createdReplyRaw, jsonPayload, postRaw, resetReplyThreadStore, stubFetch } from "./moderation-fixtures.ts";
 
 let threadFails = true;
 
@@ -24,11 +20,9 @@ class StubEventSource extends EventTarget {
 beforeEach(() => {
   threadFails = true;
   vi.stubGlobal("EventSource", StubEventSource);
-  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = init?.method ?? "GET";
+  stubFetch((url, method) => {
     if (url.endsWith("/api/posts") && method === "POST") {
-      return Promise.resolve(jsonPayload(createdRaw));
+      return Promise.resolve(jsonPayload(createdReplyRaw));
     }
     if (url.includes("/api/posts/post-1?")) {
       if (threadFails) return Promise.resolve(jsonPayload({ message: "Thread failed" }, 500));
@@ -46,15 +40,8 @@ beforeEach(() => {
       return Promise.resolve(jsonPayload({ items: [], nextCursor: null }));
     }
     return Promise.resolve(jsonPayload({}));
-  }));
-  resetWorldFeedStore({
-    route: "PostDetail",
-    feedPosts: [threadPost],
-    activeThread: { post: threadPost, parentPost: null, ancestors: [], replies: [existingReply] },
-    activePostId: "post-1",
-    threadSort: "oldest",
-    threadLoading: false,
   });
+  resetReplyThreadStore();
   reconnectRealtime();
 });
 
