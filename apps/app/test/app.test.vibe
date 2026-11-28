@@ -1429,7 +1429,7 @@ it.effect('Email magic link sign-in, onboarding 100 pts grant, and profile likes
   }
 }, 120_000)
 
-it.effect('REST perp idempotency: same Idempotency-Key replays the open/close receipt, different params conflict (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage")', effect () => {
+it.effect('REST perp idempotency: same Idempotency-Key replays the open/close receipt, different params conflict, and an order whose mode no longer matches the position is refused (spec/markets/spotPerp.md, "Story: Open and close perpetuals up to 20x leverage"; spec/markets/spotPerp.md, "Opening a perp enforces the 20x leverage cap and updates only the mark premium")', effect () => {
   provide appLayer() {
     try TestClock.setTime(Date.now())
     try seedWorld()
@@ -1465,6 +1465,56 @@ it.effect('REST perp idempotency: same Idempotency-Key replays the open/close re
     const { res: open2, body: open2Body } = try openPerp("rest-perp-open-2")
     const positionId2 = String(open2Body.positionId ?? "")
     const { res: closeConflict, body: closeConflictBody } = try closePerp(positionId2, "rest-perp-close-1")
+
+    const agent = try connectAgentOAuthPkce(alice.cookie, "PerpModeAgent")
+    const agentFlip = try readJson(try callApp("/mcp", {
+      bearer: String(agent.access_token ?? ""),
+      json: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "open_perp", arguments: { ticker: "XTRPC", side: "short", collateralPts: 10, leverage: 2, mode: "flip" } }
+      }
+    }))
+    const orderWithMode = effect (side: "long" | "short", mode: string, collateralCents = 1000) => {
+      const res = try callApp("/api/markets/perp/XTRPC/open", { cookie: alice.cookie, json: { side, collateralCents, leverage: 2, mode } })
+      const body = try readJson(res)
+      const markets = try readJson(try callApp("/api/markets", { cookie: alice.cookie }))
+      const held = (markets.positions as { readonly perpPositions: ReadonlyArray<{ readonly side: string; readonly sizeCents: number }> }).perpPositions
+      return [res.status, body.code ?? body.action, ...held.flatMap((pos) => [pos.side, pos.sizeCents])]
+    }
+    const staleAdd = try orderWithMode("long", "add")
+    const staleFlip = try orderWithMode("short", "flip")
+    const reduceOnHeldSide = try orderWithMode("short", "reduce")
+    const reducePastHeldSize = try orderWithMode("long", "reduce", 1500)
+    const openWhileHolding = try orderWithMode("short", "open")
+    const matchingReduce = try orderWithMode("long", "reduce", 500)
+    const matchingClose = try orderWithMode("long", "reduce", 500)
+    const addAfterClose = try orderWithMode("short", "add")
+    try check(() => assert.deepStrictEqual(
+      {
+        agentFlip: ((agentFlip.result as Record<string, unknown>).structuredContent as Record<string, unknown>).action,
+        staleAdd,
+        staleFlip,
+        reduceOnHeldSide,
+        reducePastHeldSize,
+        openWhileHolding,
+        matchingReduce,
+        matchingClose,
+        addAfterClose
+      },
+      {
+        agentFlip: "flip",
+        staleAdd: [400, "ORDER_MODE_MISMATCH", "short", 2000],
+        staleFlip: [400, "ORDER_MODE_MISMATCH", "short", 2000],
+        reduceOnHeldSide: [400, "ORDER_MODE_MISMATCH", "short", 2000],
+        reducePastHeldSize: [400, "ORDER_MODE_MISMATCH", "short", 2000],
+        openWhileHolding: [400, "ORDER_MODE_MISMATCH", "short", 2000],
+        matchingReduce: [201, "reduce", "short", 1000],
+        matchingClose: [201, "close"],
+        addAfterClose: [400, "ORDER_MODE_MISMATCH"]
+      }
+    ))
 
     try check(() => assert.deepStrictEqual(
       {
