@@ -281,6 +281,70 @@ it("keeps the invite pending after a failed respond so it can be answered again 
   expect(getStoreSnapshot().alphaInvites).toEqual([]);
 });
 
+const serverJoinedChat = {
+  id: "chat-9",
+  kind: "group",
+  title: "Alpha Crew",
+  createdBy: "bob",
+  memberCount: 3,
+  unreadCount: 0,
+  members: [member("bob", "bob"), member("carol", "carol"), member("alice", "alice")],
+};
+
+function stubInviteRespondWithChats(
+  respondStatus: string,
+  chats: () => Promise<Response>,
+): void {
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (/^\/api\/chats\/invites\/[^/]+\/respond$/.test(url.pathname) && method === "POST") {
+      return Promise.resolve(Response.json({ invite: { id: "inv-1", status: respondStatus } }));
+    }
+    if (url.pathname === "/api/chats") return chats();
+    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    if (url.pathname === "/api/notifications") return Promise.resolve(Response.json({ notifications: [], unreadCount: 0 }));
+    if (/^\/api\/chats\/[^/]+\/messages$/.test(url.pathname)) return Promise.resolve(Response.json({ messages: [] }));
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  }, "http://localhost");
+}
+
+async function respondInviteOnNotifications(accept: boolean) {
+  setStoreState({ route: "Notifications", alphaInvites: [pendingInvite], errorMessage: null, statusMessage: null, toasts: [] });
+  await respondGroupInvite("inv-1", accept);
+  return getStoreSnapshot();
+}
+
+it("reports the failed chat list refresh after accepting a group invite (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  stubInviteRespondWithChats("accepted", () =>
+    Promise.resolve(Response.json({ message: "Chats unavailable" }, { status: 500 })),
+  );
+  const s = await respondInviteOnNotifications(true);
+  expect(s.statusMessage).toBe("Joined group.");
+  expect(s.errorMessage).toBe("Joined group, but the chat list failed to refresh.");
+  expect(s.alphaInvites).toEqual([]);
+  expect(s.chats.map((c) => c.id)).toEqual(["chat-1"]);
+});
+
+it("shows the joined group with its member count after a successful accept refresh (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  stubInviteRespondWithChats("accepted", () =>
+    Promise.resolve(Response.json({ chats: [serverChatAfterLeave, serverJoinedChat] })),
+  );
+  const s = await respondInviteOnNotifications(true);
+  expect(s.errorMessage).toBeNull();
+  expect(s.alphaInvites).toEqual([]);
+  expect(s.chats.find((c) => c.id === "chat-9")?.memberCount).toBe(3);
+});
+
+it("does not report a refresh failure after declining a group invite (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  stubInviteRespondWithChats("declined", () =>
+    Promise.resolve(Response.json({ message: "Chats unavailable" }, { status: 500 })),
+  );
+  const s = await respondInviteOnNotifications(false);
+  expect(s.statusMessage).toBe("Invite declined.");
+  expect(s.errorMessage).toBeNull();
+  expect(s.alphaInvites).toEqual([]);
+});
+
 it("sends a respond for a second invite while the first is still in flight (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
   const releases: Array<() => void> = [];
   const stub = stubInviteRespondFetch(
