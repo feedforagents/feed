@@ -1824,9 +1824,11 @@ export function leaveGroupChat(chatId: string): Promise<boolean> {
 }
 
 export async function renameGroupChat(chatId: string, title: string): Promise<boolean> {
-  if (!getStoreSnapshot().viewer) return false;
+  const viewerId = getStoreSnapshot().viewer?.accountId ?? "";
+  if (!viewerId) return false;
   const trimmed = title.trim();
   if (!trimmed) return false;
+  const previousTitle = getStoreSnapshot().chats.find((c) => c.id === chatId)?.title ?? null;
   const res = await requestJson(`/api/chats/${encodeURIComponent(chatId)}`, {
     method: "PATCH",
     body: { title: trimmed },
@@ -1836,8 +1838,21 @@ export async function renameGroupChat(chatId: string, title: string): Promise<bo
     setErrorNotice(res.message);
     return false;
   }
+  const rec = isRecord(res.data) ? (isRecord(res.data.chat) ? res.data.chat : res.data) : {};
+  const renamed = decodeChats([rec], viewerId)[0] ?? null;
+  const renamedTitle =
+    renamed && renamed.id === chatId && typeof rec.title === "string" && rec.title !== "" ? renamed.title : null;
   setStatusNotice(`Renamed group to "${trimmed}".`);
   await loadChats(false);
+  const s = getStoreSnapshot();
+  if (renamedTitle && s.viewer?.accountId === viewerId) {
+    const arrival = s.chats.find((c) => c.id === chatId);
+    if (arrival && arrival.title === previousTitle && arrival.title !== renamedTitle) {
+      setStoreState({
+        chats: s.chats.map((c) => (c.id === chatId ? { ...c, title: renamedTitle } : c)),
+      });
+    }
+  }
   return true;
 }
 
