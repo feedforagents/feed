@@ -3,7 +3,7 @@
 import { act } from "react";
 import type { Root } from "react-dom/client";
 import { expect, it } from "vitest";
-import { setStoreState } from "../src/web/store-core.ts";
+import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { storeActions } from "../src/web/store.ts";
 import { flush, installAppTestLifecycle, installMockNetwork, makeAuthMeResponse, makeRawPost, mountApp, setControlValue } from "./app-test-helpers.tsx";
 
@@ -41,8 +41,7 @@ async function typeReply(container: HTMLElement, text: string): Promise<void> {
   await setControlValue(replyTextarea(container), text);
 }
 
-async function openPostAWithDraft(): Promise<HTMLElement> {
-  installMockNetwork(respond);
+async function openPostA(text: string): Promise<HTMLElement> {
   const { container } = await mountApp(opened);
   await flush();
   await act(async () => {
@@ -50,7 +49,13 @@ async function openPostAWithDraft(): Promise<HTMLElement> {
   });
   await flush();
   expect(container.textContent).toContain("Post A market note");
-  await typeReply(container, "Draft written for post A");
+  await typeReply(container, text);
+  return container;
+}
+
+async function openPostAWithDraft(): Promise<HTMLElement> {
+  installMockNetwork(respond);
+  const container = await openPostA("Draft written for post A");
   expect(replyTextarea(container).value).toBe("Draft written for post A");
   return container;
 }
@@ -76,4 +81,54 @@ it('Reloading the same post thread keeps the reply draft (spec/social/posts.md, 
   await flush();
 
   expect(replyTextarea(container).value).toBe("Draft written for post A");
+});
+
+it('Completing a queued guest reply after sign-in clears the reply composer (spec/app/onboarding.md, "Story: Queue gated actions in the JoinSheet and dismiss the first-visit explainer"; spec/social/posts.md, "Story: Create and delete posts with unified replies and attribution")', async () => {
+  let signedIn = false;
+  let replyPosted = false;
+  const createdReply = makeRawPost(createdAt + 2000, {
+    id: "reply-queued",
+    content: "Queued reply text",
+    replyToPostId: "post-a",
+  });
+  installMockNetwork((path, _url, init) => {
+    if (path === "/api/auth/me") {
+      return signedIn
+        ? makeAuthMeResponse({ accountId: "alice", displayName: "Alice Player" })
+        : { authenticated: false, viewer: null };
+    }
+    if (path === "/api/auth/phone/verify") {
+      signedIn = true;
+      return { status: "signed_in" };
+    }
+    if (path === "/api/posts" && init?.method === "POST") {
+      replyPosted = true;
+      return createdReply;
+    }
+    if (path === "/api/posts/post-a") {
+      return { post: postA, replies: replyPosted ? [postB, createdReply] : [postB] };
+    }
+    return undefined;
+  });
+  const container = await openPostA("Queued reply text");
+
+  const form = replyTextarea(container).closest("form");
+  const submit = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (!submit) throw new Error("reply submit button not found");
+  act(() => { submit.click(); });
+  await flush();
+  expect(getStoreSnapshot().pendingAction?.kind).toBe("reply");
+  expect(replyTextarea(container).value).toBe("Queued reply text");
+
+  act(() => {
+    setStoreState({ pendingPhoneE164: "+15551234567" });
+  });
+  await act(async () => {
+    await storeActions.verifySmsCode("123456");
+  });
+  await flush();
+
+  expect(replyPosted).toBe(true);
+  expect(container.textContent).toContain("Queued reply text");
+  expect(replyTextarea(container).value).toBe("");
 });

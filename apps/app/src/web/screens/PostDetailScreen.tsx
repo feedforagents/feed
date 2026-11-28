@@ -23,7 +23,15 @@ export function PostDetailScreen({ mode }: { readonly mode: UiMode }) {
   const thread = s.activeThread;
   const [replyText, setReplyText] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
+  const [seenReplyClearSeq, setSeenReplyClearSeq] = useState(0);
   const threadMatches = Boolean(thread && (!s.activePostId || thread.post.card.id === s.activePostId));
+
+  if (s.postedReplyClear && s.postedReplyClear.seq !== seenReplyClearSeq) {
+    setSeenReplyClearSeq(s.postedReplyClear.seq);
+    if (thread && s.postedReplyClear.postId === thread.post.card.id && replyText.trim() === s.postedReplyClear.content) {
+      setReplyText("");
+    }
+  }
 
   const submitReply = async (text: string) => {
     if (!thread) return;
