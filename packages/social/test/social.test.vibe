@@ -20,6 +20,7 @@ import {
   deletePost,
   followAccount,
   getArticle,
+  getChat,
   getChatMessages,
   getPostThread,
   getProfile,
@@ -2172,6 +2173,108 @@ it.effect(
       createdAt: customNowMs,
       localMatch: [result.created.id, customNowMs],
       remoteMatch: [result.created.id, customNowMs]
+    }))
+  })
+)
+
+it.effect(
+  'unblocked group member reinvite replaces a pending invite hidden by a block in either direction (spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"; spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => withSocialWorld(effect {
+    try seedChatParticipants()
+    try seedAccount("dave", "dave", "Dave Target")
+
+    const group = try createUserGroupChat("carol", "Desk Signals", ["bob"])
+    const bobPending = try listPendingGroupInvites("bob", "user_group")
+    try respondGroupInvite({ accountId: "bob", inviteId: bobPending[0]?.id ?? "", accept: true })
+
+    const bobInviteAlice = try inviteToUserGroupChat({
+      accountId: "bob",
+      chatId: group.id,
+      targetHandleOrId: "alice"
+    })
+    try blockAccount("alice", "bob")
+
+    const aliceHiddenBeforeReinvite = try listPendingGroupInvites("alice", "user_group")
+    const acceptBlockedCode = try expectSocialCode(
+      respondGroupInvite({ accountId: "alice", inviteId: bobInviteAlice.inviteId, accept: true })
+    )
+
+    const carolReinviteAlice = try inviteToUserGroupChat({
+      accountId: "carol",
+      chatId: group.id,
+      targetHandleOrId: "alice"
+    })
+    const carolRepeatReinviteAlice = try inviteToUserGroupChat({
+      accountId: "carol",
+      chatId: group.id,
+      targetHandleOrId: "alice"
+    })
+    const aliceVisibleInvites = try listPendingGroupInvites("alice", "user_group")
+    const aliceNotifs = try listNotifications("alice", 20, "game")
+    const aliceInviteNotif = aliceNotifs.find((n) => n.kind === "group_invite" && n.chatId === group.id)
+
+    const aliceAccepted = try respondGroupInvite({
+      accountId: "alice",
+      inviteId: carolReinviteAlice.inviteId,
+      accept: true
+    })
+    const chatAfterAlice = try getChat("alice", group.id)
+
+    try unblockAccount("alice", "bob")
+    const alicePendingAfterUnblock = try listPendingGroupInvites("alice", "user_group")
+    const aliceNotifsAfterUnblock = try listNotifications("alice", 20, "game")
+    const staleBobNotif = aliceNotifsAfterUnblock.find((n) => n.inviteId === bobInviteAlice.inviteId)
+
+    const bobInviteDave = try inviteToUserGroupChat({
+      accountId: "bob",
+      chatId: group.id,
+      targetHandleOrId: "dave"
+    })
+    try blockAccount("bob", "dave")
+
+    const daveHiddenBeforeReinvite = try listPendingGroupInvites("dave", "user_group")
+    const carolReinviteDave = try inviteToUserGroupChat({
+      accountId: "carol",
+      chatId: group.id,
+      targetHandleOrId: "dave"
+    })
+    const daveVisibleInvites = try listPendingGroupInvites("dave", "user_group")
+    const daveAccepted = try respondGroupInvite({
+      accountId: "dave",
+      inviteId: carolReinviteDave.inviteId,
+      accept: true
+    })
+    const remainingPending = try queryStore(
+      "SELECT id FROM feed_group_invites WHERE chat_id = $1 AND status = 'pending'",
+      [group.id]
+    )
+
+    try check(() => assert.deepStrictEqual({
+      beforeReinvite: [aliceHiddenBeforeReinvite.length, acceptBlockedCode],
+      aliceReplaced: carolReinviteAlice.inviteId !== bobInviteAlice.inviteId,
+      aliceIdempotent: carolRepeatReinviteAlice.inviteId === carolReinviteAlice.inviteId,
+      aliceVisible: aliceVisibleInvites.map((i) => [i.inviterId, i.inviterHandle, i.status]),
+      aliceNotif: [aliceInviteNotif?.actorId, aliceInviteNotif?.inviteId === carolReinviteAlice.inviteId, aliceInviteNotif?.invitePending],
+      aliceJoined: [aliceAccepted.status, chatAfterAlice.members.some((m) => m.memberId === "alice")],
+      afterUnblock: [alicePendingAfterUnblock.length, staleBobNotif?.invitePending ?? false],
+      daveHidden: daveHiddenBeforeReinvite.length,
+      daveReplaced: carolReinviteDave.inviteId !== bobInviteDave.inviteId,
+      daveVisible: daveVisibleInvites.map((i) => [i.inviterId, i.status]),
+      daveAccepted: daveAccepted.status,
+      remainingPendingCount: remainingPending.length
+    }, {
+      beforeReinvite: [0, "Blocked"],
+      aliceReplaced: true,
+      aliceIdempotent: true,
+      aliceVisible: [["carol", "carol", "pending"]],
+      aliceNotif: ["carol", true, true],
+      aliceJoined: ["accepted", true],
+      afterUnblock: [0, false],
+      daveHidden: 0,
+      daveReplaced: true,
+      daveVisible: [["carol", "pending"]],
+      daveAccepted: "accepted",
+      remainingPendingCount: 0
     }))
   })
 )
