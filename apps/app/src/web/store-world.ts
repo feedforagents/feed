@@ -978,6 +978,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag, exploreLoading: true });
   const url = appendAnonymousModeParam(`/api/trending/${encodeURIComponent(cleanTag)}`, s);
   const res = await requestJson(url, {
@@ -990,7 +991,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
     setStoreState({
       explore: {
         ...cur.explore,
-        posts: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+        posts: dropAuthorsHiddenSince(dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), hidesAtStart),
         accounts: [],
         actors: [],
         organizations: [],
