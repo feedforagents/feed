@@ -1438,15 +1438,27 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
         events: [] as FeedRealtimeEvent[]
       }
     }
+    try tx.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`group-invite:${input.chatId}:${target.id}`]
+    )
     const existingPending = try tx.query(
-      "SELECT id FROM feed_group_invites WHERE chat_id = $1 AND invited_account_id = $2 AND status = 'pending' LIMIT 1",
+      "SELECT id, invited_by_id FROM feed_group_invites WHERE chat_id = $1 AND invited_account_id = $2 AND status = 'pending' ORDER BY created_at DESC, id DESC FOR UPDATE",
       [input.chatId, target.id]
     )
-    const existingInviteId = toText(existingPending[0]?.id)
-    if (existingInviteId !== undefined) {
+    let activePendingId: string | undefined = undefined
+    for (const pendingRow of existingPending) {
+      const pid = toText(pendingRow.id)
+      const priorInviterId = toText(pendingRow.invited_by_id) ?? ""
+      if (pid !== undefined && !(try isBlockedBetweenTx(tx, priorInviterId, target.id))) {
+        activePendingId = pid
+        break
+      }
+    }
+    if (activePendingId !== undefined) {
       return {
         result: {
-          inviteId: existingInviteId,
+          inviteId: activePendingId,
           chatId: input.chatId,
           memberId: target.id,
           invitedAccountId: target.id,
@@ -1455,6 +1467,12 @@ export effect function inviteToUserGroupChat(input: InviteToUserGroupInput): Inv
         },
         events: [] as FeedRealtimeEvent[]
       }
+    }
+    if (existingPending.length > 0) {
+      try tx.query(
+        "UPDATE feed_group_invites SET status = 'declined', responded_at = $3 WHERE chat_id = $1 AND invited_account_id = $2 AND status = 'pending'",
+        [input.chatId, target.id, now]
+      )
     }
     const targetAccount: SpecAccount = {
       id: target.id,
