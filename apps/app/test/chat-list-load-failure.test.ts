@@ -23,6 +23,19 @@ function stubChatsFailure(): void {
   });
 }
 
+function expectChats(chatIds: string[], error: string | null): void {
+  const after = getStoreSnapshot();
+  expect({
+    chats: after.chats.map((c) => c.id),
+    loading: after.chatsLoading,
+    error: after.errorMessage,
+  }).toEqual({
+    chats: chatIds,
+    loading: false,
+    error,
+  });
+}
+
 it('A failed conversation list load on opening Messages reports the failure instead of an empty list (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions")', async () => {
   stubChatsFailure();
   setStoreState({
@@ -36,16 +49,7 @@ it('A failed conversation list load on opening Messages reports the failure inst
 
   await loadChats(true);
 
-  const after = getStoreSnapshot();
-  expect({
-    chats: after.chats.map((c) => c.id),
-    loading: after.chatsLoading,
-    error: after.errorMessage,
-  }).toEqual({
-    chats: [],
-    loading: false,
-    error: "Conversations unavailable",
-  });
+  expectChats([], "Conversations unavailable");
 });
 
 it('A failed conversation list refresh keeps the loaded conversations and reports the failure (spec/social/messaging.md, "Story: Direct messages, chat messages, and reactions")', async () => {
@@ -75,14 +79,5 @@ it('A failed conversation list refresh keeps the loaded conversations and report
 
   await loadChats(false);
 
-  const after = getStoreSnapshot();
-  expect({
-    chats: after.chats.map((c) => c.id),
-    loading: after.chatsLoading,
-    error: after.errorMessage,
-  }).toEqual({
-    chats: ["chat-1"],
-    loading: false,
-    error: null,
-  });
+  expectChats(["chat-1"], null);
 });
