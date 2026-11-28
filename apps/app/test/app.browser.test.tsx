@@ -1206,13 +1206,24 @@ it('Back from a News article restores the full article list (spec/app/navigation
   await expect.element(openArticle).toBeInTheDocument();
 });
 
-it('Back from a searched article keeps the selected search tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
-  const article = {
-    id: "garden-search-article",
-    title: "Garden search bulletin",
+function exploreGardenArticle(id: string, title: string) {
+  return {
+    id,
+    title,
     body: "The community plant swap starts on Saturday.",
     publishedAt: Date.now(),
   };
+}
+
+async function openExploreArticleAndReturn(article: { readonly id: string; readonly title: string }) {
+  const main = page.getByRole("main");
+  await act(() => storeActions.navigate(`/article/${article.id}`));
+  await expect.element(main.getByRole("heading", { name: article.title, exact: true })).toBeInTheDocument();
+  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+}
+
+it('Back from a searched article keeps the selected search tab (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const article = exploreGardenArticle("garden-search-article", "Garden search bulletin");
   const main = await mountCustomExploreArticles([article]);
 
   await act(() => userEvent.fill(main.getByLabelText("Search Feed"), "garden"));
@@ -1222,11 +1233,17 @@ it('Back from a searched article keeps the selected search tab (spec/app/navigat
   await act(() => userEvent.click(people));
   await expect.element(people).toHaveAttribute("aria-selected", "true");
 
-  await act(() => storeActions.navigate(`/article/${article.id}`));
-  await expect.element(main.getByRole("heading", { name: article.title, exact: true })).toBeInTheDocument();
-
-  await act(() => userEvent.click(main.getByRole("button", { name: "Back", exact: true })));
+  await openExploreArticleAndReturn(article);
   await expect.element(people).toHaveAttribute("aria-selected", "true");
+});
+
+it('Back from an article keeps a search draft that was never submitted (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {
+  const article = exploreGardenArticle("garden-draft-article", "Garden draft bulletin");
+  const main = await mountCustomExploreArticles([article]);
+
+  await act(() => userEvent.fill(main.getByLabelText("Search Feed"), "unfinished query"));
+  await openExploreArticleAndReturn(article);
+  await expect.element(main.getByLabelText("Search Feed")).toHaveValue("unfinished query");
 });
 
 it('A published article does not replace a trending tag list (spec/app/navigation.md, "Story: Browse public world content without a login wall")', async () => {

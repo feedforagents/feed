@@ -289,9 +289,15 @@ function ExploreMarketsList() {
 }
 
 export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
-  const { activeArticleId, exploreNewsRequest } = useAppStore();
+  const { activeArticleId, exploreNewsRequest, exploreQuery } = useAppStore();
   const [browseTab, setBrowseTab] = useState<BrowseTab>(exploreNewsRequest === null ? "trending" : "news");
   const [searchTab, setSearchTab] = useState<SearchTab>("top");
+  const [draftQuery, setDraftQuery] = useState(exploreQuery);
+  const [syncedQuery, setSyncedQuery] = useState(exploreQuery);
+  if (exploreQuery !== syncedQuery) {
+    setSyncedQuery(exploreQuery);
+    setDraftQuery(exploreQuery);
+  }
   const [handledNewsRequest, setHandledNewsRequest] = useState(exploreNewsRequest);
   if (exploreNewsRequest !== null && exploreNewsRequest !== handledNewsRequest) {
     setHandledNewsRequest(exploreNewsRequest);
@@ -306,25 +312,22 @@ export function ExploreScreen({ mode }: { readonly mode: UiMode }) {
         setBrowseTab={setBrowseTab}
         searchTab={searchTab}
         setSearchTab={setSearchTab}
+        draftQuery={draftQuery}
+        setDraftQuery={setDraftQuery}
       />
     );
 }
 
-function ExploreBrowseScreen({ mode, browseTab, setBrowseTab, searchTab, setSearchTab }: {
+function ExploreBrowseScreen({ mode, browseTab, setBrowseTab, searchTab, setSearchTab, draftQuery, setDraftQuery }: {
   readonly mode: UiMode;
   readonly browseTab: BrowseTab;
   readonly setBrowseTab: (tab: BrowseTab) => void;
   readonly searchTab: SearchTab;
   readonly setSearchTab: (tab: SearchTab) => void;
+  readonly draftQuery: string;
+  readonly setDraftQuery: (query: string) => void;
 }) {
   const s = useAppStore();
-  const [draftQuery, setDraftQuery] = useState(s.exploreQuery);
-  const [syncedQuery, setSyncedQuery] = useState(s.exploreQuery);
-
-  if (s.exploreQuery !== syncedQuery) {
-    setSyncedQuery(s.exploreQuery);
-    setDraftQuery(s.exploreQuery);
-  }
 
   const isGame = mode === "GameMode";
   const hasSearch = s.exploreQuery.trim() !== "";
