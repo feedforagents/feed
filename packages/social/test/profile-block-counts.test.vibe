@@ -4,8 +4,11 @@ import { Store, migrateFeedSchema, seedFeedWorld, toText, type Tx } from "@repo/
 import { localStoreLayer } from "@repo/db/node"
 import { TestClock } from "effect/testing"
 import {
+  SocialFailure,
   blockAccount,
+  getPostThread,
   getProfile,
+  listFeedPosts,
   muteAccount,
   realtimeBusLayer,
   unblockAccount,
@@ -164,6 +167,109 @@ it.effect(
               bobViewsAliceWhileMutedPosts: 0,
               bobViewsAliceAfterUnmutePosts: 2,
               bobViewsNpcWhileBlockingPosts: 0,
+            },
+          )
+        }),
+      )
+    }
+  },
+  60_000,
+)
+
+it.effect(
+  'A blocked author stays out of the profile Posts list and direct thread entry, including the reply-to attribution on a visible reply (spec/social/moderation.md, "Story: Block, mute, follow, and report users or posts")',
+  () => effect {
+    try TestClock.setTime(1_760_000_600_000)
+    provide Layer.merge(
+      Layer.fresh(localStoreLayer({ kind: "pglite", file: undefined })),
+      Layer.fresh(realtimeBusLayer),
+    ) {
+      try migrateFeedSchema()
+      try seedFeedWorld()
+      try execTx(
+        `INSERT INTO feed_accounts (account_id, handle, display_name, bio, ui_mode, balance_cents, created_at, updated_at)
+         VALUES
+           ('pb-alice', 'pb_alice', 'Alice', '', 'game', 10000, $1, $1),
+           ('pb-bob', 'pb_bob', 'Bob', '', 'game', 10000, $1, $1),
+           ('pb-carol', 'pb_carol', 'Carol', '', 'game', 10000, $1, $1)`,
+        [1_760_000_600_000],
+      )
+      try execTx(
+        `INSERT INTO feed_posts (id, author_id, author_kind, content, reply_to_post_id, quote_post_id, via_client_name, market_id, ticker, like_count, repost_count, reply_count, deleted_at, created_at)
+         VALUES
+           ('pb-bob-post', 'pb-bob', 'user', 'Bob alpha call', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pb-carol-post', 'pb-carol', 'user', 'Carol note', NULL, NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pb-carol-quote-bob', 'pb-carol', 'user', 'Carol quoting Bob', NULL, 'pb-bob-post', NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pb-carol-reply-bob', 'pb-carol', 'user', 'Carol replying to Bob', 'pb-bob-post', NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1),
+           ('pb-bob-reply-carol', 'pb-bob', 'user', 'Bob replying to Carol', 'pb-carol-post', NULL, NULL, NULL, NULL, 0, 0, 0, NULL, $1)`,
+        [1_760_000_600_000],
+      )
+      try execTx(
+        `INSERT INTO feed_post_reposts (post_id, account_id, created_at) VALUES
+           ('pb-carol-post', 'pb-bob', $1),
+           ('pb-bob-post', 'pb-carol', $1)`,
+        [1_760_000_600_000],
+      )
+
+      const replyThreadBeforeBlock = try getPostThread("pb-carol-reply-bob", "pb-alice", "game")
+
+      try blockAccount("pb-alice", "pb_bob")
+
+      const bobProfile = try getProfile("pb_bob", "pb-alice", "game")
+      const bobPosts = try listFeedPosts({ tab: "latest", viewerId: "pb-alice", mode: "game", authorId: "pb-bob", limit: 30 })
+      const carolPosts = try listFeedPosts({ tab: "latest", viewerId: "pb-alice", mode: "game", authorId: "pb-carol", limit: 30 })
+      const bobThreadError = (getPostThread("pb-bob-post", "pb-alice", "game") catch effect (err) => err instanceof SocialFailure ? err.code : "other")
+      const carolThread = try getPostThread("pb-carol-post", "pb-alice", "game")
+      const carolReplyThread = try getPostThread("pb-carol-reply-bob", "pb-alice", "game")
+      const anonReplyThread = try getPostThread("pb-carol-reply-bob", undefined, "game")
+
+      try unblockAccount("pb-alice", "pb_bob")
+      try blockAccount("pb-bob", "pb_alice")
+      const carolReplyThreadAuthorBlocksViewer = try getPostThread("pb-carol-reply-bob", "pb-alice", "game")
+      const carolReplyThreadForCarol = try getPostThread("pb-carol-reply-bob", "pb-carol", "game")
+
+      try orDie(
+        Effect.try(() => {
+          assert.deepStrictEqual(
+            {
+              replyToHandleBeforeBlock: replyThreadBeforeBlock.post.replyToHandle,
+              bobViewerBlocks: bobProfile.viewerBlocks,
+              bobPostsCount: bobProfile.postsCount,
+              bobPostIds: bobPosts.items.map((p) => p.id),
+              carolPostIds: carolPosts.items.map((p) => p.id),
+              carolQuoteDeleted: carolPosts.items.find((p) => p.id === "pb-carol-quote-bob")?.quotePost?.deleted ?? null,
+              carolRepostAttr: carolPosts.items.find((p) => p.id === "pb-carol-post")?.repostedByHandle ?? null,
+              bobThreadError,
+              carolThreadReplies: carolThread.replies.map((p) => p.id),
+              carolReplyParent: carolReplyThread.parentPost?.id ?? null,
+              carolReplyAncestors: carolReplyThread.ancestors.map((p) => p.id),
+              carolReplyToHandle: carolReplyThread.post.replyToHandle,
+              carolReplyToAuthorId: carolReplyThread.post.replyToAuthorId,
+              anonReplyToHandle: anonReplyThread.post.replyToHandle,
+              authorBlocksViewerReplyToHandle: carolReplyThreadAuthorBlocksViewer.post.replyToHandle,
+              authorBlocksViewerReplyToAuthorId: carolReplyThreadAuthorBlocksViewer.post.replyToAuthorId,
+              authorBlocksViewerParent: carolReplyThreadAuthorBlocksViewer.parentPost?.id ?? null,
+              carolOwnReplyToHandle: carolReplyThreadForCarol.post.replyToHandle,
+            },
+            {
+              replyToHandleBeforeBlock: "pb_bob",
+              bobViewerBlocks: true,
+              bobPostsCount: 0,
+              bobPostIds: [],
+              carolPostIds: ["pb-carol-quote-bob", "pb-carol-post"],
+              carolQuoteDeleted: true,
+              carolRepostAttr: null,
+              bobThreadError: "Blocked",
+              carolThreadReplies: [],
+              carolReplyParent: null,
+              carolReplyAncestors: [],
+              carolReplyToHandle: null,
+              carolReplyToAuthorId: null,
+              anonReplyToHandle: "pb_bob",
+              authorBlocksViewerReplyToHandle: null,
+              authorBlocksViewerReplyToAuthorId: null,
+              authorBlocksViewerParent: null,
+              carolOwnReplyToHandle: "pb_bob",
             },
           )
         }),
