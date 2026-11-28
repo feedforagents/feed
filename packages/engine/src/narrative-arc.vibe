@@ -2,7 +2,7 @@
 import { Store, type StoreFailure, type Tx, toInt, toText } from "@repo/db"
 import { resolvePredictionMarket, resolvePredictionMarketTx, type MarketFailure } from "@repo/markets"
 import { actors, organizations, type PackActor } from "@repo/pack-default"
-import { createPost, type SocialFailure } from "@repo/social"
+import { SocialFailure, createPost } from "@repo/social"
 import {
   declassifyClueSignal,
   declassifyResolution,
@@ -434,6 +434,7 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
     }) catch effect () => null
     if (completion === null) continue
     const clueContent = sanitizeNarrativeText(stripLeadingSelfPrefix(completion.text, actorName, actorHandle), 260)
+    if (clueContent.length === 0) continue
     const matchedOrgTicker = [...findMatchedOrgIds(`${question} ${description}`)]
       .map((id) => orgById.get(id)?.ticker?.toUpperCase())
       .find((t): t is string => t !== undefined && t !== "")
@@ -466,14 +467,23 @@ export effect function publishPhaseClues(nowMs?: number): number!(EngineFailure 
       return inserted.length > 0
     })
     if (!claimed) continue
-    const createdPost = try createPost({
+    const createdPost = createPost({
       authorId: actorId,
       authorKind: "npc",
       content: clueContent,
       marketId,
       ...(matchedOrgTicker !== undefined ? { ticker: matchedOrgTicker } : {}),
       nowMs: resolvedNow,
-    })
+    }) catch effect (err) => {
+      if (err instanceof SocialFailure) return null
+      throw err
+    }
+    if (createdPost === null) {
+      try store.transaction((tx: Tx) =>
+        tx.query("DELETE FROM feed_npc_market_clues WHERE clue_key = $1 AND post_id IS NULL", [clueKey]),
+      )
+      continue
+    }
     const postId = createdPost.id
     try store.transaction(effect (tx: Tx) => {
       try tx.query("UPDATE feed_npc_market_clues SET post_id = $2 WHERE clue_key = $1", [clueKey, postId])
