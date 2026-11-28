@@ -149,6 +149,20 @@ export function stubFetchByUrl(
   );
 }
 
+export function stubGroupMutationWithChats(
+  mutationPath: string,
+  mutationMethod: string,
+  mutationResponse: () => Promise<Response>,
+  chats: () => Promise<Response>,
+): void {
+  stubFetchByUrl((url, init) => {
+    if (url.pathname === mutationPath && (init?.method ?? "GET") === mutationMethod) return mutationResponse();
+    if (url.pathname === "/api/chats") return chats();
+    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
+    return Promise.resolve(Response.json({}, { status: 404 }));
+  }, "http://localhost");
+}
+
 export function installStubEventSource(target: EventTarget[] = eventSources): void {
   class StubEventSource extends EventTarget {
     constructor() {

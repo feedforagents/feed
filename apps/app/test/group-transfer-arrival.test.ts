@@ -1,38 +1,17 @@
 // @vitest-environment happy-dom
 // spec/social/messaging.md, "Story: Create groups, invite to alpha groups, respond to invites, and leave"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
+import { getStoreSnapshot } from "../src/web/store-core.ts";
 import { transferGroupOwnership } from "../src/web/store-world.ts";
-import type { AppChatSummary } from "../src/web/types.ts";
-import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
+import {
+  makeGroupMember,
+  makeSeedGroupChat,
+  makeViewerSession,
+  seedChatsRouteState,
+  stubGroupMutationWithChats,
+} from "./app-test-helpers.tsx";
 
 const viewer = makeViewerSession({ displayName: "Alice" });
-
-function member(memberId: string, role: string) {
-  return { memberId, memberKind: "user", handle: memberId, displayName: memberId, avatarUrl: null, role };
-}
-
-function seedGroup(): AppChatSummary {
-  return {
-    id: "chat-1",
-    chatType: "UserGroup",
-    title: "Group Chat",
-    subtitle: "Group chat",
-    memberCount: 3,
-    unreadCount: 0,
-    lastMessagePreview: null,
-    lastMessageAt: null,
-    peerAvatarUrl: null,
-    peerHandle: null,
-    members: [
-      { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "owner" },
-      { memberId: "bob", memberKind: "user", handle: "bob", displayName: "Bob", avatarUrl: null, role: "member" },
-      { memberId: "carol", memberKind: "user", handle: "carol", displayName: "Carol", avatarUrl: null, role: "member" },
-    ],
-    isOwner: true,
-    isBlocked: false,
-  };
-}
 
 const serverChatBeforeTransfer = {
   id: "chat-1",
@@ -41,7 +20,7 @@ const serverChatBeforeTransfer = {
   createdBy: "alice",
   memberCount: 3,
   unreadCount: 0,
-  members: [member("alice", "owner"), member("bob", "member"), member("carol", "member")],
+  members: [makeGroupMember("alice", "owner"), makeGroupMember("bob", "member"), makeGroupMember("carol", "member")],
 };
 
 const serverChatAfterTransfer = {
@@ -51,45 +30,32 @@ const serverChatAfterTransfer = {
   createdBy: "bob",
   memberCount: 3,
   unreadCount: 0,
-  members: [member("alice", "member"), member("bob", "owner"), member("carol", "member")],
+  members: [makeGroupMember("alice", "member"), makeGroupMember("bob", "owner"), makeGroupMember("carol", "member")],
 };
 
-function stubTransferWithChats(
-  chats: () => Promise<Response>,
-  transferStatus = 200,
-): void {
-  stubFetchByUrl((url, init) => {
-    const method = init?.method ?? "GET";
-    if (url.pathname === "/api/chats/chat-1/transfer" && method === "POST") {
-      return Promise.resolve(
+function stubTransferWithChats(chats: () => Promise<Response>, transferStatus = 200): void {
+  stubGroupMutationWithChats(
+    "/api/chats/chat-1/transfer",
+    "POST",
+    () =>
+      Promise.resolve(
         transferStatus === 200
           ? Response.json({ chat: serverChatAfterTransfer })
           : Response.json({ message: "Only the group owner can transfer ownership" }, { status: transferStatus }),
-      );
-    }
-    if (url.pathname === "/api/chats") return chats();
-    if (url.pathname === "/api/chats/invites") return Promise.resolve(Response.json({ invites: [] }));
-    return Promise.resolve(Response.json({}, { status: 404 }));
-  }, "http://localhost");
+      ),
+    chats,
+  );
 }
 
-function roleOf(memberId: string): string | undefined {
-  return getStoreSnapshot()
-    .chats.find((c) => c.id === "chat-1")
-    ?.members.find((m) => m.memberId === memberId)?.role;
+function expectArrivalRoles(isOwner: boolean, aliceRole: string, bobRole: string): void {
+  const chat = getStoreSnapshot().chats.find((c) => c.id === "chat-1");
+  expect(chat?.isOwner).toBe(isOwner);
+  expect(chat?.members.find((m) => m.memberId === "alice")?.role).toBe(aliceRole);
+  expect(chat?.members.find((m) => m.memberId === "bob")?.role).toBe(bobRole);
 }
 
 beforeEach(() => {
-  setStoreState({
-    viewer,
-    route: "Chats",
-    chats: [seedGroup()],
-    selectedChatId: "chat-1",
-    chatMessages: [],
-    errorMessage: null,
-    statusMessage: null,
-    toasts: [],
-  });
+  seedChatsRouteState(viewer, [makeSeedGroupChat()], "chat-1");
 });
 
 afterEach(() => {
@@ -102,14 +68,11 @@ it("shows the new owner in the member list after a successful transfer (spec/soc
   const ok = await transferGroupOwnership("chat-1", "bob");
 
   const s = getStoreSnapshot();
-  const chat = s.chats.find((c) => c.id === "chat-1");
   expect(ok).toBe(true);
   expect(s.statusMessage).toBe("Transferred group ownership to @bob.");
   expect(s.errorMessage).toBeNull();
-  expect(chat?.isOwner).toBe(false);
-  expect(roleOf("alice")).toBe("member");
-  expect(roleOf("bob")).toBe("owner");
-  expect(roleOf("carol")).toBe("member");
+  expectArrivalRoles(false, "member", "owner");
+  expect(s.chats.find((c) => c.id === "chat-1")?.members.find((m) => m.memberId === "carol")?.role).toBe("member");
 });
 
 it("shows the new owner in the member list when the chat list reload fails after the transfer (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
@@ -119,14 +82,9 @@ it("shows the new owner in the member list when the chat list reload fails after
 
   const ok = await transferGroupOwnership("chat-1", "bob");
 
-  const s = getStoreSnapshot();
-  const chat = s.chats.find((c) => c.id === "chat-1");
   expect(ok).toBe(true);
-  expect(s.statusMessage).toBe("Transferred group ownership to @bob.");
-  expect(chat?.isOwner).toBe(false);
-  expect(roleOf("alice")).toBe("member");
-  expect(roleOf("bob")).toBe("owner");
-  expect(roleOf("carol")).toBe("member");
+  expect(getStoreSnapshot().statusMessage).toBe("Transferred group ownership to @bob.");
+  expectArrivalRoles(false, "member", "owner");
 });
 
 it("shows the new owner in the member list when the chat list reload returns the pre-transfer roster (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
@@ -134,11 +92,8 @@ it("shows the new owner in the member list when the chat list reload returns the
 
   const ok = await transferGroupOwnership("chat-1", "bob");
 
-  const chat = getStoreSnapshot().chats.find((c) => c.id === "chat-1");
   expect(ok).toBe(true);
-  expect(chat?.isOwner).toBe(false);
-  expect(roleOf("alice")).toBe("member");
-  expect(roleOf("bob")).toBe("owner");
+  expectArrivalRoles(false, "member", "owner");
 });
 
 it("keeps the original owner in the member list when the transfer itself fails (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
@@ -146,11 +101,29 @@ it("keeps the original owner in the member list when the transfer itself fails (
 
   const ok = await transferGroupOwnership("chat-1", "bob");
 
-  const s = getStoreSnapshot();
-  const chat = s.chats.find((c) => c.id === "chat-1");
   expect(ok).toBe(false);
-  expect(s.errorMessage).toBe("Only the group owner can transfer ownership");
-  expect(chat?.isOwner).toBe(true);
-  expect(roleOf("alice")).toBe("owner");
-  expect(roleOf("bob")).toBe("member");
+  expect(getStoreSnapshot().errorMessage).toBe("Only the group owner can transfer ownership");
+  expectArrivalRoles(true, "owner", "member");
+});
+
+it("keeps the new account's owner controls when the viewer switches accounts during the transfer (spec/social/messaging.md, \"Story: Create groups, invite to alpha groups, respond to invites, and leave\")", async () => {
+  const bobViewer = makeViewerSession({ accountId: "bob", handle: "bob", displayName: "Bob" });
+  const bobSeed = {
+    ...makeSeedGroupChat(),
+    members: makeSeedGroupChat().members.map((m) => ({ ...m, role: m.memberId === "bob" ? "owner" : "member" })),
+  };
+  stubGroupMutationWithChats(
+    "/api/chats/chat-1/transfer",
+    "POST",
+    () => {
+      seedChatsRouteState(bobViewer, [bobSeed], "chat-1");
+      return Promise.resolve(Response.json({ chat: serverChatAfterTransfer }));
+    },
+    () => Promise.resolve(Response.json({ message: "Chats unavailable" }, { status: 500 })),
+  );
+
+  const ok = await transferGroupOwnership("chat-1", "bob");
+
+  expect(ok).toBe(true);
+  expectArrivalRoles(true, "member", "owner");
 });
