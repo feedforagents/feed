@@ -3,7 +3,7 @@ import { type CloudflareEmailSender } from "@repo/auth"
 import { migrateFeedSchema, seedFeedWorld, Store, toInt, workerDbStore, type StoreFailure, type Tx } from "@repo/db/worker"
 import { createDbBackedRealtimeBusLayer, RealtimeBus } from "@repo/social"
 import { assertAppServerConfig, parseAppServerConfig, stringEnvRecord, syncProcessEnv } from "./config.vibe"
-import { resolveOptionalRouteResponse, runWorkerCronLane, workerCronLanes } from "./router.vibe"
+import { resolveOptionalRouteResponse, resolveStatelessPublicRoute, runWorkerCronLane, workerCronLanes } from "./router.vibe"
 
 module web {
   /** @throws {never} */
@@ -228,6 +228,8 @@ export default {
     try {
       const config = parseAppServerConfig(stringEnvRecord(env), url.origin, { emailSender: env.EMAIL })
       await Effect.runPromise(assertAppServerConfig(config))
+      const stateless = await Effect.runPromise(resolveStatelessPublicRoute(request, config))
+      if (stateless !== undefined) return stateless
       const { layer: appLayer, connectionString } = await workerRuntimeLayer(env)
       const handled = await Effect.runPromise(
         Effect.provide(

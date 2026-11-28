@@ -1479,7 +1479,7 @@ export function PredictionOrderPanel({
   const executeConfirmedOrder = () => {
     if (pendingConfirm?.kind === "buy-prediction" && pendingConfirm.amountPts <= balancePts + 1e-9) {
       onSubmitOrder({ marketId: market.id, action: "buy", side: pendingConfirm.side, amountOrShares: pendingConfirm.amountPts });
-    } else if (pendingConfirm?.kind === "sell-prediction") {
+    } else if (pendingConfirm?.kind === "sell-prediction" && pendingConfirm.shares <= (pendingConfirm.side === "YES" ? yesPositionShares : noPositionShares) + 1e-9) {
       onSubmitOrder({ marketId: market.id, action: "sell", side: pendingConfirm.side, amountOrShares: pendingConfirm.shares });
     }
   };

@@ -134,12 +134,10 @@ function downsampleBucketed<T>(
   const result: Array<T> = [points[0]!]
   const middle = points.slice(1, -1)
   const buckets = limit - 2
-  const bucketSize = middle.length / buckets
   for (let i = 0; i < buckets; i++) {
-    const start = Math.floor(i * bucketSize)
-    const end = Math.max(start + 1, Math.min(middle.length, Math.floor((i + 1) * bucketSize)))
+    const start = Math.floor((i * middle.length) / buckets)
+    const end = Math.floor(((i + 1) * middle.length) / buckets)
     const slice = middle.slice(start, end)
-    if (slice.length === 0) continue
     result.push(combine(slice, slice[slice.length - 1]!))
   }
   result.push(points[points.length - 1]!)

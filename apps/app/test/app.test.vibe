@@ -778,16 +778,29 @@ it.effect('REST parity: fixed 100 pts capital, no Stripe routes, session revocat
 
     const p1 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 1 #wave3alpha" } })
     const p1Body = try readJson(p1)
-    const trendingTagRes = try callApp("/api/trending/wave3alpha")
-    const trendingTag = try readJson(trendingTagRes)
+    try TestClock.adjust("2 seconds")
+    const p2 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 2 $WAVE3ALPHA" } })
+    const p2Body = try readJson(p2)
+    try TestClock.adjust("2 seconds")
+    const p3 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 3", ticker: "WAVE3ALPHA" } })
+    const p3Body = try readJson(p3)
+    const readTrendingTag = effect (tag: string) => {
+      const response = try callApp(`/api/trending/${encodeURIComponent(tag)}`)
+      const body = try readJson(response)
+      const posts = body.posts as ReadonlyArray<Record<string, unknown>>
+      return { status: response.status, postIds: posts.map((post) => post.id) }
+    }
+    const bareHashtag = try readTrendingTag("wave3alpha")
+    const explicitHashtag = try readTrendingTag("#wave3alpha")
+    const cashtag = try readTrendingTag("$WAVE3ALPHA")
     try check(() => assert.deepStrictEqual(
-      [trendingTagRes.status, (trendingTag.posts as ReadonlyArray<unknown>).length >= 1],
-      [200, true]
+      { bareHashtag, explicitHashtag, cashtag },
+      {
+        bareHashtag: { status: 200, postIds: [p1Body.id] },
+        explicitHashtag: { status: 200, postIds: [p1Body.id] },
+        cashtag: { status: 200, postIds: [p3Body.id, p2Body.id] }
+      }
     ))
-    try TestClock.adjust("2 seconds")
-    const p2 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 2" } })
-    try TestClock.adjust("2 seconds")
-    const p3 = try callApp("/api/posts", { cookie: alice.cookie, json: { content: "Parity pagination post 3" } })
     try TestClock.adjust("2 seconds")
     const r1 = try callApp("/api/posts", {
       cookie: alice.cookie,
@@ -1382,6 +1395,35 @@ it.effect('Email magic link sign-in, onboarding 100 pts grant, and profile likes
         followingShowsDeleted: false,
         chatsShowDeleted: false,
         activeProfile: 200
+      }
+    ))
+
+    // spec/social/moderation.md, "Creating notifications skips blocked actors and increments unread count"; spec/markets/prediction.md, "Resolution declassifies the hidden outcome, publishes the proof, and pays 1 pt (100 cents) per winning share idempotently"
+    const watcherId = String(watcher.account.accountId ?? "")
+    const watcherBuyRes = try callApp("/api/markets/prediction/seed-market-1/buy", { cookie: watcher.cookie, json: { side: "yes", amountCents: 500 } })
+    disableRssFeeds()
+    const store = try Store
+    const settleStart = try Clock.currentTimeMillis
+    try store.transaction((tx: Tx) => tx.query("UPDATE feed_prediction_markets SET expires_at = $1 WHERE id = 'seed-market-1'", [settleStart + 30_000]))
+    try TestClock.adjust("1 minute")
+    try runScheduledTicks(Math.floor((settleStart + 60_000) / 60_000))
+    const settled = try store.transaction(effect (tx: Tx) => ({
+      market: try tx.query("SELECT status FROM feed_prediction_markets WHERE id = 'seed-market-1'"),
+      holders: try tx.query("SELECT holder_id FROM feed_prediction_positions WHERE market_id = 'seed-market-1' AND holder_kind = 'user' AND settled_at IS NOT NULL"),
+      notified: try tx.query("SELECT account_id FROM feed_notifications WHERE kind = 'market_resolved' AND market_id = 'seed-market-1'")
+    }))
+    try check(() => assert.deepStrictEqual(
+      {
+        watcherBuy: watcherBuyRes.status,
+        market: String(settled.market[0]?.status),
+        settledHolders: settled.holders.map((row) => String(row.holder_id)).sort(),
+        notified: settled.notified.map((row) => String(row.account_id))
+      },
+      {
+        watcherBuy: 200,
+        market: "resolved",
+        settledHolders: [deletedId, watcherId].sort(),
+        notified: [watcherId]
       }
     ))
   }

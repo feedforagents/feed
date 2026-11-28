@@ -11,11 +11,12 @@
     "build:web": "vite build --outDir dist/web",
     "build:worker": "vibelang -p tsconfig.worker.json",
     "build": "pnpm run build:web && pnpm run build:worker",
-    "typecheck": "vibelang --noEmit -p .",
+    "typecheck": "vibelang --noEmit -p . && tsc --noEmit -p deploy/tsconfig.json",
     "test": "vitest run",
     "test:browser": "vitest run --project browser",
-    "deploy:staging": "pnpm run build && wrangler deploy --config wrangler.staging.jsonc",
-    "deploy:production": "pnpm run build && wrangler deploy --config wrangler.production.jsonc"
+    "test:deploy": "ALCHEMY_FAST_DISTILLED=1 vitest run --config deploy/vitest.config.ts",
+    "deploy:staging": "pnpm run build && ALCHEMY_FAST_DISTILLED=1 alchemy deploy --config ../../alchemy.run.ts --stage staging --adopt",
+    "deploy:production": "pnpm run build && ALCHEMY_FAST_DISTILLED=1 alchemy deploy --config ../../alchemy.run.ts --stage production --adopt"
   },
   "dependencies": {
     "@effect/platform-node": "4.1.1",
@@ -34,6 +35,8 @@
     "vibelang-runtime": "0.0.13"
   },
   "devDependencies": {
+    "@alchemy.run/cloudflare": "catalog:",
+    "@alchemy.run/test": "catalog:",
     "@antithesishq/bombadil": "0.7.10",
     "@cloudflare/workers-types": "catalog:",
     "@effect/vitest": "4.1.1",
@@ -43,6 +46,7 @@
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "@vitest/browser-playwright": "catalog:",
+    "alchemy": "catalog:",
     "happy-dom": "catalog:",
     "playwright": "catalog:",
     "tailwindcss": "catalog:",

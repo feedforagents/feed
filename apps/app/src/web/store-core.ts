@@ -74,6 +74,12 @@ export type UiFeedTab = "latest" | "following" | "top";
 
 export type ThreadReplySort = "popular" | "newest" | "oldest";
 
+export interface PostedReplyClear {
+  readonly postId: string;
+  readonly content: string;
+  readonly seq: number;
+}
+
 export interface GlobalReportTarget {
   readonly kind: "post" | "account";
   readonly id: string;
@@ -86,6 +92,8 @@ export interface GlobalAccountActionTarget {
 }
 
 export type EmailVerifyStatus = "idle" | "verifying" | "needs_onboarding" | "signed_in" | "linked" | "error";
+
+export type ComposeSession = { readonly quotePost: AppPost | null };
 
 export interface StoreState {
   readonly authLoaded: boolean;
@@ -133,8 +141,7 @@ export interface StoreState {
   readonly pendingPhoneE164: string;
   readonly pendingOnboardingToken: string;
   readonly pendingAction: PendingAction | null;
-  readonly composeOpen: boolean;
-  readonly quotePostTarget: AppPost | null;
+  readonly composeSession: ComposeSession | null;
   readonly reportTarget: GlobalReportTarget | null;
   readonly blockTarget: GlobalAccountActionTarget | null;
   readonly muteTarget: GlobalAccountActionTarget | null;
@@ -147,6 +154,7 @@ export interface StoreState {
   readonly activeThread: PostThreadData | null;
   readonly threadSort: ThreadReplySort;
   readonly threadLoading: boolean;
+  readonly postedReplyClear: PostedReplyClear | null;
   readonly exploreQuery: string;
   readonly exploreLoading: boolean;
   readonly trendingLoading: boolean;
@@ -485,8 +493,7 @@ let currentState: StoreState = {
   pendingPhoneE164: "",
   pendingOnboardingToken: "",
   pendingAction: null,
-  composeOpen: false,
-  quotePostTarget: null,
+  composeSession: null,
   reportTarget: null,
   blockTarget: null,
   muteTarget: null,
@@ -499,6 +506,7 @@ let currentState: StoreState = {
   activeThread: null,
   threadSort: "popular",
   threadLoading: false,
+  postedReplyClear: null,
   exploreQuery: initialLocation.exploreQuery ?? "",
   exploreLoading: false,
   trendingLoading: true,
@@ -746,8 +754,7 @@ const CLOSED_DIALOGS: Partial<StoreState> = {
   joinSheetOpen: false,
   followListKind: null,
   followListError: null,
-  composeOpen: false,
-  quotePostTarget: null,
+  composeSession: null,
   reportTarget: null,
   blockTarget: null,
   muteTarget: null,
@@ -833,11 +840,11 @@ export function buildHostActionNote(hostId: AgentHostId): string {
 
 export function openComposeDialog(quotePost: AppPost | null = null): void {
   if (!ensureViewerForDialog()) return;
-  setStoreState({ ...CLOSED_DIALOGS, composeOpen: true, quotePostTarget: quotePost });
+  setStoreState({ ...CLOSED_DIALOGS, composeSession: { quotePost } });
 }
 
 export function closeComposeDialog(): void {
-  setStoreState({ composeOpen: false, quotePostTarget: null });
+  setStoreState({ composeSession: null });
 }
 
 export function openReportDialog(target: GlobalReportTarget): void {

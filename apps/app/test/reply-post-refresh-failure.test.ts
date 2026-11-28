@@ -65,7 +65,7 @@ afterEach(() => {
 });
 
 async function expectReplyShownOnce() {
-  expect(await createPost("Fresh reply", { replyToPostId: "post-1" })).toBe(true);
+  expect((await createPost("Fresh reply", { replyToPostId: "post-1" })).kind).toBe("published");
   const s = getStoreSnapshot();
   expect(s.activeThread?.replies.map((r) => r.card.id)).toEqual(["reply-existing", "reply-new"]);
   expect(s.activeThread?.post.card.replyCount).toBe(2);

@@ -22,6 +22,7 @@ import {
   getPerpMarket,
   getPointLedger,
   getPredictionMarket,
+  getPredictionPriceHistory,
   getUserPositions,
   liquidateEligiblePositions,
   listClosedPositions,
@@ -38,6 +39,7 @@ import {
   previewPredictionSell,
   resolvePredictionMarket,
   sellPredictionShares,
+  snapshotMarketPrices,
   type BuyPredictionInput,
   type MarketPerpRealtimeEvent,
   type SellPredictionInput
@@ -221,6 +223,7 @@ it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHAR
       shares: sharesToSell,
       holderId: "user-alice"
     })
+    try TestClock.adjust(Duration.millis(1))
     const aliceSell = try sellPredictionShares({
       actorId: "user-alice",
       actorKind: "user",
@@ -233,6 +236,34 @@ it.effect('Prediction market lifecycle: previews, cent-share CPMM, MIN_SELL_SHAR
     const marketAfterTrades = try getPredictionMarket("seed-market-1")
     const history = try getMarketPriceHistory("prediction", "seed-market-1", 50)
     const trades = try listMarketTrades("prediction", "seed-market-1", 10)
+
+    try store.transaction(effect (tx: Tx) => {
+      try tx.query(
+        `INSERT INTO feed_market_price_history (id, market_kind, market_ref, price_cents, yes_price_bps, recorded_at)
+         SELECT 'prediction-history-' || tick, 'prediction', 'seed-market-1', $1, $2, $3::bigint - tick
+         FROM generate_series(1, $4::integer) AS fixtures(tick)`,
+        [Math.round(openView.yesPriceBps / 100), openView.yesPriceBps, now, 203 - history.length]
+      )
+    })
+    try TestClock.adjust(Duration.millis(1))
+    try snapshotMarketPrices()
+    const fullHistory = try getPredictionPriceHistory({ marketId: "seed-market-1", range: "ALL", limit: 500 })
+    const sampledHistory = try getPredictionPriceHistory({ marketId: "seed-market-1", range: "ALL" })
+    try check(() => {
+      assert.deepStrictEqual({
+        recordedPoints: fullHistory.points.length,
+        sampledPoints: sampledHistory.points.length,
+        firstPoint: sampledHistory.points[0],
+        lastPoint: sampledHistory.points.at(-1),
+        sampledVolumeCents: sampledHistory.points.reduce((volume, point) => volume + point.volumeCents, 0)
+      }, {
+        recordedPoints: 204,
+        sampledPoints: 200,
+        firstPoint: fullHistory.points[0],
+        lastPoint: fullHistory.points.at(-1),
+        sampledVolumeCents: history.reduce((volume, point) => volume + point.volumeCents, 0)
+      })
+    })
 
     // spec/markets/prediction.md, "Resolved, cancelled, held, and expired markets allow no trades, and duplicate resolution pays nothing extra"
     try store.transaction(effect (tx: Tx) => {

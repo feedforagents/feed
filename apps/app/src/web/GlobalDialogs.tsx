@@ -19,7 +19,11 @@ import {
   type PostComposerContext,
 } from "@repo/ui";
 import { storeActions, useAppStore } from "./store.ts";
-import { getStoreSnapshot } from "./store-core.ts";
+import { getStoreSnapshot, type ComposeSession } from "./store-core.ts";
+
+type ComposeSubmission =
+  | { readonly session: ComposeSession; readonly kind: "publishing" }
+  | { readonly session: ComposeSession; readonly kind: "failed"; readonly message: string };
 
 const REPORT_CATEGORIES = [
   "Spam",
@@ -84,41 +88,36 @@ export function GlobalDialogs() {
   const s = useAppStore();
   const [composeText, setComposeText] = useState("");
   const [composeDraftTargetId, setComposeDraftTargetId] = useState<string | null>(null);
-  const [composeWasOpen, setComposeWasOpen] = useState(false);
-  const [composeBusy, setComposeBusy] = useState(false);
-  const [composeError, setComposeError] = useState<string | null>(null);
+  const [composeSubmission, setComposeSubmission] = useState<ComposeSubmission | null>(null);
   const [reportCategory, setReportCategory] = useState<(typeof REPORT_CATEGORIES)[number]>("Spam");
   const [reportDetails, setReportDetails] = useState("");
   const [reportBusy, setReportBusy] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
 
-  const quoteTargetId = s.quotePostTarget?.card.id ?? null;
-  if (s.composeOpen !== composeWasOpen) {
-    setComposeWasOpen(s.composeOpen);
-    if (s.composeOpen && composeDraftTargetId !== quoteTargetId) {
-      setComposeText("");
-      setComposeDraftTargetId(quoteTargetId);
-    }
+  const session = s.composeSession;
+  const quotePost = session?.quotePost;
+  const quoteTargetId = quotePost?.card.id ?? null;
+  if (session && composeDraftTargetId !== quoteTargetId) {
+    setComposeText("");
+    setComposeDraftTargetId(quoteTargetId);
   }
 
-  const quoteContext: PostComposerContext | undefined = s.quotePostTarget
-    ? { authorHandle: s.quotePostTarget.card.authorHandle, excerpt: s.quotePostTarget.card.content }
+  const submission = composeSubmission?.session === session ? composeSubmission : null;
+  const quoteContext: PostComposerContext | undefined = quotePost
+    ? { authorHandle: quotePost.card.authorHandle, excerpt: quotePost.card.content }
     : undefined;
 
   const handleComposeSubmit = async (text: string) => {
-    setComposeBusy(true);
-    setComposeError(null);
-    const ok = await storeActions.createPost(
-      text,
-      s.quotePostTarget ? { quotePostId: s.quotePostTarget.card.id } : undefined,
-    );
-    setComposeBusy(false);
-    if (ok) {
+    if (!session) return;
+    setComposeSubmission({ session, kind: "publishing" });
+    const result = await storeActions.createPost(text, quoteTargetId ? { quotePostId: quoteTargetId } : undefined);
+    if (getStoreSnapshot().composeSession !== session) return;
+
+    setComposeSubmission(result.kind === "failed" ? { session, kind: "failed", message: result.message } : null);
+    if (result.kind === "published") {
       setComposeText("");
       setComposeDraftTargetId(null);
       storeActions.closeComposeDialog();
-    } else {
-      setComposeError(getStoreSnapshot().errorMessage);
     }
   };
 
@@ -147,26 +146,26 @@ export function GlobalDialogs() {
   return (
     <>
       <Dialog
-        open={s.composeOpen}
+        open={session !== null}
         onOpenChange={(open) => {
           if (!open) {
-            setComposeError(null);
+            setComposeSubmission(null);
             storeActions.closeComposeDialog();
           }
         }}
       >
         <DialogContent className="max-w-lg overflow-hidden p-0">
           <div className="border-b border-border px-4 py-3">
-            <DialogTitle>{s.quotePostTarget ? "Quote post" : "Compose post"}</DialogTitle>
+            <DialogTitle>{quotePost ? "Quote post" : "Compose post"}</DialogTitle>
             <DialogDescription className="sr-only">Write a post to share on Feed.</DialogDescription>
           </div>
           <PostComposer
             value={composeText}
             onValueChange={(next) => {
               setComposeText(next);
-              setComposeError(null);
+              setComposeSubmission(null);
             }}
-            error={composeError ?? undefined}
+            error={submission?.kind === "failed" ? submission.message : undefined}
             onSubmit={(text) => { void handleComposeSubmit(text); }}
             authorName={s.viewer?.displayName ?? "You"}
             authorAvatarUrl={s.viewer?.avatarUrl ?? undefined}
@@ -175,9 +174,9 @@ export function GlobalDialogs() {
               setComposeDraftTargetId(null);
               storeActions.openComposeDialog(null);
             }}
-            placeholder={s.quotePostTarget ? "Add a comment..." : "What's happening?"}
+            placeholder={quotePost ? "Add a comment..." : "What's happening?"}
             submitLabel="Post"
-            loading={composeBusy}
+            loading={submission?.kind === "publishing"}
             className="border-b-0"
           />
         </DialogContent>

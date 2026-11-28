@@ -3,7 +3,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { getStoreSnapshot, setStoreState } from "../src/web/store-core.ts";
 import { reconnectRealtime } from "../src/web/store.ts";
-import { loadChatMessages, selectChat, sendChatMessage } from "../src/web/store-world.ts";
+import { loadChatMessages, selectChat, sendChatMessage, startDirectChat } from "../src/web/store-world.ts";
 import { decodeNotifications, type AppChatSummary } from "../src/web/types.ts";
 import { makeViewerSession, stubFetchByUrl } from "./app-test-helpers.tsx";
 
@@ -133,6 +133,62 @@ it("does not mark read when the room loads with no messages (spec/social/messagi
   await loadChatMessages("chat-1");
   expect(getStoreSnapshot().chatMessages).toEqual([]);
   expect(readPosts).toEqual([]);
+});
+
+it("arrives on the direct thread when a DM is started from a profile (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  const directChat = {
+    id: "chat-2",
+    kind: "direct",
+    title: "Bob",
+    unreadCount: 0,
+    members: [
+      { memberId: "alice", memberKind: "user", handle: "alice", displayName: "Alice", avatarUrl: null, role: "member" },
+      { memberId: "bob", memberKind: "user", handle: "bob", displayName: "Bob", avatarUrl: null, role: "member" },
+    ],
+  };
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats/direct" && method === "POST") {
+      return Promise.resolve(Response.json({ chat: directChat }, { status: 201 }));
+    }
+    if (url.pathname === "/api/chats" && method === "GET") {
+      return Promise.resolve(Response.json({ chats: [directChat] }));
+    }
+    if (url.pathname === "/api/chats/invites" && method === "GET") {
+      return Promise.resolve(Response.json({ invites: [] }));
+    }
+    if (url.pathname === "/api/chats/chat-2/messages" && method === "GET") {
+      return Promise.resolve(Response.json({ messages: [{ ...bobMessage, id: "m2", content: "thread hello" }] }));
+    }
+    return fallbackReadOrNotFound(url, method, readPosts);
+  }, "http://localhost");
+  window.history.replaceState(null, "", "/u/bob");
+  setStoreState({
+    route: "Profile",
+    profileHandle: "bob",
+    chats: [{ ...seedChat(0), id: "chat-9", title: "Carol", peerHandle: "carol" }],
+    selectedChatId: "chat-9",
+    chatMessages: [],
+  });
+
+  const opened = await startDirectChat("bob");
+
+  const s = getStoreSnapshot();
+  expect({
+    opened,
+    route: s.route,
+    selectedChatId: s.selectedChatId,
+    pathname: window.location.pathname,
+    search: window.location.search,
+    messages: s.chatMessages.map((m) => m.content),
+  }).toEqual({
+    opened: true,
+    route: "Chats",
+    selectedChatId: "chat-2",
+    pathname: "/chats",
+    search: "?chat=chat-2",
+    messages: ["thread hello"],
+  });
 });
 
 it("clears the notification badge for the room's chat messages when the room is opened (spec/social/moderation.md, \"Story: In-app notifications and Social-mode presentation filtering\"; spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
@@ -413,6 +469,29 @@ it("surfaces a failed thread refresh after a successful send instead of silently
   expect(s.chatMessages.map((m) => m.content)).toEqual(["hello"]);
   expect(s.toasts.map((t) => t.message)).toEqual(["Message sent, but the thread failed to refresh."]);
   expect(s.errorMessage).toBe("Message sent, but the thread failed to refresh.");
+});
+
+it("surfaces a failed message load when a conversation is opened instead of showing an empty thread (spec/social/messaging.md, \"Story: Direct messages, chat messages, and reactions\")", async () => {
+  stubFetchByUrl((url, init) => {
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/api/chats/chat-1/messages" && method === "GET") {
+      return Promise.resolve(Response.json({ message: "Load exploded" }, { status: 500 }));
+    }
+    return fallbackReadOrNotFound(url, method, readPosts);
+  }, "http://localhost");
+  setStoreState({
+    chats: [seedChat(0)],
+    selectedChatId: null,
+    chatMessages: [],
+    toasts: [],
+    errorMessage: null,
+  });
+  await selectChat("chat-1");
+  const s = getStoreSnapshot();
+  expect(s.selectedChatId).toBe("chat-1");
+  expect(s.chatMessages).toEqual([]);
+  expect(s.toasts.map((t) => t.message)).toEqual(["Failed to load messages. Please try again."]);
+  expect(s.errorMessage).toBe("Failed to load messages. Please try again.");
 });
 
 function seedChatNotifications() {

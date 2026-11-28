@@ -578,13 +578,17 @@ export async function loadMoreFeed(): Promise<void> {
   setErrorNotice(res.message);
 }
 
+let trendingLoadCount = 0;
+
 export async function loadTrending(): Promise<void> {
   const s = getStoreSnapshot();
+  const loadId = ++trendingLoadCount;
   setStoreState({ trendingLoading: true });
   const [trendRes, articlesRes] = await Promise.all([
     requestJson(appendAnonymousModeParam("/api/trending", s), { parse: decodeTrendingList }),
     requestJson(appendAnonymousModeParam("/api/articles?limit=10", s), { parse: decodeArticles }),
   ]);
+  if (loadId !== trendingLoadCount) return;
   const cur = getStoreSnapshot();
   const nextTrending = trendRes.ok ? trendRes.data : cur.rightRailTrending;
   const nextArticles = articlesRes.ok && articlesRes.data.length > 0 ? articlesRes.data : cur.rightRailArticles;
@@ -598,6 +602,10 @@ export async function loadTrending(): Promise<void> {
       ...(articlesRes.ok && articlesRes.data.length > 0 ? { articles: articlesRes.data } : {}),
     },
   });
+  const failed = !trendRes.ok ? trendRes : !articlesRes.ok ? articlesRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
@@ -706,12 +714,12 @@ export async function loadArticle(articleId: string): Promise<void> {
 export async function createPost(
   content: string,
   options?: { readonly replyToPostId?: string; readonly quotePostId?: string; readonly marketId?: string; readonly ticker?: string },
-): Promise<boolean> {
+): Promise<{ readonly kind: "published" | "queued" } | { readonly kind: "failed"; readonly message: string }> {
   const label = options?.replyToPostId ? "reply to this post" : options?.quotePostId ? "quote this post" : "publish this post";
   const pending = options?.replyToPostId
     ? { kind: "reply" as const, postId: options.replyToPostId, content, label }
     : { kind: "post" as const, content, ...(options?.quotePostId ? { quotePostId: options.quotePostId } : {}), label };
-  if (!requireAuthOrQueue(pending)) return false;
+  if (!requireAuthOrQueue(pending)) return { kind: "queued" };
   clearNotices();
   const viewerId = getStoreSnapshot().viewer?.accountId ?? null;
   const res = await requestJson("/api/posts", {
@@ -731,10 +739,17 @@ export async function createPost(
     } else {
       setErrorNotice(res.message);
     }
-    return false;
+    return { kind: "failed", message: res.message };
   }
   if (options?.replyToPostId) {
     clearReplyFailureNotice(options.replyToPostId);
+    setStoreState({
+      postedReplyClear: {
+        postId: options.replyToPostId,
+        content,
+        seq: (getStoreSnapshot().postedReplyClear?.seq ?? 0) + 1,
+      },
+    });
   }
   setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
   if (res.data && options?.replyToPostId) {
@@ -787,7 +802,7 @@ export async function createPost(
   if (thread && options?.replyToPostId === thread.post.card.id) {
     await openThread(thread.post.card.id, getStoreSnapshot().threadSort);
   }
-  return true;
+  return { kind: "published" };
 }
 
 export async function deletePost(postId: string): Promise<boolean> {
@@ -1211,6 +1226,7 @@ export async function loadClosedPositions(): Promise<void> {
     return;
   }
   setStoreState({ closedPositionsLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadMarketDetails(
@@ -1663,6 +1679,9 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
     ...(selectedId !== s.selectedChatId ? { chatMessages: [] } : {}),
     alphaInvites: invitesRes.ok ? invitesRes.data : s.alphaInvites,
   });
+  if (!chatsRes.ok && loadMessages) {
+    setErrorNotice(chatsRes.message);
+  }
   if (loadMessages && selectedId) {
     await loadChatMessages(selectedId);
   }
@@ -1694,7 +1713,10 @@ export async function selectChat(chatId: string): Promise<void> {
     selectedChatId: chatId,
     ...(s.selectedChatId !== chatId ? { chatMessages: [] } : {}),
   });
-  await loadChatMessages(chatId);
+  const loaded = await loadChatMessages(chatId);
+  if (!loaded && getStoreSnapshot().selectedChatId === chatId) {
+    setErrorNotice("Failed to load messages. Please try again.");
+  }
 }
 
 export async function startDirectChat(targetHandleOrId: string): Promise<boolean> {
@@ -1710,11 +1732,15 @@ export async function startDirectChat(targetHandleOrId: string): Promise<boolean
     return false;
   }
   const createdId = res.data[0]?.id ?? null;
-  if (getStoreSnapshot().route !== "Chats") {
-    pushBrowserRoute("Chats");
+  const current = getStoreSnapshot();
+  if (current.route !== "Chats") {
+    pushBrowserRoute("Chats", undefined, createdId ? `?chat=${encodeURIComponent(createdId)}` : "");
     sendNav({ type: "navigateTo", targetRoute: "Chats" });
     sendApp({ type: "navigateApp", targetRoute: "Chats" });
-    setStoreState({ route: "Chats" });
+    setStoreState({
+      route: "Chats",
+      ...(createdId && createdId !== current.selectedChatId ? { selectedChatId: createdId, chatMessages: [] } : {}),
+    });
   }
   await loadChats(false, createdId);
   if (createdId) {
@@ -2505,7 +2531,7 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
     const curBundleHandle = cur.profileBundle?.summary.handle.toLowerCase() ?? null;
     const targetStateStale = curBundleHandle === lower
       && cur.profileBundle?.summary.isFollowing !== nextFollowing;
-    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale)) {
+    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale || profileBundleGen !== optimisticBundleGen)) {
       void loadProfile(cur.profileBundle?.summary.handle);
     }
     setStatusNotice(nextFollowing ? `Following @${handle}.` : `Unfollowed @${handle}.`);

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export const SKILL_ROOT = ".agents/skills";
+export const TOOL_IGNORE_DIRS = ["gen", ".spec-cache", ".studio", "dist", ".vibe", ".cache", ".turbo", ".alchemy", ".wrangler"] as const;
 export const GENERATED_AGENT_DIRECTORIES = [".claude", ".codex", ".cursor", ".droid", ".factory", ".gemini", ".grok", ".grokbot", ".muse", ".t3"];
 export const GENERATED_AGENT_IGNORES = ["/.claude/", "/CLAUDE.md", ...GENERATED_AGENT_DIRECTORIES.filter((agent) => agent !== ".claude").map((agent) => `/${agent}/skills`)];
 
