@@ -1814,21 +1814,14 @@ export effect function listPostsByTag(input: ListPostsByTagInput): ReadonlyArray
     const mode = input.mode ?? (try readViewerUiModeTx(tx, viewerId))
     if (isTicker && mode === "social") return []
     const conditions: string[] = ["p.deleted_at IS NULL"]
+    if (mode === "social") conditions.push(socialModeMarketExclusionSql("p"))
     const params: unknown[] = []
     if (isTicker) {
       params.push(`(^|[^a-zA-Z0-9_$])\\$${escaped}([^a-zA-Z0-9_]|$)`, cleaned.toUpperCase())
       conditions.push("(p.content ~* $1 OR upper(COALESCE(p.ticker, '')) = $2)")
-    } else if (mode === "social") {
+    } else {
       params.push(`(^|[^a-zA-Z0-9_])#${escaped}([^a-zA-Z0-9_]|$)`)
       conditions.push("p.content ~* $1")
-      conditions.push(socialModeMarketExclusionSql("p"))
-    } else {
-      params.push(
-        `(^|[^a-zA-Z0-9_])#${escaped}([^a-zA-Z0-9_]|$)`,
-        `(^|[^a-zA-Z0-9_$])\\$${escaped}([^a-zA-Z0-9_]|$)`,
-        cleaned.toUpperCase()
-      )
-      conditions.push("(p.content ~* $1 OR p.content ~* $2 OR upper(COALESCE(p.ticker, '')) = $3)")
     }
     if (viewerId !== undefined) {
       params.push(viewerId)
