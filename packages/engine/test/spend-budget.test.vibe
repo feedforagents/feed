@@ -4,16 +4,40 @@ import { migrateFeedSchema } from "@repo/db"
 import { localStoreLayer } from "@repo/db/node"
 import { EngineFailure, confirmLlmSpend, getDailySpendStatus, markLlmSpendUncertain, reconcileStaleUncertainSpend, reserveLlmBudget } from "../src/index.vibe"
 
+module probeBudgetEnv {
+  import process from "node:process"
+
+  /** @throws {never} */
+  export function setDailyBudgetUsd(value: string): string | undefined {
+    const previous = process.env.NPC_LLM_DAILY_BUDGET_USD
+    process.env.NPC_LLM_DAILY_BUDGET_USD = value
+    return previous
+  }
+
+  /** @throws {never} */
+  export function restoreDailyBudgetUsd(previous: string | undefined): void {
+    if (previous === undefined) {
+      delete process.env.NPC_LLM_DAILY_BUDGET_USD
+    } else {
+      process.env.NPC_LLM_DAILY_BUDGET_USD = previous
+    }
+  }
+}
+import { restoreDailyBudgetUsd, setDailyBudgetUsd } from probeBudgetEnv
+
 function failureCode(err: { readonly _tag: string }): string {
   return err instanceof EngineFailure ? err.code : err._tag
+}
+
+function spendDays(): { readonly dayMs: number; readonly day2Ms: number; readonly day31Ms: number } {
+  const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
+  return { dayMs, day2Ms: dayMs + 86_400_000, day31Ms: dayMs + 31 * 86_400_000 }
 }
 
 it.effect('A refused over-bound confirm releases the reservation: no next-day or day-31 carryover (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
   provide localStoreLayer({ kind: "pglite", file: undefined }) {
     try migrateFeedSchema()
-    const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
-    const day2Ms = dayMs + 86_400_000
-    const day31Ms = dayMs + 31 * 86_400_000
+    const { dayMs, day2Ms, day31Ms } = spendDays()
     const a = try reserveLlmBudget({ attemptId: "bound-a", estimatedMicros: 60_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
     try reserveLlmBudget({ attemptId: "bound-b", estimatedMicros: 40_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs + 1 })
     const before = try getDailySpendStatus(dayMs + 2)
@@ -22,13 +46,13 @@ it.effect('A refused over-bound confirm releases the reservation: no next-day or
     const failure = try Effect.flip(confirmLlmSpend({ attemptId: a.attemptId, actualMicros: 70_000_000, nowMs: dayMs + 3 }))
     assert.strictEqual(failureCode(failure), "BUDGET_EXCEEDED")
     const refused = try getDailySpendStatus(dayMs + 4)
-    assert.strictEqual(refused.committedMicros, 40_000_000)
-    assert.strictEqual(refused.confirmedCents, 0)
+    assert.strictEqual(refused.committedMicros, 100_000_000)
+    assert.strictEqual(refused.confirmedCents, 6_000)
     assert.strictEqual(refused.activeReservations, 1)
     try confirmLlmSpend({ attemptId: "bound-b", actualMicros: 40_000_000, nowMs: dayMs + 5 })
     const settled = try getDailySpendStatus(dayMs + 6)
-    assert.strictEqual(settled.committedMicros, 40_000_000)
-    assert.strictEqual(settled.confirmedCents, 4_000)
+    assert.strictEqual(settled.committedMicros, 100_000_000)
+    assert.strictEqual(settled.confirmedCents, 10_000)
     assert.strictEqual(settled.activeReservations, 0)
     try reconcileStaleUncertainSpend(day2Ms)
     const day2 = try getDailySpendStatus(day2Ms)
@@ -44,19 +68,57 @@ it.effect('A refused over-bound confirm releases the reservation: no next-day or
 it.effect('An over-bound confirm on an uncertain reservation is refused and releases it (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
   provide localStoreLayer({ kind: "pglite", file: undefined }) {
     try migrateFeedSchema()
-    const dayMs = Date.UTC(2026, 10, 23, 12, 0, 0)
-    const day2Ms = dayMs + 86_400_000
+    const { dayMs, day2Ms } = spendDays()
     const c = try reserveLlmBudget({ attemptId: "bound-c", estimatedMicros: 60_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
     try markLlmSpendUncertain({ attemptId: c.attemptId, nowMs: dayMs + 1 })
     const failure = try Effect.flip(confirmLlmSpend({ attemptId: c.attemptId, actualMicros: 70_000_000, nowMs: dayMs + 2 }))
     assert.strictEqual(failureCode(failure), "BUDGET_EXCEEDED")
     const refused = try getDailySpendStatus(dayMs + 3)
-    assert.strictEqual(refused.committedMicros, 0)
-    assert.strictEqual(refused.confirmedCents, 0)
+    assert.strictEqual(refused.committedMicros, 70_000_000)
+    assert.strictEqual(refused.confirmedCents, 7_000)
     assert.strictEqual(refused.activeReservations, 0)
     assert.strictEqual(refused.uncertainReservations, 0)
     const day2 = try getDailySpendStatus(day2Ms)
     assert.strictEqual(day2.carryoverReservedCents, 0)
     assert.strictEqual(day2.committedMicros, 0)
+  }
+}))
+
+it.effect('A valid confirm after a refused over-bound confirm finds the charged cost already booked (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    const { dayMs } = spendDays()
+    const race = try reserveLlmBudget({ attemptId: "race-a", estimatedMicros: 90_000_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
+    const refusal = try Effect.flip(confirmLlmSpend({ attemptId: race.attemptId, actualMicros: 450_000_000, nowMs: dayMs + 1 }))
+    assert.strictEqual(failureCode(refusal), "BUDGET_EXCEEDED")
+    try confirmLlmSpend({ attemptId: race.attemptId, actualMicros: 90_000_000, nowMs: dayMs + 2 })
+    const after = try getDailySpendStatus(dayMs + 3)
+    assert.strictEqual(after.committedMicros, 100_000_000)
+    assert.strictEqual(after.confirmedCents, 10_000)
+    assert.strictEqual(after.activeReservations, 0)
+    try confirmLlmSpend({ attemptId: race.attemptId, actualMicros: 90_000_000, nowMs: dayMs + 4 })
+    const settled = try getDailySpendStatus(dayMs + 5)
+    assert.strictEqual(settled.committedMicros, 100_000_000)
+    assert.strictEqual(settled.activeReservations, 0)
+  }
+}))
+
+it.effect('A refused over-bound confirm consumes the daily budget, so the provider gets no further call (spec/engine/spendBudget.md, "Story: Enforce atomic budget reservations and reconciliation")', () => scoped(effect {
+  provide localStoreLayer({ kind: "pglite", file: undefined }) {
+    try migrateFeedSchema()
+    const previousBudget = setDailyBudgetUsd("1")
+    const { dayMs } = spendDays()
+    const first = try reserveLlmBudget({ attemptId: "probe-1", estimatedMicros: 10_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs })
+    const refusal = try Effect.flip(confirmLlmSpend({ attemptId: first.attemptId, actualMicros: 2_000_060, nowMs: dayMs + 1 }))
+    assert.strictEqual(failureCode(refusal), "BUDGET_EXCEEDED")
+    const spent = try getDailySpendStatus(dayMs + 2)
+    assert.strictEqual(spent.budgetMicros, 1_000_000)
+    assert.strictEqual(spent.committedMicros, 1_000_000)
+    assert.strictEqual(spent.confirmedCents, 100)
+    const secondRefusal = try Effect.flip(reserveLlmBudget({ attemptId: "probe-2", estimatedMicros: 10_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs + 3 }))
+    assert.strictEqual(failureCode(secondRefusal), "BUDGET_EXCEEDED")
+    const thirdRefusal = try Effect.flip(reserveLlmBudget({ attemptId: "probe-3", estimatedMicros: 10_000, provider: "openai", model: "gpt-4o-mini", nowMs: dayMs + 4 }))
+    assert.strictEqual(failureCode(thirdRefusal), "BUDGET_EXCEEDED")
+    restoreDailyBudgetUsd(previousBudget)
   }
 }))
