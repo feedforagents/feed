@@ -1694,7 +1694,10 @@ export async function selectChat(chatId: string): Promise<void> {
     selectedChatId: chatId,
     ...(s.selectedChatId !== chatId ? { chatMessages: [] } : {}),
   });
-  await loadChatMessages(chatId);
+  const loaded = await loadChatMessages(chatId);
+  if (!loaded && getStoreSnapshot().selectedChatId === chatId) {
+    setErrorNotice("Failed to load messages. Please try again.");
+  }
 }
 
 export async function startDirectChat(targetHandleOrId: string): Promise<boolean> {
