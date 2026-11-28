@@ -150,10 +150,19 @@ function stripHiddenAuthorRefs(p: AppPost, isHidden: (handle: string) => boolean
 function dropAuthorsHiddenSince(
   posts: ReadonlyArray<AppPost>,
   hidesAtStart: number,
+  profileOwnerHandle?: string,
 ): ReadonlyArray<AppPost> {
   if (hidesAtStart === authorHideSeq) return posts;
   const isHidden = (handle: string): boolean => wasAuthorHiddenSince(handle, hidesAtStart);
-  return posts.filter((p) => !isHidden(p.card.authorHandle)).map((p) => stripHiddenAuthorRefs(p, isHidden));
+  const owner = profileOwnerHandle?.toLowerCase();
+  const ownerHidden = owner !== undefined && isHidden(owner);
+  const repostedByOwner = (p: AppPost): boolean => {
+    const reposter = p.card.repostedBy?.handle ?? p.card.repostedByHandle;
+    return owner !== undefined && reposter !== undefined && reposter.toLowerCase() === owner;
+  };
+  return posts
+    .filter((p) => !isHidden(p.card.authorHandle) && !(ownerHidden && repostedByOwner(p)))
+    .map((p) => stripHiddenAuthorRefs(p, isHidden));
 }
 let exploreRequestSeq = 0;
 let exploreLoadedQuery = "";
@@ -589,13 +598,17 @@ export async function loadMoreFeed(): Promise<void> {
   setErrorNotice(res.message);
 }
 
+let trendingLoadCount = 0;
+
 export async function loadTrending(): Promise<void> {
   const s = getStoreSnapshot();
+  const loadId = ++trendingLoadCount;
   setStoreState({ trendingLoading: true });
   const [trendRes, articlesRes] = await Promise.all([
     requestJson(appendAnonymousModeParam("/api/trending", s), { parse: decodeTrendingList }),
     requestJson(appendAnonymousModeParam("/api/articles?limit=10", s), { parse: decodeArticles }),
   ]);
+  if (loadId !== trendingLoadCount) return;
   const cur = getStoreSnapshot();
   const nextTrending = trendRes.ok ? trendRes.data : cur.rightRailTrending;
   const nextArticles = articlesRes.ok && articlesRes.data.length > 0 ? articlesRes.data : cur.rightRailArticles;
@@ -609,6 +622,10 @@ export async function loadTrending(): Promise<void> {
       ...(articlesRes.ok && articlesRes.data.length > 0 ? { articles: articlesRes.data } : {}),
     },
   });
+  const failed = !trendRes.ok ? trendRes : !articlesRes.ok ? articlesRes : null;
+  if (failed) {
+    setErrorNotice(failed.message);
+  }
 }
 
 export async function selectFeedTab(tab: UiFeedTab): Promise<void> {
@@ -643,6 +660,7 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
   const creationsAtStart = captureReplyCreations();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({
     threadLoading: true,
     activePostId: postId,
@@ -662,22 +680,36 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
       setErrorNotice("Post not found");
       return;
     }
+    if (wasAuthorHiddenSince(thread.post.card.authorHandle, hidesAtStart)) {
+      setStoreState({ activeThread: null, threadLoading: false });
+      return;
+    }
     for (const reply of thread.replies) replyLiveCountLanded.delete(reply.card.id);
     const parentPost = thread.parentPost && !wasPostDeletedSince(thread.parentPost.card.id, deletionsAtStart)
-      ? dropPostsDeletedSince(preserveEngagementSince([thread.parentPost], engagementAtStart), deletionsAtStart)[0] ?? null
+      ? dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince([thread.parentPost], engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        )[0] ?? null
       : null;
     const droppedRootReplies = thread.replies.filter(
       (reply) => reply.replyToPostId === thread.post.card.id && wasPostDeletedSince(reply.card.id, deletionsAtStart),
     ).length;
-    const rootPost = dropPostsDeletedSince(preserveEngagementSince([thread.post], engagementAtStart), deletionsAtStart)[0] ?? thread.post;
-    const landedReplies = dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart);
+    const rootPost = dropAuthorsHiddenSince(
+      dropPostsDeletedSince(preserveEngagementSince([thread.post], engagementAtStart), deletionsAtStart),
+      hidesAtStart,
+    )[0] ?? thread.post;
+    const landedReplies = dropAuthorsHiddenSince(
+      dropPostsDeletedSince(preserveEngagementSince(thread.replies, engagementAtStart), deletionsAtStart),
+      hidesAtStart,
+    );
     const landedIds = new Set(landedReplies.map((reply) => reply.card.id));
     const currentThread = getStoreSnapshot().activeThread;
     const preservedReplies = currentThread?.post.card.id === thread.post.card.id
       ? currentThread.replies.filter(
           (reply) => wasReplyCreatedSince(reply.card.id, creationsAtStart)
             && !landedIds.has(reply.card.id)
-            && !wasPostDeletedSince(reply.card.id, deletionsAtStart),
+            && !wasPostDeletedSince(reply.card.id, deletionsAtStart)
+            && !wasAuthorHiddenSince(reply.card.authorHandle, hidesAtStart),
         )
       : [];
     const preservedRootReplies = preservedReplies.filter((reply) => reply.replyToPostId === thread.post.card.id).length;
@@ -688,7 +720,10 @@ export async function openThread(postId: string, sortOverride?: ThreadReplySort)
           ? { ...rootPost, card: { ...rootPost.card, replyCount: Math.max(0, rootPost.card.replyCount + replyCountDelta) } }
           : rootPost,
         parentPost,
-        ancestors: dropPostsDeletedSince(preserveEngagementSince(thread.ancestors, engagementAtStart), deletionsAtStart),
+        ancestors: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(thread.ancestors, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
         replies: sort === "newest" ? [...preservedReplies, ...landedReplies] : [...landedReplies, ...preservedReplies],
       },
       threadLoading: false,
@@ -759,6 +794,13 @@ export async function createPost(
   }
   if (options?.replyToPostId) {
     clearReplyFailureNotice(options.replyToPostId);
+    setStoreState({
+      postedReplyClear: {
+        postId: options.replyToPostId,
+        content,
+        seq: (getStoreSnapshot().postedReplyClear?.seq ?? 0) + 1,
+      },
+    });
   }
   setStatusNotice(options?.replyToPostId ? "Reply posted." : "Post published.");
   if (res.data && options?.replyToPostId) {
@@ -943,6 +985,7 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const loadedQuery = q.trim().toLowerCase();
   const queryChanged = loadedQuery !== exploreLoadedQuery;
   exploreLoadedQuery = loadedQuery;
@@ -981,7 +1024,15 @@ export async function loadExplore(queryOverride?: string): Promise<void> {
     const cur = getStoreSnapshot();
     const isBrowse = q.trim() === "";
     setStoreState({
-      explore: { ...res.data, posts: dropPostsDeletedSince(preserveEngagementSince(res.data.posts, engagementAtStart), deletionsAtStart) },
+      explore: {
+        ...res.data,
+        posts: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(res.data.posts, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
+        accounts: res.data.accounts.filter((a) => !wasAuthorHiddenSince(a.handle, hidesAtStart)),
+        actors: res.data.actors.filter((a) => !wasAuthorHiddenSince(a.username, hidesAtStart)),
+      },
       ...(isBrowse && res.data.trending.length > 0 ? { rightRailTrending: res.data.trending } : {}),
       ...(isBrowse && res.data.articles.length > 0 ? { rightRailArticles: res.data.articles } : {}),
       exploreLoading: false,
@@ -1003,6 +1054,7 @@ export async function loadTrendingTag(tag: string): Promise<void> {
   const reqSeq = ++exploreRequestSeq;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ activeTrendingTag: cleanTag, exploreQuery: cleanTag, exploreLoading: true });
   const url = appendAnonymousModeParam(`/api/trending/${encodeURIComponent(cleanTag)}`, s);
   const res = await requestJson(url, {
@@ -1015,7 +1067,10 @@ export async function loadTrendingTag(tag: string): Promise<void> {
     setStoreState({
       explore: {
         ...cur.explore,
-        posts: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+        posts: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+        ),
         accounts: [],
         actors: [],
         organizations: [],
@@ -1236,6 +1291,7 @@ export async function loadClosedPositions(): Promise<void> {
     return;
   }
   setStoreState({ closedPositionsLoading: false });
+  setErrorNotice(res.message);
 }
 
 export async function loadMarketDetails(
@@ -1248,6 +1304,7 @@ export async function loadMarketDetails(
   const range = rangeOverride ?? s.marketTimeRange;
   const reqSeq = ++marketDetailsRequestSeq;
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ marketHistoryLoading: true, marketTradesLoading: true, marketTimeRange: range });
   const basePath = kind === "perp"
     ? `/api/markets/perp/${encodeURIComponent(id)}`
@@ -1271,7 +1328,7 @@ export async function loadMarketDetails(
     marketHistoryLoading: false,
     marketTrades: tradesRes.ok ? tradesRes.data : [],
     marketTradesLoading: false,
-    marketSocialPosts: socialRes.ok ? dropPostsDeletedSince(socialRes.data.items, deletionsAtStart) : [],
+    marketSocialPosts: socialRes.ok ? dropAuthorsHiddenSince(dropPostsDeletedSince(socialRes.data.items, deletionsAtStart), hidesAtStart) : [],
   });
 }
 
@@ -1314,11 +1371,21 @@ export async function previewPerpOrder(
   setStoreState({ perpPreview: res.ok ? res.data : null });
 }
 
-let latestMarketsLoad: Promise<boolean> | undefined;
+type MarketsLoadOutcome = {
+  readonly ok: boolean;
+  readonly superseded?: boolean;
+  readonly message?: string;
+};
 
-function startMarketsLoad(): Promise<boolean> {
-  const load: Promise<boolean> = requestJson("/api/markets", { parse: passThrough }).then(
-    (response) => latestMarketsLoad === load && applyMarketsResponse(response),
+let latestMarketsLoad: Promise<MarketsLoadOutcome> | undefined;
+
+function startMarketsLoad(): Promise<MarketsLoadOutcome> {
+  const load: Promise<MarketsLoadOutcome> = requestJson("/api/markets", { parse: passThrough }).then(
+    (response) => {
+      if (latestMarketsLoad !== load) return { ok: false, superseded: true };
+      const ok = applyMarketsResponse(response);
+      return ok ? { ok: true } : { ok: false, message: response.ok ? "Markets unavailable" : response.message };
+    },
   );
   latestMarketsLoad = load;
   setStoreState({ marketsLoading: true });
@@ -1384,7 +1451,10 @@ function applyMarketsResponse(mktRes: ApiResult<unknown>): boolean {
 }
 
 export async function loadMarkets(): Promise<void> {
-  await startMarketsLoad();
+  const outcome = await startMarketsLoad();
+  if (!outcome.ok && !outcome.superseded) {
+    setErrorNotice(outcome.message ?? "Markets unavailable");
+  }
 }
 
 export function selectMarket(kind: "prediction" | "perp", id: string): void {
@@ -1485,10 +1555,10 @@ async function executeTradeRequest({
   });
   setStatusNotice(formatReceiptMessage ? formatReceiptMessage(res.data) : statusMessage);
   let refresh = startMarketsLoad();
-  let refreshed = await refresh;
+  let refreshed = (await refresh).ok;
   while (latestMarketsLoad && refresh !== latestMarketsLoad) {
     refresh = latestMarketsLoad;
-    refreshed = await refresh;
+    refreshed = (await refresh).ok;
   }
   if (!refreshed) {
     setErrorNotice("Trade executed, but your positions could not be refreshed.");
@@ -1688,6 +1758,9 @@ export async function loadChats(loadMessages = true, preferredChatId?: string | 
     ...(selectedId !== s.selectedChatId ? { chatMessages: [] } : {}),
     alphaInvites: invitesRes.ok ? invitesRes.data : s.alphaInvites,
   });
+  if (!chatsRes.ok && loadMessages) {
+    setErrorNotice(chatsRes.message);
+  }
   if (loadMessages && selectedId) {
     await loadChatMessages(selectedId);
   }
@@ -1719,7 +1792,10 @@ export async function selectChat(chatId: string): Promise<void> {
     selectedChatId: chatId,
     ...(s.selectedChatId !== chatId ? { chatMessages: [] } : {}),
   });
-  await loadChatMessages(chatId);
+  const loaded = await loadChatMessages(chatId);
+  if (!loaded && getStoreSnapshot().selectedChatId === chatId) {
+    setErrorNotice("Failed to load messages. Please try again.");
+  }
 }
 
 export async function startDirectChat(targetHandleOrId: string): Promise<boolean> {
@@ -2133,6 +2209,7 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
   const loadId = ++profileLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const lower = handle.toLowerCase();
   const bundle = s.profileBundle;
   const sameProfile =
@@ -2163,7 +2240,11 @@ export async function loadProfile(handleOrSelf?: string | null): Promise<void> {
     setStoreState({
       profileBundle: {
         ...fetched,
-        posts: dropPostsDeletedSince(preserveEngagementSince(fetched.posts, engagementAtStart), deletionsAtStart),
+        posts: dropAuthorsHiddenSince(
+          dropPostsDeletedSince(preserveEngagementSince(fetched.posts, engagementAtStart), deletionsAtStart),
+          hidesAtStart,
+          fetched.summary.handle,
+        ),
         postsCount: Math.max(0, fetched.postsCount - droppedOwnPosts),
       },
       profileLoading: false,
@@ -2189,6 +2270,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
   const loadId = ++profileRepliesLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileRepliesLoading: true });
   const url = appendAnonymousModeParam(
@@ -2204,7 +2286,7 @@ export async function loadProfileReplies(handleOrSelf?: string | null): Promise<
     return;
   }
   if (res.ok) {
-    setStoreState({ profileReplies: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), profileRepliesLoading: false });
+    setStoreState({ profileReplies: dropAuthorsHiddenSince(dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), hidesAtStart), profileRepliesLoading: false });
     return;
   }
   setStoreState({ profileRepliesLoading: false });
@@ -2234,6 +2316,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
   const loadId = ++profileLikesLoadCount;
   const engagementAtStart = captureEngagement();
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   const viewerId = s.viewer?.accountId ?? null;
   setStoreState({ profileLikesLoading: true });
   const url = appendAnonymousModeParam(`/api/users/${encodeURIComponent(handle)}/likes?limit=40`, s);
@@ -2246,7 +2329,7 @@ export async function loadProfileLikes(handleOrSelf?: string | null): Promise<vo
     return;
   }
   if (res.ok) {
-    setStoreState({ profileLikes: dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), profileLikesLoading: false });
+    setStoreState({ profileLikes: dropAuthorsHiddenSince(dropPostsDeletedSince(preserveEngagementSince(res.data.items, engagementAtStart), deletionsAtStart), hidesAtStart), profileLikesLoading: false });
     return;
   }
   setStoreState({ profileLikesLoading: false });
@@ -2283,6 +2366,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
   if (!bundle || !bundle.postsNextCursor || s.profileLoading || s.profileLoadingMore) return;
   const loadId = profileLoadCount;
   const deletionsAtStart = capturePostDeletions();
+  const hidesAtStart = captureAuthorHides();
   setStoreState({ profileLoadingMore: true });
   const url = appendAnonymousModeParam(
     `/api/users/${encodeURIComponent(bundle.summary.handle)}?cursor=${encodeURIComponent(bundle.postsNextCursor)}`,
@@ -2301,7 +2385,7 @@ export async function loadMoreProfilePosts(): Promise<void> {
       setStoreState({
         profileBundle: {
           ...latest,
-          posts: appendUniquePosts(latest.posts, dropPostsDeletedSince(res.data.posts, deletionsAtStart)),
+          posts: appendUniquePosts(latest.posts, dropAuthorsHiddenSince(dropPostsDeletedSince(res.data.posts, deletionsAtStart), hidesAtStart, latest.summary.handle)),
           postsNextCursor: res.data.postsNextCursor,
         },
         profileLoadingMore: false,
@@ -2533,7 +2617,7 @@ export async function toggleFollow(handle: string, currentlyFollowing?: boolean)
     const curBundleHandle = cur.profileBundle?.summary.handle.toLowerCase() ?? null;
     const targetStateStale = curBundleHandle === lower
       && cur.profileBundle?.summary.isFollowing !== nextFollowing;
-    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale)) {
+    if (cur.route === "Profile" && curBundleHandle !== null && (curBundleHandle !== optimisticBundleHandle || targetStateStale || profileBundleGen !== optimisticBundleGen)) {
       void loadProfile(cur.profileBundle?.summary.handle);
     }
     setStatusNotice(nextFollowing ? `Following @${handle}.` : `Unfollowed @${handle}.`);

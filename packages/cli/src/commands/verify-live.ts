@@ -167,6 +167,7 @@ export function buildFeedVerificationChecks(options: {
         method: "POST",
         headers: { authorization: `Bearer ${cronSecret}` },
         expectedStatus: 200,
+        timeoutMs: 90_000,
       },
     );
   }
